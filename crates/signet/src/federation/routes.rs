@@ -258,25 +258,45 @@ async fn callback(
     // 1. Upstream error short-circuit (user denied access, etc.).
     if let Some(err) = q.error {
         tracing::warn!(provider = %provider_code, upstream = %err, "sso callback upstream error");
-        return Ok(
-            sso_fail_redirect(&state, jar, &provider_code, "upstream_error", ip, user_agent).await,
-        );
+        return Ok(sso_fail_redirect(
+            &state,
+            jar,
+            &provider_code,
+            "upstream_error",
+            ip,
+            user_agent,
+        )
+        .await);
     }
     let (Some(code), Some(returned_state)) = (q.code.as_deref(), q.state.as_deref()) else {
-        return Ok(sso_fail_redirect(&state, jar, &provider_code, "missing_code", ip, user_agent).await);
+        return Ok(
+            sso_fail_redirect(&state, jar, &provider_code, "missing_code", ip, user_agent).await,
+        );
     };
 
     // 2. Double-submit state check: cookie value must match the DB row's
     //    hash and the row must be fresh. One-time: delete on read.
     let Some(cookie_state) = jar.get(STATE_COOKIE).map(|c| c.value().to_owned()) else {
-        return Ok(
-            sso_fail_redirect(&state, jar, &provider_code, "state_mismatch", ip, user_agent).await,
-        );
+        return Ok(sso_fail_redirect(
+            &state,
+            jar,
+            &provider_code,
+            "state_mismatch",
+            ip,
+            user_agent,
+        )
+        .await);
     };
     if cookie_state != returned_state {
-        return Ok(
-            sso_fail_redirect(&state, jar, &provider_code, "state_mismatch", ip, user_agent).await,
-        );
+        return Ok(sso_fail_redirect(
+            &state,
+            jar,
+            &provider_code,
+            "state_mismatch",
+            ip,
+            user_agent,
+        )
+        .await);
     }
     let row: Option<(uuid::Uuid, String, serde_json::Value)> = sqlx::query_as(
         "DELETE FROM identity_link_challenges \
@@ -288,14 +308,26 @@ async fn callback(
     .await
     .map_err(AppError::from)?;
     let Some((_challenge_id, challenge_provider, _challenge_meta)) = row else {
-        return Ok(
-            sso_fail_redirect(&state, jar, &provider_code, "state_mismatch", ip, user_agent).await,
-        );
+        return Ok(sso_fail_redirect(
+            &state,
+            jar,
+            &provider_code,
+            "state_mismatch",
+            ip,
+            user_agent,
+        )
+        .await);
     };
     if challenge_provider != provider_code {
-        return Ok(
-            sso_fail_redirect(&state, jar, &provider_code, "state_mismatch", ip, user_agent).await,
-        );
+        return Ok(sso_fail_redirect(
+            &state,
+            jar,
+            &provider_code,
+            "state_mismatch",
+            ip,
+            user_agent,
+        )
+        .await);
     }
     let jar = jar.remove(STATE_COOKIE);
 
@@ -313,20 +345,30 @@ async fn callback(
     let tokens = match tokens {
         Ok(t) => t,
         Err(_) => {
-            return Ok(
-                sso_fail_redirect(&state, jar, &provider_code, "upstream_error", ip, user_agent)
-                    .await,
-            );
+            return Ok(sso_fail_redirect(
+                &state,
+                jar,
+                &provider_code,
+                "upstream_error",
+                ip,
+                user_agent,
+            )
+            .await);
         }
     };
     let profile = match loaded.adapter.profile(&loaded.cfg, &tokens).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(provider = %provider_code, error = %e, "sso profile fetch failed");
-            return Ok(
-                sso_fail_redirect(&state, jar, &provider_code, "upstream_error", ip, user_agent)
-                    .await,
-            );
+            return Ok(sso_fail_redirect(
+                &state,
+                jar,
+                &provider_code,
+                "upstream_error",
+                ip,
+                user_agent,
+            )
+            .await);
         }
     };
 
@@ -345,9 +387,7 @@ async fn callback(
         None => {
             // Already signed in (e.g. linking from the profile page): bind to
             // the current session user without requiring an email match.
-            if let Ok(session_user) =
-                crate::auth::session::current_user(&state, &headers).await
-            {
+            if let Ok(session_user) = crate::auth::session::current_user(&state, &headers).await {
                 sqlx::query(
                     "INSERT INTO user_identities \
                          (id, user_id, provider_code, subject, email, raw, last_login_at) \
@@ -383,13 +423,9 @@ async fn callback(
                         email_verified = profile.email_verified,
                         "sso auto-link skipped; stashing pending link"
                     );
-                    let jar = super::link::stash_pending_link(
-                        &state,
-                        jar,
-                        &provider_code,
-                        &profile,
-                    )
-                    .await;
+                    let jar =
+                        super::link::stash_pending_link(&state, jar, &provider_code, &profile)
+                            .await;
                     return Ok(sso_fail_redirect(
                         &state,
                         jar,
