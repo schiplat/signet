@@ -5,7 +5,7 @@
 # compile in this stage.
 #
 # Build context must contain a single executable named `signet`
-# (see release-signet.yml).
+# (see build-signet-image.yml).
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
