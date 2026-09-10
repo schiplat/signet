@@ -10,6 +10,13 @@ Unified identity authentication (SSO / OIDC IdP) service.
 
 > Naming note: this project is an SSO, **not** Alibaba Cloud Object Storage (OSS).
 
+## Features
+
+- OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
+- Dashboard: users, clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
+- **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
+  Binding policy (anti-takeover): verified email match → auto-link; otherwise stash pending identity (15 min) and complete on the next local password / MFA / passkey login. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+
 ## Documentation
 
 | Document | Contents |
@@ -18,7 +25,7 @@ Unified identity authentication (SSO / OIDC IdP) service.
 | [docs/security.md](./docs/security.md) | **Security design summary** (credential storage, auth, sessions, MFA, OIDC, audit, keys) |
 | [docs/client-integration.md](./docs/client-integration.md) | **Client OIDC integration** (authorize/token/PKCE/IP allowlist) |
 | [docs/integrations.md](./docs/integrations.md) | **Integrations** (RFC 7591 dynamic registration · Webhooks/Feishu · SCIM v2) |
-| [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API** (unified `/api/v1/...`) |
+| [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API** (unified `/api/v1/...`, incl. SSO federation) |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / recovery codes / global & per-user enforcement |
 | [docs/dashboard.md](./docs/dashboard.md) | Dashboard pages & permissions |
 
@@ -43,6 +50,13 @@ cargo run -p signet
 
 Health check: `GET http://localhost:8443/health`
 
+Before committing Rust changes:
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+```
+
 ### 3. Dashboard (Vue)
 
 ```bash
@@ -54,7 +68,7 @@ pnpm build
 cd .. && cargo build -p signet
 ```
 
-In production/staging, Rust serves `dashboard/dist` via `rust-embed`.
+In production/staging, Rust serves `dashboard/dist` via `rust-embed` (the folder must exist before `cargo build`).
 
 ### 4. Account model
 
@@ -62,6 +76,7 @@ In production/staging, Rust serves `dashboard/dist` via `rust-embed`.
 - Roles: `admin` / `manager` / `member` (see design doc)  
 - First-run **`/setup`** page creates the initial `admin`  
 - Optional **MFA** (global or per-user enforced); users may self-enroll from the account menu  
+- Optional **third-party providers** under **Integrations**; users manage linked accounts from the account menu  
 
 ### 5. Observability
 
@@ -89,16 +104,35 @@ In production/staging, Rust serves `dashboard/dist` via `rust-embed`.
 | `POST /api/v1/setup` | Create the first admin on first run |
 | `POST /api/v1/password-reset/*` | Password reset (request/confirm) |
 | `GET/POST/DELETE /api/v1/me/passkeys/*` | Passkey (WebAuthn) register/sign-in/manage |
+| `GET /api/v1/auth/sso/{provider}/start` | Start third-party SSO |
+| `GET /api/v1/auth/sso/{provider}/callback` | SSO callback (bind / pending link / session) |
+| `GET /api/v1/auth/sso/providers` | Public list of enabled SSO providers |
+| `GET/DELETE /api/v1/auth/sso/identities/*` | List / unlink linked third-party accounts |
 | `/scim/v2/*` | SCIM v2 user/group sync (Bearer auth) |
 | `/api/v1/*` | Dashboard / session / admin API (**unified prefix**, see [api-v1.md](./docs/api-v1.md)) |
 
 Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/stats`.
 
+## CI & release
+
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| **CI** | Push / PR on source paths | Dashboard typecheck + build; Rust `fmt` / `clippy` / `test` (needs `dashboard/dist`) |
+| **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
+| **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
+
+Tag a release (example): `git tag -a v0.4.3 -m v0.4.3 && git push origin v0.4.3`.
+
+Deploy compose lives under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`).
+
 ## Repository structure
 
 ```text
-crates/signet/     Axum OIDC IdP + /api/v1
-dashboard/         Vue 3 + Tailwind CSS v4
-migrations/        Postgres migrations (MFA, audit IP, client IP allowlist, password reset, webhook, SCIM, WebAuthn)
-docs/              design · security · client-integration · integrations · api-v1 · mfa · dashboard
+crates/signet/          Axum OIDC IdP + /api/v1 (+ federation/)
+dashboard/              Vue 3 + Tailwind CSS v4
+migrations/             Postgres migrations (… audit client_id, identity federation, …)
+build/Dockerfile.runtime  Runtime image (copies prebuilt binary; no compile)
+.github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
+deploy/                 Production compose + env template
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard
 ```
