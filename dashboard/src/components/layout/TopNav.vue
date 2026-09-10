@@ -180,31 +180,16 @@ function scopeLabel(s: string) {
   return CONSENT_SCOPE_LABELS[s] ?? s;
 }
 
-const SSO_TYPE_LABELS: Record<SsoProviderType, string> = {
-  github: "GitHub",
-  google: "Google",
-  feishu: "Feishu",
-  wechat: "WeChat",
-  oidc: "OIDC",
+const SSO_TYPE_TAG_CLASS: Record<SsoProviderType, string> = {
+  github: "bg-[hsl(217_30%_20%)] text-white",
+  google: "bg-[hsl(0_70%_55%)] text-white",
+  feishu: "bg-[hsl(211_100%_50%)] text-white",
+  wechat: "bg-[hsl(142_70%_40%)] text-white",
+  oidc: "bg-primary/10 text-primary",
 };
 
-function ssoTypeLabel(type: string) {
-  return SSO_TYPE_LABELS[type as SsoProviderType] ?? type;
-}
-
 function ssoTypeTagClass(type: string) {
-  switch (type) {
-    case "github":
-      return "bg-[hsl(217_30%_20%)] text-white";
-    case "google":
-      return "bg-[hsl(0_70%_55%)] text-white";
-    case "feishu":
-      return "bg-[hsl(211_100%_50%)] text-white";
-    case "wechat":
-      return "bg-[hsl(142_70%_40%)] text-white";
-    default:
-      return "bg-primary/10 text-primary";
-  }
+  return SSO_TYPE_TAG_CLASS[type as SsoProviderType] ?? SSO_TYPE_TAG_CLASS.oidc;
 }
 
 async function openConsents() {
@@ -1166,12 +1151,12 @@ onUnmounted(() => {
           >
             <div class="min-w-0">
               <div class="flex min-w-0 items-center gap-2">
-                <p class="truncate text-sm font-medium">{{ i.provider_display_name }}</p>
                 <span
-                  class="inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  class="inline-flex max-w-full truncate items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold tracking-wide"
                   :class="ssoTypeTagClass(i.provider_type)"
+                  :title="i.provider_code"
                 >
-                  {{ ssoTypeLabel(i.provider_type) }}
+                  {{ i.provider_display_name }}
                 </span>
               </div>
               <p class="mt-0.5 text-[11px] text-muted-foreground">{{ i.email ?? i.provider_code }}</p>
@@ -1213,14 +1198,12 @@ onUnmounted(() => {
               class="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-3 text-sm transition-colors hover:bg-muted/50"
             >
               <span class="min-w-0">
-                <span class="flex min-w-0 items-center gap-2">
-                  <span class="truncate font-medium">{{ p.display_name }}</span>
-                  <span
-                    class="inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                    :class="ssoTypeTagClass(p.type)"
-                  >
-                    {{ ssoTypeLabel(p.type) }}
-                  </span>
+                <span
+                  class="inline-flex max-w-full truncate items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold tracking-wide"
+                  :class="ssoTypeTagClass(p.type)"
+                  :title="p.code"
+                >
+                  {{ p.display_name }}
                 </span>
               </span>
               <span class="shrink-0 text-xs text-primary">Link →</span>
