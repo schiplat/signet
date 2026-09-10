@@ -1,0 +1,24 @@
+---
+description: Run cargo fmt and clippy before committing Rust source changes
+alwaysApply: true
+---
+
+# Pre-commit: fmt + clippy
+
+Whenever **Rust source** changes (`crates/**/*.rs`, `Cargo.toml`, `Cargo.lock`) and you are about to `git commit` (or the user asks to commit / retag / push a release that includes those changes):
+
+1. Run **both** commands and wait for success **before** staging/committing:
+   ```bash
+   cargo fmt --all
+   cargo clippy --all-targets --all-features -- -D warnings
+   ```
+2. If either fails, fix the issues, re-run both, then commit. Do not commit with known fmt/clippy failures.
+3. Include any rustfmt-touched files in the same commit (or a dedicated "Format … with rustfmt" commit if that matches recent history).
+4. Optional sanity check matching CI:
+   ```bash
+   cargo fmt --all -- --check
+   ```
+
+Do **not** skip this for "small" Rust edits, federation/SSO work, or when the user only says "commit" / "push" / "retag".
+
+Dashboard-only changes (`dashboard/**`) do not require cargo fmt/clippy; use `pnpm typecheck` in `dashboard/` when TypeScript/Vue source changed and a commit is requested.
