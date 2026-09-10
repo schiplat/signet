@@ -957,6 +957,7 @@ export async function fetchEnabledSsoProviders() {
 
 export type LinkedIdentity = {
   provider_code: string;
+  provider_type: SsoProviderType;
   provider_display_name: string;
   email: string | null;
   linked_at: string;

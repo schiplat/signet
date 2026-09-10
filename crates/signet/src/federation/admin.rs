@@ -492,6 +492,7 @@ fn db_conflict(e: sqlx::Error, code: &str) -> AppError {
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
 struct UserIdentity {
     provider_code: String,
+    provider_type: String,
     provider_display_name: String,
     email: Option<String>,
     linked_at: chrono::DateTime<chrono::Utc>,
@@ -525,7 +526,7 @@ async fn list_my_identities(
     let user = current_user(&state, &headers).await?;
     let rows: Vec<UserIdentity> = sqlx::query_as(
         r#"
-        SELECT ui.provider_code, p.display_name AS provider_display_name,
+        SELECT ui.provider_code, p.provider_type, p.display_name AS provider_display_name,
                ui.email, ui.linked_at, ui.last_login_at
         FROM user_identities ui
         JOIN upstream_providers p ON p.code = ui.provider_code

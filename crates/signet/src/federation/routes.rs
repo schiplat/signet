@@ -258,16 +258,17 @@ async fn callback(
 
     // 1. Upstream error short-circuit (user denied access, etc.).
     if let Some(err) = q.error {
-        tracing::warn!(provider = %provider_code, upstream = %err, "sso callback upstream error");
-        return Ok(sso_fail_redirect(
-            &state,
-            jar,
-            &provider_code,
-            "upstream_error",
-            ip,
-            user_agent,
-        )
-        .await);
+        let reason = match err.as_str() {
+            // OAuth / Feishu: user clicked cancel / refuse on the consent page.
+            "access_denied" | "user_denied" | "consent_required" => "access_denied",
+            _ => "upstream_error",
+        };
+        if reason == "access_denied" {
+            tracing::info!(provider = %provider_code, upstream = %err, "sso authorization denied by user");
+        } else {
+            tracing::warn!(provider = %provider_code, upstream = %err, "sso callback upstream error");
+        }
+        return Ok(sso_fail_redirect(&state, jar, &provider_code, reason, ip, user_agent).await);
     }
     let (Some(code), Some(returned_state)) = (q.code.as_deref(), q.state.as_deref()) else {
         return Ok(

@@ -205,6 +205,7 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   provider_disabled: "This sign-in provider is currently disabled.",
   state_mismatch: "Sign-in session expired. Please try again.",
   upstream_error: "The sign-in provider returned an error. Please try again.",
+  access_denied: "Sign-in was cancelled. You can try again or use your password.",
   missing_code: "Sign-in was cancelled or incomplete. Please try again.",
   no_matching_account:
     "Could not sign you in with this third-party account. The provider must return a verified email (for first-time auto-create), or sign in with your existing password within 15 minutes to link it.",
