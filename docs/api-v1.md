@@ -80,6 +80,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/me/mfa/rebind/start\|confirm` | 换绑 |
 | `POST` | `/api/v1/me/mfa/disable` | 用户自主禁用 MFA（需当前 TOTP，body `{ code }`；全局或用户级强制时返回 400） |
 | `GET/PATCH` | `/api/v1/admin/settings/mfa` | **admin**：全局强制开关 |
+| `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**：SSO JIT 开户开关 `{ "jit_provision": bool }` |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
 
 ---
@@ -90,7 +91,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/admin/users` | 列表（含 `mfa_required` / `totp_enabled` / `groups` / `phone`） |
+| `GET` | `/api/v1/admin/users` | 列表（含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities`） |
 | `GET` | `/api/v1/admin/users/email-check?email=` | 邮箱查重，返回 `{ "exists": bool }` |
 | `GET` | `/api/v1/admin/users/phone-check?phone=&exclude_id=` | 手机查重，返回 `{ "exists": bool }`（`exclude_id` 可选，编辑时排除自身） |
 | `POST` | `/api/v1/admin/users` | 创建（可带 `groups`、`phone`） |
@@ -102,6 +103,8 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | 强制下线该用户全部会话 |
 
 `groups` 为用户组（`TEXT[]`），会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`，供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
+
+列表额外字段：`provisioned_via`（如 `sso_jit` 表示第三方 JIT 开户，否则 `null`）、`has_password`、`sso_identities`（`[{ provider_code, display_name, provider_type }]`，已绑定的第三方）。
 
 > `phone` 当前仅作**联系信息**，未做短信验证绑定；验证绑定（SMS OTP）为规划项，见 [design.md](./design.md) Phase 4。
 
@@ -261,22 +264,21 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 | `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话或暂存待绑定（`auth.login.thirdparty` 审计） |
 | `GET /api/v1/auth/sso/providers` | 公开接口：返回启用中的 provider（登录页按钮用） |
 
-### 绑定策略（防账号接管）
+### 绑定策略（防账号接管 + OA JIT）
 
 回调时按以下顺序判定（任一成功即结束）：
 
 1. **已绑定**：`(provider_code, subject)` 已在 `user_identities` → 直接签发会话登录。
-2. **已登录会话**：浏览器已有有效 `signet_session`（例如在个人中心主动去绑）→ 把该上游身份绑到当前用户并登录。
-3. **邮箱自动绑定**：上游返回的 email **已验证**（`email_verified`），且 `lower(email)` 精确匹配本地 `status=active` 用户 → 自动写入 `user_identities` 并登录。
-4. **否则 → 暂存待绑定**：不创建本地账号。将 `(provider, subject, profile)` 写入 `identity_link_challenges`（`subject` 非空），并设置 HttpOnly cookie `signet_sso_pending`（**15 分钟**）；浏览器重定向回 `/login?sso_error=no_matching_account`。
-
-**完成待绑定**：用户在 15 分钟内用密码 / MFA / Passkey **成功登录本地账号**后，服务端消费 `signet_sso_pending`，把暂存身份写入 `user_identities`（审计 `auth.identity.link`，`via=pending_after_login`）。之后再点同一第三方即可直接登录。
+2. **已登录会话**：浏览器已有有效 `signet_session` → 把该上游身份绑到当前用户并登录。
+3. **邮箱自动绑定**：上游返回的 email **已验证**，且 `lower(email)` 精确匹配本地 `status=active` 用户 → 自动写入 `user_identities` 并登录。
+4. **JIT 开户**（默认开启，可关）：上游 email **已验证**且本地尚无该邮箱 → 自动创建 `role=member`、无密码的本地用户，写入绑定并登录。适合公司飞书 / Google / OIDC OA「首次点登录即可进系统、无需管理员预开户」。
+5. **否则 → 暂存待绑定**：将身份写入 `identity_link_challenges` + cookie `signet_sso_pending`（**15 分钟**），重定向 `/login?sso_error=no_matching_account`。用户在时限内用密码 / MFA / Passkey 登录已有账号后完成绑定。
 
 注意：
 
-- 不会因未匹配而自动注册新用户。
-- 若暂存的 `subject` 已被其他本地用户占用，登录后不会抢绑（仅清除 pending cookie）。
-- 飞书 / 微信等若未返回可用邮箱，通常走第 4 步（暂存 → 本地登录完成绑定）。微信 Open Platform 一般无邮箱。
+- JIT **不会**在无验证邮箱时开户（微信开放平台通常无邮箱 → 仍需管理员开户或邀请绑定）。
+- 飞书需在应用侧开通邮箱相关权限，且 profile 能返回 `email` / `enterprise_email`，否则走第 5 步。对 `GET /open-apis/authen/v1/user_info`：`email` 需 **获取用户邮箱信息**（`contact:user.email:readonly`）；`enterprise_email` 另需 **获取用户受雇信息**（`contact:user.employee:readonly`）且租户已启用飞书邮箱。权限在开放平台开通并发布后生效（授权 URL 不带 `scope=`）。
+- 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
 
 失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `missing_code` / `no_matching_account`。
 
@@ -289,6 +291,7 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 | `PUT /api/v1/admin/sso/providers/{code}` | 更新；`client_secret` 留空保持不变，传入即轮换 |
 | `DELETE /api/v1/admin/sso/providers/{code}` | 删除（级联删除绑定关系） |
 | `POST /api/v1/admin/sso/providers/{code}/enabled` | 启用/禁用 `{"enabled": bool}` |
+| `GET/PATCH /api/v1/admin/settings/sso` | JIT 开户开关 `{"jit_provision": bool}`（写入 `app_settings`） |
 | `GET /api/v1/auth/sso/callback-url` | 返回统一 URL 模板：`{base}/api/v1/auth/sso/{provider}/callback` |
 
 **回调地址规范（所有 provider 同一格式）**：  

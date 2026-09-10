@@ -20,13 +20,14 @@ import {
   resetUserMfa,
   revokeUserSessions,
   updateUser,
+  type AdminUser,
   type PublicUser,
   type UserRole,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
-const users = ref<PublicUser[]>([]);
+const users = ref<AdminUser[]>([]);
 const loading = ref(true);
 const error = ref("");
 const showCreate = ref(false);
@@ -65,12 +66,16 @@ const roleOptions = computed(() => {
 const filteredUsers = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
   if (!q) return users.value;
-  return users.value.filter((u) =>
-    [u.email, u.username ?? "", u.display_name, u.status, u.role]
+  return users.value.filter((u) => {
+    const sso = u.sso_identities
+      .flatMap((i) => [i.display_name, i.provider_code, i.provider_type])
+      .join(" ");
+    const origin = u.provisioned_via ?? "";
+    return [u.email, u.username ?? "", u.display_name, u.status, u.role, sso, origin]
       .join(" ")
       .toLowerCase()
-      .includes(q),
-  );
+      .includes(q);
+  });
 });
 
 const { sorted, toggleSort, sortIndicator } = useClientSort(filteredUsers, {
@@ -518,6 +523,9 @@ async function onBatchDisable() {
                   <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
                     MFA
                   </th>
+                  <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                    SSO
+                  </th>
                   <SortableTh
                     label="Status"
                     column="status"
@@ -587,6 +595,36 @@ async function onBatchDisable() {
                       Required
                     </span>
                     <span v-else class="text-muted-foreground">Off</span>
+                  </td>
+                  <td class="px-5 py-3 text-xs">
+                    <div
+                      v-if="u.provisioned_via === 'sso_jit' || u.sso_identities.length"
+                      class="flex flex-wrap items-center gap-1"
+                    >
+                      <span
+                        v-if="u.provisioned_via === 'sso_jit'"
+                        class="inline-flex items-center rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-400"
+                        title="Account was created by SSO JIT provisioning"
+                      >
+                        SSO origin
+                      </span>
+                      <span
+                        v-for="i in u.sso_identities"
+                        :key="i.provider_code"
+                        class="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-foreground"
+                        :title="`Linked ${i.provider_type}: ${i.provider_code}`"
+                      >
+                        {{ i.display_name }}
+                      </span>
+                      <span
+                        v-if="!u.has_password && u.sso_identities.length"
+                        class="text-[10px] text-muted-foreground"
+                        title="No local password set"
+                      >
+                        SSO-only
+                      </span>
+                    </div>
+                    <span v-else class="text-muted-foreground">—</span>
                   </td>
                   <td class="px-5 py-3 text-xs">
                     <span

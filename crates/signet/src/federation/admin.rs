@@ -21,7 +21,8 @@ use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use sqlx::PgPool;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -34,6 +35,10 @@ pub fn router() -> Router<AppState> {
             "/admin/sso/providers/{code}/enabled",
             post(admin_set_enabled),
         )
+        .route(
+            "/admin/settings/sso",
+            get(get_sso_settings).patch(patch_sso_settings),
+        )
         // Public: the login page needs the enabled-provider list pre-auth.
         .route("/auth/sso/providers", get(public_enabled_providers))
         .route("/auth/sso/identities", get(list_my_identities))
@@ -42,6 +47,73 @@ pub fn router() -> Router<AppState> {
             axum::routing::delete(unlink_identity),
         )
         .route("/auth/sso/callback-url", get(callback_url))
+}
+
+/// Whether first-time SSO with a verified email may create a local member.
+///
+/// Reads `app_settings.sso.jit_provision`; if the row is missing, falls back
+/// to `SIGNET_SSO_JIT_PROVISION` (default true).
+pub async fn sso_jit_provision_enabled(pool: &PgPool, env_default: bool) -> AppResult<bool> {
+    let value: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'sso.jit_provision'")
+            .fetch_optional(pool)
+            .await?;
+    Ok(value.and_then(|v| v.as_bool()).unwrap_or(env_default))
+}
+
+async fn set_sso_jit_provision(pool: &PgPool, enabled: bool) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('sso.jit_provision', $1, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        "#,
+    )
+    .bind(json!(enabled))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn get_sso_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    let actor = current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let jit_provision =
+        sso_jit_provision_enabled(&state.pool, state.config.sso_jit_provision).await?;
+    Ok(Json(json!({ "jit_provision": jit_provision })))
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchSsoSettings {
+    jit_provision: bool,
+}
+
+async fn patch_sso_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<PatchSsoSettings>,
+) -> AppResult<Json<Value>> {
+    let actor = current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    set_sso_jit_provision(&state.pool, body.jit_provision).await?;
+    record(
+        &state.pool,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.sso_update",
+            resource_type: "settings",
+            resource_id: Some("sso.jit_provision".into()),
+            detail: json!({ "jit_provision": body.jit_provision }),
+            ip: None,
+            user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+    Ok(Json(json!({ "jit_provision": body.jit_provision })))
 }
 
 // ---------------------------------------------------------------------------

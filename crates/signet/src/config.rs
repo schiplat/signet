@@ -29,6 +29,10 @@ pub struct Config {
     pub scim_bearer_token: Option<String>,
     pub webauthn_rp_id: String,
     pub webauthn_rp_origin: String,
+    /// Fallback when `app_settings.sso.jit_provision` is missing. Prefer the
+    /// Dashboard Settings toggle (persisted in DB). When true, SSO with a
+    /// verified email that matches no local user creates a `member` (JIT).
+    pub sso_jit_provision: bool,
 }
 
 impl Config {
@@ -105,6 +109,11 @@ impl Config {
                 .unwrap_or_else(|_| "localhost".into()),
             webauthn_rp_origin: env::var("SIGNET_WEBAUTHN_RP_ORIGIN")
                 .unwrap_or_else(|_| "http://localhost:8443".into()),
+            // Default on: Feishu/Google/OIDC OA flows can first-login without
+            // an admin pre-creating the user (requires verified email).
+            sso_jit_provision: env::var("SIGNET_SSO_JIT_PROVISION")
+                .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no"))
+                .unwrap_or(true),
         })
     }
 }

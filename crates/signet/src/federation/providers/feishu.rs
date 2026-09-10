@@ -15,8 +15,11 @@ impl Feishu {
 
 impl UpstreamProvider for Feishu {
     fn scopes(&self, cfg: &ProviderConfig) -> String {
-        // Authorize URL itself does not take scope; kept for completeness.
-        cfg.effective_scopes("contact:user.base:readonly")
+        // App console must grant these; Feishu authorize URL does not send scope=.
+        // email → contact:user.email:readonly; enterprise_email → contact:user.employee:readonly.
+        cfg.effective_scopes(
+            "contact:user.base:readonly contact:user.email:readonly contact:user.employee:readonly",
+        )
     }
 
     fn authorize_url<'a>(

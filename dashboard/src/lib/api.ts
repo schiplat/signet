@@ -14,7 +14,21 @@ export type PublicUser = {
   totp_enabled: boolean;
   groups: string[];
   phone: string | null;
+  /** First-create source (`sso_jit`, …). null = local/admin/SCIM/legacy. */
+  provisioned_via: string | null;
   created_at: string;
+};
+
+export type SsoIdentityBrief = {
+  provider_code: string;
+  display_name: string;
+  provider_type: string;
+};
+
+/** Admin Users list row (includes SSO link summary). */
+export type AdminUser = PublicUser & {
+  has_password: boolean;
+  sso_identities: SsoIdentityBrief[];
 };
 
 export type LoginResult =
@@ -168,6 +182,21 @@ export async function updateMfaSettings(body: { required_globally: boolean }) {
   return parseJson<{ required_globally: boolean }>(res);
 }
 
+export async function fetchSsoSettings() {
+  const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
+  return parseJson<{ jit_provision: boolean }>(res);
+}
+
+export async function updateSsoSettings(body: { jit_provision: boolean }) {
+  const res = await fetch("/api/v1/admin/settings/sso", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<{ jit_provision: boolean }>(res);
+}
+
 export async function resetUserMfa(id: string) {
   const res = await fetch(`/api/v1/admin/users/${id}/mfa/reset`, {
     method: "POST",
@@ -233,7 +262,7 @@ export async function changePassword(body: {
 
 export async function listUsers() {
   const res = await fetch("/api/v1/admin/users", { credentials: "include" });
-  return parseJson<PublicUser[]>(res);
+  return parseJson<AdminUser[]>(res);
 }
 
 export async function checkEmail(email: string) {

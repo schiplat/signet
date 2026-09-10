@@ -45,6 +45,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 - 冻结行视觉标注（Frozen）  
 - 列表含 **Phone** 列（新建/编辑可填联系电话，选填；当前仅作联系信息，未做短信验证绑定）  
 - 列表含 **MFA 状态列**：`Enabled`（已绑定 TOTP）/ `Required`（策略强制、尚未绑定）/ `Off`  
+- 列表含 **SSO 列**：`SSO origin`（`provisioned_via=sso_jit`，第三方 JIT 开户）+ 已绑定 provider 名称徽章；无密码且已绑定时附带 `SSO-only`  
 - 操作：Edit / Freeze·Unfreeze / **Revoke sessions**；**Delete**、**Reset 2FA** 仅 admin  
 - Edit：角色、状态、**Require MFA**、**Groups**、**Phone**、密码等  
 - 新建/编辑时邮箱与手机均实时查重，命中重复时提示并禁用提交  
@@ -66,6 +67,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ### Settings（admin only）
 
 - Security：全局 **Require MFA for all users**
+- SSO / federation：**JIT provision on SSO**（首次第三方登录且已验证邮箱无本地用户时是否自动开户）
 
 ### Integrations（admin only）
 
@@ -81,7 +83,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 - Edit profile：可改显示名与**联系电话**（手机实时查重、排除自身）  
 - Active sessions：查看当前会话（IP、设备、时间），撤销单个或「除当前外全部」  
 - Passkeys：列出 / 注册（WebAuthn） / 删除 passkey  
-- **Linked accounts**：查看已绑定的第三方账号（provider、邮箱、绑定/最近使用时间），可 **Unlink**（需保留至少一种登录方式）。首次绑定见登录页第三方流程（邮箱自动匹配，或「暂存 15 分钟 → 本地登录完成绑定」）  
+- **Linked accounts**：查看已绑定的第三方账号，可 **Unlink**；下方 **Link a provider** 列出所有已启用且尚未绑定的 provider（GitHub / Google / 飞书 / 微信 / OIDC），点击后跳转上游授权，回调绑到**当前登录用户**。也可在登录页先点第三方 → 未匹配时 15 分钟内用密码登录自动完成绑定（适用于任意已启用 provider）。  
 - 恢复码一次性展示页提供 **Copy** 与 **Download**（含 enroll 与 regenerate 两种入口）
 
 ---
@@ -92,7 +94,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 2. **第三方登录**：若管理员启用了 provider，密码表单下方出现 "or continue with" 分隔线与按钮（GitHub / Google / 飞书 / 微信 / 自定义 OIDC），点击后跳转上游授权  
 3. **绑定结果**（回调后）：  
    - 已绑定或邮箱自动匹配 → 直接签发会话进入系统  
-   - 尚无匹配本地账号 → 回登录页 `?sso_error=no_matching_account`，并暂存待绑定（HttpOnly cookie，**15 分钟**）。用户**立即**用密码 / MFA / Passkey 登录本地账号后，自动完成绑定；之后同一第三方可直接登录  
+   - 尚无匹配本地账号 → 若开启 JIT 且上游有已验证邮箱，自动开户并登录；否则回登录页 `?sso_error=no_matching_account`（可 15 分钟内密码登录完成绑定）  
    - 已登录状态下走 SSO 回调 → 把该上游身份绑到当前用户  
 4. 若 `mfa_required` → TOTP 或恢复码  
 5. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  

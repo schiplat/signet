@@ -15,7 +15,7 @@ Unified identity authentication (SSO / OIDC IdP) service.
 - OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard: users, clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
 - **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
-  Binding policy (anti-takeover): verified email match → auto-link; otherwise stash pending identity (15 min) and complete on the next local password / MFA / passkey login. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+  Binding: verified email match → auto-link; else **JIT create** a `member` when Settings → JIT is on (default; also `SIGNET_SSO_JIT_PROVISION` fallback) and the provider returns a verified email; otherwise stash pending identity (15 min) for password bind. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
 ## Documentation
 

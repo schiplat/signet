@@ -239,7 +239,7 @@ async fn load_user(state: &AppState, user_id: Uuid) -> AppResult<User> {
         r#"
         SELECT id, sub, email, username, display_name, password_hash, status, role,
                mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone,
-               created_at, updated_at
+               provisioned_via, created_at, updated_at
         FROM users WHERE id = $1 AND status = 'active'
         "#,
     )

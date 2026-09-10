@@ -9,6 +9,7 @@
 //! - already linked `(provider, subject)` → sign in
 //! - authenticated session present → bind to that user and sign in
 //! - upstream email verified + matching local user → auto-link and sign in
+//! - JIT (default on): verified email, no local user → create `member` + link
 //! - otherwise → stash a pending link cookie and ask the visitor to sign in
 //!   locally; the next password/MFA/passkey login completes the bind
 //!
@@ -404,8 +405,9 @@ async fn callback(
                 .map_err(AppError::from)?;
                 session_user.id
             } else {
-                // Auto-link only when the upstream email is verified and
-                // matches an active local account (anti-takeover default).
+                // 1) Verified email matches an existing active user → link.
+                // 2) Else JIT-create a member when enabled + verified email.
+                // 3) Else stash pending link for a later local password login.
                 let auto: Option<uuid::Uuid> = match (&profile.email, profile.email_verified) {
                     (Some(email), true) => sqlx::query_scalar(
                         "SELECT id FROM users WHERE lower(email) = $1 AND status = 'active'",
@@ -416,12 +418,28 @@ async fn callback(
                     .map_err(AppError::from)?,
                     _ => None,
                 };
-                let Some(user_id) = auto else {
+                let jit_enabled = super::admin::sso_jit_provision_enabled(
+                    &state.pool,
+                    state.config.sso_jit_provision,
+                )
+                .await?;
+                let user_id = if let Some(uid) = auto {
+                    uid
+                } else if jit_enabled
+                    && profile.email_verified
+                    && profile
+                        .email
+                        .as_deref()
+                        .is_some_and(|e| !e.trim().is_empty())
+                {
+                    super::link::jit_create_user(&state, &provider_code, &profile).await?
+                } else {
                     tracing::info!(
                         provider = %provider_code,
                         has_email = profile.email.is_some(),
                         email_verified = profile.email_verified,
-                        "sso auto-link skipped; stashing pending link"
+                        jit = jit_enabled,
+                        "sso auto-link/jit skipped; stashing pending link"
                     );
                     let jar =
                         super::link::stash_pending_link(&state, jar, &provider_code, &profile)
@@ -439,7 +457,8 @@ async fn callback(
                 sqlx::query(
                     "INSERT INTO user_identities \
                          (id, user_id, provider_code, subject, email, raw, last_login_at) \
-                     VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+                     VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
+                     ON CONFLICT (provider_code, subject) DO NOTHING",
                 )
                 .bind(uuid::Uuid::new_v4())
                 .bind(user_id)

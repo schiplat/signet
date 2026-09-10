@@ -43,7 +43,7 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
         r#"
         SELECT id, sub, email, username, display_name, password_hash, status, role,
                mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone,
-               created_at, updated_at
+               provisioned_via, created_at, updated_at
         FROM users WHERE sub = $1 AND status = 'active'
         "#,
     )

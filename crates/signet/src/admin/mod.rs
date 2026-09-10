@@ -515,14 +515,74 @@ async fn stats(
 async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> AppResult<Json<Vec<PublicUser>>> {
+) -> AppResult<Json<Vec<AdminUserListItem>>> {
     require_staff_user(&state, &headers).await?;
     let users = sqlx::query_as::<_, User>(&format!(
         "SELECT {USER_COLS} FROM users ORDER BY created_at DESC"
     ))
     .fetch_all(&state.pool)
     .await?;
-    Ok(Json(users.into_iter().map(PublicUser::from).collect()))
+
+    #[derive(sqlx::FromRow)]
+    struct IdentRow {
+        user_id: Uuid,
+        provider_code: String,
+        display_name: String,
+        provider_type: String,
+    }
+
+    let idents = sqlx::query_as::<_, IdentRow>(
+        r#"
+        SELECT ui.user_id, ui.provider_code, p.display_name, p.provider_type
+        FROM user_identities ui
+        JOIN upstream_providers p ON p.code = ui.provider_code
+        ORDER BY ui.linked_at ASC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut by_user: std::collections::HashMap<Uuid, Vec<SsoIdentityBrief>> =
+        std::collections::HashMap::new();
+    for row in idents {
+        by_user
+            .entry(row.user_id)
+            .or_default()
+            .push(SsoIdentityBrief {
+                provider_code: row.provider_code,
+                display_name: row.display_name,
+                provider_type: row.provider_type,
+            });
+    }
+
+    let out = users
+        .into_iter()
+        .map(|u| {
+            let has_password = !u.password_hash.is_empty();
+            let sso_identities = by_user.remove(&u.id).unwrap_or_default();
+            AdminUserListItem {
+                user: PublicUser::from(u),
+                has_password,
+                sso_identities,
+            }
+        })
+        .collect();
+    Ok(Json(out))
+}
+
+#[derive(Debug, serde::Serialize)]
+struct SsoIdentityBrief {
+    provider_code: String,
+    display_name: String,
+    provider_type: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AdminUserListItem {
+    #[serde(flatten)]
+    user: PublicUser,
+    has_password: bool,
+    sso_identities: Vec<SsoIdentityBrief>,
 }
 
 #[derive(Debug, Deserialize)]

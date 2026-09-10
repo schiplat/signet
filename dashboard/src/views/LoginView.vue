@@ -207,7 +207,7 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   upstream_error: "The sign-in provider returned an error. Please try again.",
   missing_code: "Sign-in was cancelled or incomplete. Please try again.",
   no_matching_account:
-    "No Signet account matches this third-party identity yet. Sign in with your password now to link it (valid for 15 minutes).",
+    "Could not sign you in with this third-party account. The provider must return a verified email (for first-time auto-create), or sign in with your existing password within 15 minutes to link it.",
 };
 
 onMounted(async () => {

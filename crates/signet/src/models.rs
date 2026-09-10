@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
     mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
-    created_at, updated_at";
+    provisioned_via, created_at, updated_at";
 
 /// Normalizes a username for storage and lookup: trimmed, lowercased, and
 /// mapped to `None` when empty so email-only accounts keep a NULL username.
@@ -32,6 +32,8 @@ pub struct User {
     pub totp_secret: Option<String>,
     pub groups: Vec<String>,
     pub phone: Option<String>,
+    /// How the account was first created (`sso_jit`, …). `None` = local/admin/SCIM/legacy.
+    pub provisioned_via: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -67,6 +69,8 @@ pub struct PublicUser {
     pub totp_enabled: bool,
     pub groups: Vec<String>,
     pub phone: Option<String>,
+    /// First-create source (`sso_jit`, …). `None` for local/admin/SCIM/legacy.
+    pub provisioned_via: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -87,6 +91,7 @@ impl From<User> for PublicUser {
             totp_enabled: u.totp_enabled,
             groups: u.groups,
             phone: u.phone,
+            provisioned_via: u.provisioned_via,
             created_at: u.created_at,
         }
     }

@@ -15,7 +15,7 @@
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard：用户、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
-  绑定策略（防接管）：上游已验证邮箱与本地账号匹配 → 自动绑定；否则暂存待绑定身份（15 分钟），用户接着用密码 / MFA / Passkey 登录本地账号后自动完成绑定。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+  绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则在 Settings「JIT provision」开启（**默认开**，亦可用 `SIGNET_SSO_JIT_PROVISION` 回退）时 **JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
 ## 文档
 

@@ -9,6 +9,7 @@ import {
   checkPhone,
   fetchMeMfa,
   fetchMyIdentities,
+  fetchEnabledSsoProviders,
   fetchMySessions,
   listPasskeys,
   listMyConsents,
@@ -28,6 +29,7 @@ import {
   type LinkedIdentity,
   type Passkey,
   type SessionInfo,
+  type SsoProviderType,
 } from "@/lib/api";
 import { enrollPasskey } from "@/composables/usePasskeys";
 import { useAuthStore } from "@/stores/auth";
@@ -60,6 +62,12 @@ const identities = ref<LinkedIdentity[]>([]);
 const identitiesLoading = ref(false);
 const identitiesErr = ref("");
 const identitiesBusy = ref(false);
+const enabledSsoProviders = ref<{ code: string; type: SsoProviderType; display_name: string }[]>([]);
+
+const linkedProviderCodes = computed(() => new Set(identities.value.map((i) => i.provider_code)));
+const linkableProviders = computed(() =>
+  enabledSsoProviders.value.filter((p) => !linkedProviderCodes.value.has(p.code)),
+);
 const displayName = ref("");
 const profilePhone = ref("");
 const profileErr = ref("");
@@ -189,13 +197,23 @@ async function openIdentities() {
 async function loadIdentities() {
   identitiesLoading.value = true;
   try {
-    const res = await fetchMyIdentities();
+    const [res, providers] = await Promise.all([
+      fetchMyIdentities(),
+      fetchEnabledSsoProviders().catch(() => ({ providers: [] as typeof enabledSsoProviders.value })),
+    ]);
     identities.value = res.identities;
+    enabledSsoProviders.value = providers.providers;
   } catch (e) {
     identitiesErr.value = e instanceof Error ? e.message : "Failed to linked accounts";
   } finally {
     identitiesLoading.value = false;
   }
+}
+
+function linkIdentityUrl(providerCode: string): string {
+  // Full navigation so the session cookie rides along; SSO callback binds to
+  // the already-authenticated user when no prior link exists.
+  return `/api/v1/auth/sso/${encodeURIComponent(providerCode)}/start`;
 }
 
 async function onUnlinkIdentity(providerCode: string) {
@@ -1109,9 +1127,9 @@ onUnmounted(() => {
         <div v-else class="space-y-3">
           <p v-if="identitiesErr" class="field-error">{{ identitiesErr }}</p>
           <p class="text-xs text-muted-foreground">
-            Third-party accounts (GitHub, Google, Feishu, WeChat, OIDC) linked to this account.
-            You can sign in with them directly. Unlinking requires keeping at least one sign-in
-            method.
+            Link any enabled third-party provider (GitHub, Google, Feishu, WeChat, OIDC) to this
+            account. Unlinking requires keeping at least one sign-in method (password or another
+            provider).
           </p>
 
           <div
@@ -1140,11 +1158,29 @@ onUnmounted(() => {
             </UiButton>
           </div>
 
-          <div v-if="identities.length === 0" class="py-6 text-center text-sm text-muted-foreground">
-            No linked accounts
+          <div v-if="identities.length === 0" class="py-2 text-center text-sm text-muted-foreground">
+            No linked accounts yet
           </div>
 
-          <div class="flex justify-end">
+          <div v-if="linkableProviders.length" class="space-y-2 border-t border-border/50 pt-3">
+            <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+              Link a provider
+            </p>
+            <a
+              v-for="p in linkableProviders"
+              :key="p.code"
+              :href="linkIdentityUrl(p.code)"
+              class="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-3 text-sm transition-colors hover:bg-muted/50"
+            >
+              <span class="min-w-0">
+                <span class="font-medium">{{ p.display_name }}</span>
+                <span class="mt-0.5 block text-[11px] capitalize text-muted-foreground">{{ p.type }}</span>
+              </span>
+              <span class="shrink-0 text-xs text-primary">Link →</span>
+            </a>
+          </div>
+
+          <div class="flex justify-end pt-1">
             <UiButton type="button" size="sm" @click="showIdentities = false">Close</UiButton>
           </div>
         </div>
