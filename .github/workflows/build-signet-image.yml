@@ -1,8 +1,16 @@
 name: Build Signet Image
 
 # Runs only after Release Signet Binary succeeds (or on manual dispatch).
-# Packages the already-built linux/amd64 binary into an ACR image and uploads
-# the deploy config bundle to OSS. Does not compile Rust or the dashboard.
+# Packages the already-built linux/amd64 binary into an image, pushes to ACR
+# and Docker Hub, then uploads the deploy config bundle to OSS. Does not
+# compile Rust or the dashboard.
+#
+# Required secrets / vars:
+#   ACR: ACR_REGISTRY, ACR_NAMESPACE, ACR_USERNAME, ACR_PASSWORD (secrets)
+#        ACR_REPOSITORY (var)
+#   Docker Hub: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (secrets)
+#               DOCKERHUB_NAMESPACE (var, default dadoulab)
+#               DOCKERHUB_REPOSITORY (var, default = ACR_REPOSITORY)
 on:
   workflow_run:
     workflows: ["Release Signet Binary"]
@@ -54,22 +62,39 @@ jobs:
           echo "tag=v${v}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${v}"
 
-      - name: Validate ACR configuration
+      - name: Validate registry configuration
+        id: regs
         shell: bash
         run: |
           set -euo pipefail
           : "${ACR_REGISTRY:?ACR_REGISTRY secret missing}"
           : "${ACR_NAMESPACE:?ACR_NAMESPACE secret missing}"
-          : "${ACR_REPOSITORY:?ACR_REPOSITORY secret missing}"
+          : "${ACR_REPOSITORY:?ACR_REPOSITORY var missing}"
           : "${ACR_USERNAME:?ACR_USERNAME secret missing}"
           : "${ACR_PASSWORD:?ACR_PASSWORD secret missing}"
-          echo "ACR target: ${ACR_REGISTRY}/${ACR_NAMESPACE}/${ACR_REPOSITORY}"
+          : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME secret missing}"
+          : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN secret missing}"
+
+          # Defaults: dadoulab org + same repository name as ACR.
+          hub_ns="${DOCKERHUB_NAMESPACE:-dadoulab}"
+          hub_repo="${DOCKERHUB_REPOSITORY:-${ACR_REPOSITORY}}"
+
+          acr_image="${ACR_REGISTRY}/${ACR_NAMESPACE}/${ACR_REPOSITORY}"
+          hub_image="${hub_ns}/${hub_repo}"
+          echo "acr_image=${acr_image}" >> "$GITHUB_OUTPUT"
+          echo "hub_image=${hub_image}" >> "$GITHUB_OUTPUT"
+          echo "ACR target: ${acr_image}"
+          echo "Docker Hub target: ${hub_image}"
         env:
           ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
           ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
           ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
+          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
 
       - name: Download linux-amd64 from binary workflow
         if: github.event_name == 'workflow_run'
@@ -112,11 +137,20 @@ jobs:
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/${{ vars.ACR_REPOSITORY }}
+          # One build, two registries (ACR + Docker Hub).
+          images: |
+            ${{ steps.regs.outputs.acr_image }}
+            ${{ steps.regs.outputs.hub_image }}
           tags: |
             type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=latest
