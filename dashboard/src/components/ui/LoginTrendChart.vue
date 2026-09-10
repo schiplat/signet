@@ -25,18 +25,17 @@ export type RangeKey = "24h" | "7d" | "30d";
  * readable; inactive tags use a 12% tint of the same hue.
  */
 /**
- * One palette, three stops — designed as a set, not three unrelated colors:
- *   24h = amber  (warm accent, "today")
- *   7d  = violet (cool contrast against amber)
- *   30d = blue   (the macro anchor)
- * Kept in the page's pastel band (L 62-70 lines): airy but still readable.
- * `fill` is the mid-tone sibling for active tag backgrounds; inactive tags
- * use a 16% tint of `line`.
+ * One palette, three stops — 透亮红 / 黄 / 蓝 (high chroma, airy L):
+ *   24h = lucid red
+ *   7d  = lucid yellow
+ *   30d = lucid blue
+ * Saturated enough to read on the chart; light enough for soft tags.
+ * `fill` is slightly deeper for active tag white text; inactive uses 18% tint.
  */
 const RANGE_META: Record<RangeKey, { label: string; line: string; fill: string; tint: string }> = {
-  "24h": { label: "Last 24 hours", line: "hsl(36 95% 64%)", fill: "33 90% 52%", tint: "hsl(36 95% 64% / 0.16)" },
-  "7d": { label: "Last 7 days", line: "hsl(258 85% 72%)", fill: "260 75% 62%", tint: "hsl(258 85% 72% / 0.16)" },
-  "30d": { label: "Last 30 days", line: "hsl(210 90% 66%)", fill: "212 80% 54%", tint: "hsl(210 90% 66% / 0.16)" },
+  "24h": { label: "Last 24 hours", line: "hsl(2 100% 68%)", fill: "2 95% 58%", tint: "hsl(2 100% 68% / 0.18)" },
+  "7d": { label: "Last 7 days", line: "hsl(46 100% 58%)", fill: "44 98% 50%", tint: "hsl(46 100% 58% / 0.18)" },
+  "30d": { label: "Last 30 days", line: "hsl(210 100% 66%)", fill: "210 95% 56%", tint: "hsl(210 100% 66% / 0.18)" },
 };
 
 /** Two-way bound so the KPI numbers above can switch the range too. */
@@ -247,7 +246,7 @@ const xLabels = computed(() => {
       >
         <defs>
           <linearGradient id="trendArea" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" :stop-color="color" stop-opacity="0.25" />
+            <stop offset="0%" :stop-color="color" stop-opacity="0.32" />
             <stop offset="100%" :stop-color="color" stop-opacity="0" />
           </linearGradient>
         </defs>
