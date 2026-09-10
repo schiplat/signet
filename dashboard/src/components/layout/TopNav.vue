@@ -1166,6 +1166,11 @@ onUnmounted(() => {
             <p class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               Link a provider
             </p>
+            <p class="text-[11px] text-muted-foreground">
+              Feishu / Google / GitHub / OIDC must return an email on first link. If the
+              provider has no email permission, linking will fail with a reminder on the
+              login page.
+            </p>
             <a
               v-for="p in linkableProviders"
               :key="p.code"

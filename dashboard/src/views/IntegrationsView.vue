@@ -781,6 +781,21 @@ async function copyText(text: string): Promise<boolean> {
                   <option value="wechat">WeChat Open Platform</option>
                   <option value="oidc">Generic OIDC</option>
                 </select>
+                <p
+                  v-if="ssoForm.provider_type === 'feishu'"
+                  class="type-meta mt-1.5 text-[11px] text-amber-700 dark:text-amber-400"
+                >
+                  Feishu must return email for first-time link / login. Enable
+                  contact:user.email:readonly (and contact:user.employee:readonly for
+                  enterprise_email), publish the app, then retry.
+                </p>
+                <p
+                  v-else-if="ssoForm.provider_type === 'wechat'"
+                  class="type-meta mt-1.5 text-[11px]"
+                >
+                  WeChat Open Platform does not provide email; users link via pending
+                  password bind or an already-signed-in session.
+                </p>
               </div>
               <div>
                 <label class="type-label mb-1.5 block">Code (URL slug)</label>

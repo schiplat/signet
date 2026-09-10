@@ -707,9 +707,14 @@ async function onBatchDisable() {
     </div>
 
     <Teleport to="body">
-      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="showCreate"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showCreate = false" />
-        <div class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <div
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+        >
           <h3 class="mb-5 text-[15px] font-semibold">New User</h3>
           <form class="space-y-4" @submit.prevent="onCreate">
             <div>
@@ -794,9 +799,14 @@ async function onBatchDisable() {
     </Teleport>
 
     <Teleport to="body">
-      <div v-if="editing" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="editing"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="editing = null" />
-        <div class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <div
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+        >
           <h3 class="mb-5 text-[15px] font-semibold">Edit User</h3>
           <form class="space-y-4" @submit.prevent="onSaveEdit">
             <div>

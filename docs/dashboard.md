@@ -99,7 +99,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 4. 若 `mfa_required` → TOTP 或恢复码  
 5. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  
 6. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
-7. 其他第三方失败同样回登录页并显示 `?sso_error=` 对应文案（`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `missing_code` 等）  
+7. 其他第三方失败同样回登录页并显示 `?sso_error=` 对应文案（`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `missing_code` / `email_required` 等）。`email_required`：飞书等未返回邮箱时拒绝首次绑定/登录，并提示开通邮箱权限（微信除外；已绑定身份可继续登录）。  
 8. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
 
 详情与防接管规则见 [api-v1.md §12](./api-v1.md#12-第三方登录身份联邦)。

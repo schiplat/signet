@@ -386,6 +386,30 @@ async fn callback(
     let user_id = match linked {
         Some(user_id) => user_id,
         None => {
+            // Providers that can supply email must do so before any new bind
+            // (session link, auto-link, JIT, or pending). WeChat has no email
+            // API and stays exempt. Already-linked subjects skip this check.
+            let has_email = profile
+                .email
+                .as_deref()
+                .is_some_and(|e| !e.trim().is_empty());
+            if loaded.cfg.provider_type != "wechat" && !has_email {
+                tracing::info!(
+                    provider = %provider_code,
+                    provider_type = %loaded.cfg.provider_type,
+                    "sso profile missing email; refusing new bind"
+                );
+                return Ok(sso_fail_redirect(
+                    &state,
+                    jar,
+                    &provider_code,
+                    "email_required",
+                    ip,
+                    user_agent,
+                )
+                .await);
+            }
+
             // Already signed in (e.g. linking from the profile page): bind to
             // the current session user without requiring an email match.
             if let Ok(session_user) = crate::auth::session::current_user(&state, &headers).await {

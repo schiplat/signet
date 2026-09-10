@@ -208,6 +208,8 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   missing_code: "Sign-in was cancelled or incomplete. Please try again.",
   no_matching_account:
     "Could not sign you in with this third-party account. The provider must return a verified email (for first-time auto-create), or sign in with your existing password within 15 minutes to link it.",
+  email_required:
+    "This provider did not return an email, so Signet cannot link or sign you in. For Feishu: open “获取用户邮箱信息” (contact:user.email:readonly) in the app permissions, publish, and ensure the user has a contact or enterprise email. Then try again.",
 };
 
 onMounted(async () => {
