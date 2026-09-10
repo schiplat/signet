@@ -101,6 +101,7 @@ async fn scim_generate_token(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -129,6 +130,7 @@ async fn scim_revoke_token(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -154,6 +156,7 @@ struct RecentLogin {
     ip: Option<String>,
     browser: Option<String>,
     os: Option<String>,
+    client_id: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -166,6 +169,13 @@ struct LoginTrendPoint {
     logins_7d: i64,
     /// Rolling sum of the last 30 calendar days ending on `day`.
     logins_30d: i64,
+}
+
+/// One hourly point of the last 24 hours (`hour` = UTC hour start).
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+struct LoginTrendHourPoint {
+    hour: chrono::NaiveDateTime,
+    logins: i64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -185,12 +195,62 @@ struct AdminStats {
     unique_users_30d: i64,
     /// Last 30 days; three overlaid series (1d / 7d rolling / 30d rolling).
     login_trend: Vec<LoginTrendPoint>,
+    /// Last 24 hours, one point per hour (for the default chart range).
+    login_trend_24h: Vec<LoginTrendHourPoint>,
     /// Recent successful logins across all users (7 days).
     recent_logins: Vec<RecentLogin>,
+    /// Per-app login aggregates over the last 30 days (Top 10).
+    by_client: Vec<ClientUsage>,
+    /// Browser distribution of logins over the last 30 days.
+    browsers: Vec<NameCount>,
+    /// OS distribution of logins over the last 30 days.
+    oses: Vec<NameCount>,
+    /// Echoes the requested scope so the UI can confirm what was filtered.
+    scope: StatsScope,
 }
 
-async fn stats(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<AdminStats>> {
+#[derive(Debug, serde::Serialize)]
+struct StatsScope {
+    /// `None` = global (all apps).
+    client_id: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+struct ClientUsage {
+    /// OAuth client identifier; `(direct)` = sign-ins without app context.
+    client_id: String,
+    logins_24h: i64,
+    logins_7d: i64,
+    logins_30d: i64,
+    unique_users_30d: i64,
+}
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+struct NameCount {
+    name: String,
+    count: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct StatsQuery {
+    client_id: Option<String>,
+}
+
+async fn stats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<StatsQuery>,
+) -> AppResult<Json<AdminStats>> {
     require_staff_user(&state, &headers).await?;
+
+    let scope_client = q
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "(direct)")
+        .map(str::to_string);
+    // "(direct)" filters sign-ins without app attribution.
+    let direct_only = q.client_id.as_deref() == Some("(direct)");
 
     let users_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&state.pool)
@@ -220,91 +280,209 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> AppResult<J
             .fetch_one(&state.pool)
             .await?;
 
-    let logins_24h: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours'",
-    )
+    // Login metrics scoped by the optional app filter: `scope_client` adds a
+    // `client_id = $N` predicate, `direct_only` selects NULL-client rows.
+    let client_pred = |idx: usize| -> String {
+        match (&scope_client, direct_only) {
+            (Some(_), _) => format!("AND client_id = ${idx}"),
+            (None, true) => "AND client_id IS NULL".to_string(),
+            (None, false) => String::new(),
+        }
+    };
+
+    let logins_24h: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours' {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
-    let logins_7d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days'",
-    )
+    let logins_7d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days' {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
-    let logins_30d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days'",
-    )
+    let logins_30d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days' {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
-    let unique_users_24h: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours' AND actor_user_id IS NOT NULL",
-    )
+    let unique_users_24h: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours' AND actor_user_id IS NOT NULL {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
-    let unique_users_7d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days' AND actor_user_id IS NOT NULL",
-    )
+    let unique_users_7d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days' AND actor_user_id IS NOT NULL {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
-    let unique_users_30d: i64 = sqlx::query_scalar(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days' AND actor_user_id IS NOT NULL",
-    )
+    let unique_users_30d: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days' AND actor_user_id IS NOT NULL {}",
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
 
     let login_trend = sqlx::query_as::<_, LoginTrendPoint>(
+        &format!(
+            r#"
+            WITH daily AS (
+                SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
+                       COUNT(*)::bigint AS logins
+                FROM audit_logs
+                WHERE action = 'auth.login'
+                  AND created_at >= ((CURRENT_DATE - INTERVAL '59 days')::timestamp AT TIME ZONE 'UTC')
+                  {}
+                GROUP BY 1
+            ),
+            history AS (
+                SELECT
+                    gs::date AS day,
+                    COALESCE(d.logins, 0)::bigint AS logins_1d
+                FROM generate_series(
+                    (CURRENT_DATE - INTERVAL '59 days')::date,
+                    CURRENT_DATE,
+                    '1 day'::interval
+                ) AS gs
+                LEFT JOIN daily d ON d.day = gs::date
+            ),
+            rolled AS (
+                SELECT
+                    day,
+                    logins_1d,
+                    SUM(logins_1d) OVER (
+                        ORDER BY day
+                        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                    )::bigint AS logins_7d,
+                    SUM(logins_1d) OVER (
+                        ORDER BY day
+                        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                    )::bigint AS logins_30d
+                FROM history
+            )
+            SELECT day, logins_1d, logins_7d, logins_30d
+            FROM rolled
+            WHERE day >= (CURRENT_DATE - INTERVAL '29 days')::date
+            ORDER BY day
+            "#,
+            client_pred(1)
+        )
+    )
+    .bind(&scope_client)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Hourly grain for the default 24h range: dense hourly buckets so the
+    // x-axis is time-of-day, not dates.
+    let login_trend_24h = sqlx::query_as::<_, LoginTrendHourPoint>(&format!(
         r#"
-        WITH daily AS (
-            SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
-                   COUNT(*)::bigint AS logins
+            WITH buckets AS (
+                SELECT
+                    date_trunc('hour', gs) AS hour,
+                    0::bigint AS logins
+                FROM generate_series(
+                    date_trunc('hour', NOW() AT TIME ZONE 'UTC') - INTERVAL '23 hours',
+                    date_trunc('hour', NOW() AT TIME ZONE 'UTC'),
+                    '1 hour'::interval
+                ) AS gs
+            ),
+            counts AS (
+                SELECT
+                    date_trunc('hour', created_at AT TIME ZONE 'UTC') AS hour,
+                    COUNT(*)::bigint AS logins
+                FROM audit_logs
+                WHERE action = 'auth.login'
+                  AND created_at >= date_trunc('hour', NOW()) - INTERVAL '23 hours'
+                  {}
+                GROUP BY 1
+            )
+            SELECT b.hour AS hour, COALESCE(c.logins, 0) AS logins
+            FROM buckets b
+            LEFT JOIN counts c ON c.hour = b.hour
+            ORDER BY b.hour
+            "#,
+        client_pred(1)
+    ))
+    .bind(&scope_client)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let recent_logins = sqlx::query_as::<_, RecentLogin>(&format!(
+        r#"
+            SELECT actor_email, ip, browser, os, client_id, created_at
             FROM audit_logs
             WHERE action = 'auth.login'
-              AND created_at >= ((CURRENT_DATE - INTERVAL '59 days')::timestamp AT TIME ZONE 'UTC')
-            GROUP BY 1
-        ),
-        history AS (
-            SELECT
-                gs::date AS day,
-                COALESCE(d.logins, 0)::bigint AS logins_1d
-            FROM generate_series(
-                (CURRENT_DATE - INTERVAL '59 days')::date,
-                CURRENT_DATE,
-                '1 day'::interval
-            ) AS gs
-            LEFT JOIN daily d ON d.day = gs::date
-        ),
-        rolled AS (
-            SELECT
-                day,
-                logins_1d,
-                SUM(logins_1d) OVER (
-                    ORDER BY day
-                    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-                )::bigint AS logins_7d,
-                SUM(logins_1d) OVER (
-                    ORDER BY day
-                    ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
-                )::bigint AS logins_30d
-            FROM history
-        )
-        SELECT day, logins_1d, logins_7d, logins_30d
-        FROM rolled
-        WHERE day >= (CURRENT_DATE - INTERVAL '29 days')::date
-        ORDER BY day
+              AND created_at > NOW() - INTERVAL '7 days'
+              {}
+            ORDER BY created_at DESC
+            LIMIT 10
+            "#,
+        client_pred(1)
+    ))
+    .bind(&scope_client)
+    .fetch_all(&state.pool)
+    .await?;
+
+    // Per-app aggregates over the last 30 days (global view only; when
+    // scoped to one app the front end already knows the single row).
+    let by_client: Vec<ClientUsage> = sqlx::query_as::<_, ClientUsage>(
+        r#"
+        SELECT COALESCE(client_id, '(direct)')                AS client_id,
+               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::bigint AS logins_24h,
+               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::bigint  AS logins_7d,
+               COUNT(*)::bigint                               AS logins_30d,
+               COUNT(DISTINCT actor_user_id)::bigint          AS unique_users_30d
+        FROM audit_logs
+        WHERE action = 'auth.login'
+          AND created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY 1
+        ORDER BY logins_30d DESC
+        LIMIT 10
         "#,
     )
     .fetch_all(&state.pool)
     .await?;
 
-    let recent_logins = sqlx::query_as::<_, RecentLogin>(
+    // Browser / OS distribution over the last 30 days (login events).
+    let browsers: Vec<NameCount> = sqlx::query_as::<_, NameCount>(&format!(
         r#"
-        SELECT actor_email, ip, browser, os, created_at
-        FROM audit_logs
-        WHERE action = 'auth.login'
-          AND created_at > NOW() - INTERVAL '7 days'
-        ORDER BY created_at DESC
-        LIMIT 10
-        "#,
-    )
+            SELECT COALESCE(browser, 'Unknown') AS name, COUNT(*)::bigint AS count
+            FROM audit_logs
+            WHERE action = 'auth.login'
+              AND created_at >= NOW() - INTERVAL '30 days'
+              {}
+            GROUP BY 1
+            ORDER BY count DESC
+            "#,
+        client_pred(1)
+    ))
+    .bind(&scope_client)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let oses: Vec<NameCount> = sqlx::query_as::<_, NameCount>(&format!(
+        r#"
+            SELECT COALESCE(os, 'Unknown') AS name, COUNT(*)::bigint AS count
+            FROM audit_logs
+            WHERE action = 'auth.login'
+              AND created_at >= NOW() - INTERVAL '30 days'
+              {}
+            GROUP BY 1
+            ORDER BY count DESC
+            "#,
+        client_pred(1)
+    ))
+    .bind(&scope_client)
     .fetch_all(&state.pool)
     .await?;
 
@@ -323,7 +501,14 @@ async fn stats(State(state): State<AppState>, headers: HeaderMap) -> AppResult<J
         unique_users_7d,
         unique_users_30d,
         login_trend,
+        login_trend_24h,
         recent_logins,
+        by_client,
+        browsers,
+        oses,
+        scope: StatsScope {
+            client_id: q.client_id,
+        },
     }))
 }
 
@@ -559,6 +744,7 @@ async fn create_user(
             detail: json!({ "email": user.email, "role": user.role }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -755,6 +941,7 @@ async fn update_user(
             }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -789,6 +976,7 @@ async fn delete_user(
             detail: json!({ "email": target.email, "role": target.role }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -819,6 +1007,7 @@ async fn disable_user(
             detail: json!({ "email": user.email }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -846,6 +1035,7 @@ async fn enable_user(
             detail: json!({ "email": user.email }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -917,6 +1107,7 @@ async fn revoke_user_sessions(
             detail: json!({ "email": target.email, "revoked": revoked }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

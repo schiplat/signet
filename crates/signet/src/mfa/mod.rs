@@ -105,6 +105,7 @@ async fn patch_mfa_settings(
             detail: json!({ "required_globally": body.required_globally }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -227,6 +228,7 @@ async fn issue_session(
     user: User,
     ip: Option<String>,
     user_agent: Option<String>,
+    client_id: Option<String>,
 ) -> AppResult<impl IntoResponse> {
     let token = create_session(
         &state.pool,
@@ -256,6 +258,7 @@ async fn issue_session(
             detail: json!({ "mfa": true }),
             ip,
             user_agent,
+            client_id,
         },
     )
     .await;
@@ -351,6 +354,7 @@ pub async fn begin_login_mfa_flow(
     user: User,
     ip: Option<String>,
     user_agent: Option<String>,
+    client_id: Option<String>,
 ) -> AppResult<impl IntoResponse> {
     if user.must_change_password {
         return challenge_password_change(state, jar, user).await;
@@ -404,6 +408,7 @@ pub async fn begin_login_mfa_flow(
             detail: json!({ "mfa": false }),
             ip,
             user_agent,
+            client_id,
         },
     )
     .await;
@@ -476,12 +481,13 @@ pub(crate) async fn force_password_change(
             detail: json!({ "forced": true }),
             ip: ip.clone(),
             user_agent: user_agent.clone(),
+            client_id: None,
         },
     )
     .await;
 
     let user = load_user(&state.pool, user.id).await?;
-    begin_login_mfa_flow(&state, jar, user, ip, user_agent).await
+    begin_login_mfa_flow(&state, jar, user, ip, user_agent, None).await
 }
 
 // --- verify ---
@@ -491,6 +497,10 @@ struct VerifyBody {
     code: String,
     #[serde(default = "default_method")]
     method: String,
+    /// Optional `/oauth/authorize?...` return URL carried through from the
+    /// login step, used to attribute the login to the initiating OAuth app.
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 fn default_method() -> String {
@@ -540,6 +550,7 @@ async fn verify_mfa(
                     detail: json!({ "method": "totp" }),
                     ip: ip.clone(),
                     user_agent: crate::http_util::user_agent(&headers),
+                    client_id: None,
                 },
             )
             .await;
@@ -580,6 +591,7 @@ async fn verify_mfa(
                     detail: json!({}),
                     ip: ip.clone(),
                     user_agent: crate::http_util::user_agent(&headers),
+                    client_id: None,
                 },
             )
             .await;
@@ -588,12 +600,15 @@ async fn verify_mfa(
     }
 
     delete_challenge(&state.pool, challenge.id).await?;
+    let client_id =
+        crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
     issue_session(
         &state,
         jar,
         user,
         ip,
         crate::http_util::user_agent(&headers),
+        client_id,
     )
     .await
 }
@@ -635,6 +650,10 @@ async fn enroll_start_challenge(
 #[derive(Debug, Deserialize)]
 struct EnrollConfirmBody {
     code: String,
+    /// Optional `/oauth/authorize?...` return URL carried through from the
+    /// login step, used to attribute the login to the initiating OAuth app.
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 async fn enroll_confirm_challenge(
@@ -674,6 +693,8 @@ async fn enroll_confirm_challenge(
     delete_challenge(&state.pool, challenge.id).await?;
 
     let user = load_user(&state.pool, user_id).await?;
+    let client_id =
+        crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
     record(
         &state.pool,
         AuditEvent {
@@ -684,6 +705,7 @@ async fn enroll_confirm_challenge(
             detail: json!({ "via": "login" }),
             ip: ip.clone(),
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: client_id.clone(),
         },
     )
     .await;
@@ -722,6 +744,7 @@ async fn enroll_confirm_challenge(
             detail: json!({ "mfa": true, "enrolled": true }),
             ip,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id,
         },
     )
     .await;
@@ -834,6 +857,7 @@ async fn enroll_confirm_session(
             detail: json!({ "via": "session" }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -881,6 +905,7 @@ async fn regenerate_recovery(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -927,6 +952,7 @@ async fn disable_mfa(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -1013,6 +1039,7 @@ async fn rebind_confirm(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -1051,6 +1078,7 @@ async fn admin_reset_mfa(
             detail: json!({ "email": target.email }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

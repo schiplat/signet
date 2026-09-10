@@ -36,6 +36,7 @@ pub async fn track_login(pool: &PgPool, user: &User, ip: Option<&str>, user_agen
             detail: json!({ "ip": ip, "user_agent": user_agent }),
             ip: Some(ip.to_string()),
             user_agent: user_agent.map(|s| s.to_string()),
+            client_id: None,
         },
     )
     .await;

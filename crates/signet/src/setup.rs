@@ -129,6 +129,7 @@ async fn setup_admin(
             detail: json!({ "email": user.email }),
             ip,
             user_agent,
+            client_id: None,
         },
     )
     .await;

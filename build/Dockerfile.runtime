@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+#
+# Runtime-only image: the signet binary is produced by
+# `.github/workflows/release-binary.yml` and copied in here — no Rust/Node
+# compile in this stage.
+#
+# Build context must contain a single executable named `signet`
+# (see release-signet.yml).
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home signet
+WORKDIR /app
+COPY signet /usr/local/bin/signet
+RUN chmod +x /usr/local/bin/signet \
+    && mkdir -p /app/data \
+    && chown -R signet:signet /app
+USER signet
+EXPOSE 8443
+ENV SIGNET_HTTP_BIND=0.0.0.0:8443
+VOLUME ["/app/data"]
+ENTRYPOINT ["signet"]

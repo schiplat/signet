@@ -108,6 +108,7 @@ pub async fn register(
             }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

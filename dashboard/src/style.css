@@ -2,31 +2,31 @@
 
 :root {
   /*
-   * Warm stone ops console — aligned with buzproject.
-   * Hue ~32 keeps warmth without drifting into yellow-cream.
+   * Crisp light console — neutral cool-gray base so saturated chart colors
+   * read at full strength (warm overlays were giving everything a haze).
    */
-  --background: 34 12% 97%;
-  --foreground: 28 10% 12%;
+  --background: 210 20% 98%;
+  --foreground: 222 18% 12%;
   --card: 0 0% 100%;
-  --card-foreground: 28 10% 12%;
+  --card-foreground: 222 18% 12%;
   --popover: 0 0% 100%;
-  --popover-foreground: 28 10% 12%;
-  --primary: 28 10% 15%;
-  --primary-foreground: 40 18% 98%;
-  --secondary: 34 10% 93%;
-  --secondary-foreground: 28 9% 22%;
-  --muted: 34 10% 93%;
-  --muted-foreground: 28 7% 36%;
-  --accent: 34 9% 91%;
-  --accent-foreground: 28 10% 14%;
-  --border: 32 9% 86%;
+  --popover-foreground: 222 18% 12%;
+  --primary: 222 16% 15%;
+  --primary-foreground: 210 20% 98%;
+  --secondary: 214 16% 94%;
+  --secondary-foreground: 222 14% 24%;
+  --muted: 214 16% 94%;
+  --muted-foreground: 219 10% 38%;
+  --accent: 214 15% 92%;
+  --accent-foreground: 222 16% 14%;
+  --border: 215 14% 87%;
   --input: 0 0% 100%;
-  --ring: 28 9% 32%;
+  --ring: 215 14% 34%;
   --radius: 0.75rem;
-  --sidebar: 34 11% 95%;
-  --sidebar-foreground: 28 9% 18%;
-  --sidebar-border: 32 8% 89%;
-  --sidebar-accent: 34 10% 91%;
+  --sidebar: 210 18% 96%;
+  --sidebar-foreground: 222 14% 18%;
+  --sidebar-border: 215 13% 90%;
+  --sidebar-accent: 214 15% 92%;
   --destructive: 4 66% 44%;
   --destructive-foreground: 0 0% 100%;
 }
@@ -99,21 +99,22 @@
   }
 
   ::selection {
-    background: hsl(24 10% 14% / 0.12);
+    background: hsl(214 90% 52% / 0.2);
   }
 }
 
 @layer components {
   .surface-card {
-    @apply rounded-2xl bg-card;
+    @apply rounded-2xl bg-card ring-1 ring-border/70;
+    box-shadow: 0 1px 2px hsl(220 20% 20% / 0.04), 0 2px 8px hsl(220 20% 20% / 0.03);
   }
 
   .page-stack {
-    @apply w-full max-w-none space-y-7;
+    @apply w-full max-w-none space-y-4;
   }
 
   .shell-inset {
-    @apply px-6 md:px-8;
+    @apply px-4;
   }
 
   .type-meta {

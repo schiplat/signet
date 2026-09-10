@@ -133,22 +133,37 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/admin/stats` | Overview 统计（登录趋势 1d/7d/30d） |
-| `GET` | `/api/v1/admin/audit-logs` | 审计列表（含 `ip` / `browser` / `os`；可按 action / q / sort） |
-| `GET` | `/api/v1/admin/audit-logs/export` | 审计导出 CSV（`text/csv`，尊重 staff 权限过滤） |
+| `GET` | `/api/v1/admin/stats` | Overview 统计（登录趋势 24h 小时粒度 + 7d/30d 日粒度；支持按应用筛选与应用/浏览器/OS 分布） |
+| `GET` | `/api/v1/admin/audit-logs` | 审计列表（含 `ip` / `browser` / `os` / `client_id`；可按 action / client_id / browser / os / q / sort） |
+| `GET` | `/api/v1/admin/audit-logs/export` | 审计导出 CSV（`text/csv`，尊重 staff 权限过滤，含 `client_id` 列） |
+| `GET` | `/api/v1/admin/audit-logs/facets` | 审计筛选下拉数据源（近 90 天 browser / os 去重值 + 全部应用） |
 
 ### `GET /api/v1/admin/stats`（节选）
 
 - 用户 / 客户端计数  
 - `logins_24h` / `logins_7d` / `logins_30d`（当前窗口合计）  
 - `unique_users_24h` / `unique_users_7d` / `unique_users_30d`  
-- `login_trend[]`：近 30 日每日点，含 `day`、`logins_1d`、滚动 `logins_7d` / `logins_30d`  
+- `login_trend[]`：近 30 日每日点，含 `day`、`logins_1d`、滚动 `logins_7d` / `logins_30d`
+- `login_trend_24h[]`：近 24 小时逐小时点（UTC 整点，含空桶补零），含 `hour`、`logins`  
+- `by_client[]`：近 30 天按应用聚合（Top 10，按 30d 降序），含 `client_id`（`(direct)` 表示无应用归属的直登）、`logins_24h/7d/30d`、`unique_users_30d`  
+- `browsers[]` / `oses[]`：近 30 天登录事件的浏览器 / 操作系统分布，含 `name` / `count`  
+- `scope`：回显当前筛选（`client_id` 为 `null` 表示全局）  
+
+Query：可选 `client_id`。传入应用标识时，上述登录类字段（合计 / 独立用户 / 趋势 / 最近登录 / 分布）均过滤为该应用；传 `(direct)` 仅统计无归属的直登。用户与客户端计数恒为全局。
 
 ### `GET /api/v1/admin/audit-logs`
 
-Query：`q`、`action`、`page`、`page_size`、`sort`（含 `ip`）、`dir`。  
-每行含 `ip`、`user_agent`、`browser`、`os`（登录/MFA 等事件有值；`browser`/`os` 由 `User-Agent` 解析，历史数据可能为空）。  
+Query：`q`、`action`、`client_id`、`browser`、`os`、`page`、`page_size`、`sort`（含 `ip`）、`dir`。  
+每行含 `ip`、`user_agent`、`browser`、`os`、`client_id`（登录/MFA 等事件有值；`browser`/`os` 由 `User-Agent` 解析；`client_id` 为发起登录的 OAuth 应用，从 2026-09 起的新日志开始记录，历史数据为空）。  
 manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mfa.reset` / `settings.mfa_update` 等仅 admin。
+
+### `GET /api/v1/admin/audit-logs/facets`
+
+返回 `browsers[]`、`oses[]`（近 90 天日志中的去重值，升序）与 `clients[]`（全部应用，含 `client_id` / `enabled`），供审计页与 Overview 的筛选下拉使用。
+
+### 登录审计的应用归属
+
+登录接口（`POST /auth/login`、`POST /mfa/verify`、`POST /mfa/enroll/confirm`、`POST /passkeys/finish`）接受可选 `return_to` 字段（形如 `/oauth/authorize?...&client_id=xxx`）。服务端解析并在 `client_apps` 校验通过后，将该应用的 `client_id` 写入 `auth.login` / `auth.login_failed` 审计事件；解析失败不影响登录流程。
 
 ---
 
@@ -232,7 +247,47 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 | `POST /api/v1/admin/scim/token` | admin | 生成/轮换 SCIM bearer token，返回 `{"token":"<明文，仅此一次>"}` |
 | `DELETE /api/v1/admin/scim/token` | admin | 吊销 SCIM bearer token（禁用 SCIM 接口） |
 
-## 12. 可观测性
+## 12. 第三方登录（身份联邦）
+
+管理员在后台配置上游身份源后，用户可用第三方账号注册/登录。配置存于 `upstream_providers`（`client_secret` AES-256-GCM 加密存储），绑定关系存于 `user_identities`（`(provider_code, subject)` 唯一）。
+
+支持类型：`github` / `google` / `feishu` / `wechat` / `oidc`（通用 OIDC discovery，需 `issuer_url`）。
+
+### 登录流程（浏览器重定向）
+
+| 路径 | 说明 |
+|------|------|
+| `GET /api/v1/auth/sso/{provider}/start?client_id=` | 生成 CSRF state（HttpOnly cookie 存明文、库中仅存 SHA-256，一次性，10 分钟），302 到上游授权页 |
+| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话（`auth.login.thirdparty` 审计） |
+| `GET /api/v1/auth/sso/providers` | 公开接口：返回启用中的 provider（登录页按钮用） |
+
+绑定策略（防账号接管）：上游 email **已验证** 且精确匹配本地 active 账号时自动绑定并登录；否则拒绝（审计记录 `result=failure`），用户需先本地登录后手动绑定。
+
+失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error`。
+
+### 管理端 API（admin）
+
+| 方法/路径 | 说明 |
+|-----------|------|
+| `GET /api/v1/admin/sso/providers` | 列表（含 `bindings`、每条记录的具体 `callback_url`；`client_secret` 永不回传） |
+| `POST /api/v1/admin/sso/providers` | 创建（`code` `[a-zA-Z0-9_-]`，`oidc` 必填 `issuer_url`） |
+| `PUT /api/v1/admin/sso/providers/{code}` | 更新；`client_secret` 留空保持不变，传入即轮换 |
+| `DELETE /api/v1/admin/sso/providers/{code}` | 删除（级联删除绑定关系） |
+| `POST /api/v1/admin/sso/providers/{code}/enabled` | 启用/禁用 `{"enabled": bool}` |
+| `GET /api/v1/auth/sso/callback-url` | 返回统一 URL 模板：`{base}/api/v1/auth/sso/{provider}/callback` |
+
+**回调地址规范（所有 provider 同一格式）**：  
+`{SIGNET_PUBLIC_BASE_URL|/issuer}/api/v1/auth/sso/{code}/callback`  
+GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体现在适配器内部（换 token、拉 profile），**不改变 URL 形态**。管理端列表每行直接给出该 provider 的完整可复制地址。
+
+### 用户侧 API
+
+| 方法/路径 | 说明 |
+|-----------|------|
+| `GET /api/v1/auth/sso/identities` | 当前用户已绑定的第三方账号列表 |
+| `DELETE /api/v1/auth/sso/identities/{provider_code}` | 解绑；若解绑后没有任何登录方式（无密码且无其他绑定）则拒绝 |
+
+## 13. 可观测性
 
 | 端点 | 说明 |
 |------|------|

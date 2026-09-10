@@ -110,6 +110,7 @@ async fn create_webhook(
             detail: json!({ "url": row.url, "kind": row.kind }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -140,6 +141,7 @@ async fn delete_webhook(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

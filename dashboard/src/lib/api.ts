@@ -32,12 +32,12 @@ async function parseJson<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export async function login(email: string, password: string) {
+export async function login(email: string, password: string, returnTo?: string) {
   const res = await fetch("/api/v1/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, return_to: returnTo || undefined }),
   });
   return parseJson<LoginResult>(res);
 }
@@ -52,7 +52,11 @@ export async function loginChangePassword(newPassword: string) {
   return parseJson<LoginResult>(res);
 }
 
-export async function verifyMfa(body: { code: string; method: "totp" | "recovery" }) {
+export async function verifyMfa(body: {
+  code: string;
+  method: "totp" | "recovery";
+  return_to?: string;
+}) {
   const res = await fetch("/api/v1/mfa/verify", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -70,12 +74,12 @@ export async function mfaEnrollStart() {
   return parseJson<{ secret: string; otpauth_uri: string }>(res);
 }
 
-export async function mfaEnrollConfirm(code: string) {
+export async function mfaEnrollConfirm(code: string, returnTo?: string) {
   const res = await fetch("/api/v1/mfa/enroll/confirm", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ code, return_to: returnTo || undefined }),
   });
   return parseJson<{ status: "ok"; user: PublicUser; recovery_codes: string[] }>(res);
 }
@@ -339,6 +343,7 @@ export type RecentLogin = {
   ip: string | null;
   browser: string | null;
   os: string | null;
+  client_id: string | null;
   created_at: string;
 };
 
@@ -347,6 +352,26 @@ export type LoginTrendPoint = {
   logins_1d: number;
   logins_7d: number;
   logins_30d: number;
+};
+
+/** One hourly bucket of the last 24 hours (UTC hour start). */
+export type LoginTrendHourPoint = {
+  hour: string;
+  logins: number;
+};
+
+export type ClientUsage = {
+  /// OAuth client identifier; "(direct)" = sign-ins without app context.
+  client_id: string;
+  logins_24h: number;
+  logins_7d: number;
+  logins_30d: number;
+  unique_users_30d: number;
+};
+
+export type NameCount = {
+  name: string;
+  count: number;
 };
 
 export type AdminStats = {
@@ -364,11 +389,19 @@ export type AdminStats = {
   unique_users_7d: number;
   unique_users_30d: number;
   login_trend: LoginTrendPoint[];
+  login_trend_24h: LoginTrendHourPoint[];
   recent_logins: RecentLogin[];
+  by_client: ClientUsage[];
+  browsers: NameCount[];
+  oses: NameCount[];
+  scope: { client_id: string | null };
 };
 
-export async function fetchAdminStats() {
-  const res = await fetch("/api/v1/admin/stats", { credentials: "include" });
+export async function fetchAdminStats(clientId?: string) {
+  const qs = new URLSearchParams();
+  if (clientId) qs.set("client_id", clientId);
+  const suffix = qs.toString() ? `?${qs}` : "";
+  const res = await fetch(`/api/v1/admin/stats${suffix}`, { credentials: "include" });
   return parseJson<AdminStats>(res);
 }
 
@@ -481,12 +514,16 @@ export type AuditLogItem = {
   user_agent: string | null;
   browser: string | null;
   os: string | null;
+  client_id: string | null;
   created_at: string;
 };
 
 export async function fetchAuditLogs(params: {
   q?: string;
   action?: string;
+  client_id?: string;
+  browser?: string;
+  os?: string;
   page?: number;
   page_size?: number;
   sort?: string;
@@ -495,6 +532,9 @@ export async function fetchAuditLogs(params: {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.action) qs.set("action", params.action);
+  if (params.client_id) qs.set("client_id", params.client_id);
+  if (params.browser) qs.set("browser", params.browser);
+  if (params.os) qs.set("os", params.os);
   if (params.page) qs.set("page", String(params.page));
   if (params.page_size) qs.set("page_size", String(params.page_size));
   if (params.sort) qs.set("sort", params.sort);
@@ -508,11 +548,27 @@ export async function fetchAuditLogs(params: {
   }>(res);
 }
 
-export function auditLogsExportUrl(params: { q?: string; action?: string } = {}) {
+export function auditLogsExportUrl(
+  params: { q?: string; action?: string; client_id?: string; browser?: string; os?: string } = {},
+) {
   const qs = new URLSearchParams();
   if (params.q) qs.set("q", params.q);
   if (params.action) qs.set("action", params.action);
+  if (params.client_id) qs.set("client_id", params.client_id);
+  if (params.browser) qs.set("browser", params.browser);
+  if (params.os) qs.set("os", params.os);
   return `/api/v1/admin/audit-logs/export?${qs}`;
+}
+
+export type AuditLogFacets = {
+  browsers: string[];
+  oses: string[];
+  clients: { client_id: string; enabled: boolean }[];
+};
+
+export async function fetchAuditLogFacets() {
+  const res = await fetch("/api/v1/admin/audit-logs/facets", { credentials: "include" });
+  return parseJson<AuditLogFacets>(res);
 }
 
 export type SessionInfo = {
@@ -682,7 +738,11 @@ export async function passkeyLoginStart(email: string) {
   return parseJson<{ token: string; challenge: Record<string, unknown> }>(res);
 }
 
-export async function passkeyLoginFinish(body: { token: string; credential: unknown }) {
+export async function passkeyLoginFinish(body: {
+  token: string;
+  credential: unknown;
+  return_to?: string;
+}) {
   const res = await fetch("/api/v1/passkeys/finish", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -776,6 +836,111 @@ export async function generateScimToken() {
 
 export async function revokeScimToken() {
   const res = await fetch("/api/v1/admin/scim/token", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
+// --- Federated identity (third-party sign-in) ---
+
+export type SsoProviderType = "github" | "google" | "feishu" | "wechat" | "oidc";
+
+export type SsoProvider = {
+  code: string;
+  provider_type: SsoProviderType;
+  display_name: string;
+  client_id: string;
+  issuer_url: string | null;
+  scopes: string | null;
+  enabled: boolean;
+  bindings: number;
+  /** Concrete redirect URI to register with this provider (server-computed). */
+  callback_url: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SsoProviderBody = {
+  code: string;
+  provider_type: SsoProviderType;
+  display_name: string;
+  client_id: string;
+  client_secret?: string;
+  issuer_url?: string;
+  scopes?: string;
+  enabled?: boolean;
+};
+
+export async function fetchSsoProviders() {
+  const res = await fetch("/api/v1/admin/sso/providers", { credentials: "include" });
+  return parseJson<{ providers: SsoProvider[] }>(res);
+}
+
+export async function createSsoProvider(body: SsoProviderBody) {
+  const res = await fetch("/api/v1/admin/sso/providers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<{ ok: boolean; code: string }>(res);
+}
+
+export async function updateSsoProvider(code: string, body: SsoProviderBody) {
+  const res = await fetch(`/api/v1/admin/sso/providers/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
+export async function deleteSsoProvider(code: string) {
+  const res = await fetch(`/api/v1/admin/sso/providers/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
+export async function setSsoProviderEnabled(code: string, enabled: boolean) {
+  const res = await fetch(`/api/v1/admin/sso/providers/${encodeURIComponent(code)}/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ enabled }),
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
+export async function fetchSsoCallbackUrl() {
+  const res = await fetch("/api/v1/auth/sso/callback-url", { credentials: "include" });
+  return parseJson<{ callback_url: string }>(res);
+}
+
+/** Public (pre-auth): enabled providers for the login page buttons. */
+export async function fetchEnabledSsoProviders() {
+  const res = await fetch("/api/v1/auth/sso/providers");
+  return parseJson<{ providers: { code: string; type: SsoProviderType; display_name: string }[] }>(res);
+}
+
+export type LinkedIdentity = {
+  provider_code: string;
+  provider_display_name: string;
+  email: string | null;
+  linked_at: string;
+  last_login_at: string | null;
+};
+
+export async function fetchMyIdentities() {
+  const res = await fetch("/api/v1/auth/sso/identities", { credentials: "include" });
+  return parseJson<{ identities: LinkedIdentity[] }>(res);
+}
+
+export async function unlinkIdentity(providerCode: string) {
+  const res = await fetch(`/api/v1/auth/sso/identities/${encodeURIComponent(providerCode)}`, {
     method: "DELETE",
     credentials: "include",
   });

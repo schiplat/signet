@@ -10,6 +10,7 @@ pub mod db;
 pub mod email;
 pub mod encryption;
 pub mod error;
+pub mod federation;
 pub mod http_util;
 pub mod keys;
 pub mod login_alert;
@@ -71,6 +72,8 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(auth::router())
         .merge(mfa::router())
         .merge(passkey::router())
+        .merge(federation::routes::router())
+        .merge(federation::admin::router())
         .merge(admin::router())
         .merge(audit::router())
         .merge(password_reset::router())

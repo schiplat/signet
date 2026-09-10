@@ -66,7 +66,7 @@ export async function enrollPasskey(name: string): Promise<void> {
 }
 
 /** Sign in with a passkey. Returns the logged-in user. */
-export async function loginWithPasskey(email: string): Promise<PublicUser> {
+export async function loginWithPasskey(email: string, returnTo?: string): Promise<PublicUser> {
   const { token, challenge } = await passkeyLoginStart(email);
   const pk = (challenge as { publicKey?: Record<string, unknown> }).publicKey ?? {};
 
@@ -87,6 +87,7 @@ export async function loginWithPasskey(email: string): Promise<PublicUser> {
   const response = cred.response as AuthenticatorAssertionResponse;
   const res = await passkeyLoginFinish({
     token,
+    return_to: returnTo,
     credential: {
       id: cred.id,
       rawId: bufToB64url(cred.rawId),

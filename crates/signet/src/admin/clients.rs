@@ -184,6 +184,7 @@ async fn create_client(
             }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -285,6 +286,7 @@ async fn update_client(
             }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -315,6 +317,7 @@ async fn delete_client(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -339,6 +342,7 @@ async fn disable_client(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -362,6 +366,7 @@ async fn enable_client(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -401,6 +406,7 @@ async fn rotate_secret(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -444,6 +450,7 @@ async fn create_registration_token(
             detail: json!({ "expires_at": expires_at.to_rfc3339() }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

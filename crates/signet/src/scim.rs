@@ -264,6 +264,7 @@ async fn create_user(
             detail: json!({ "email": row.email }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -472,6 +473,7 @@ async fn delete_user(
             detail: json!({ "email": existing.email }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

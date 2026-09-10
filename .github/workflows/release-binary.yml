@@ -1,15 +1,28 @@
 name: Release Signet Binary
 
+# Builds multi-arch binaries (dashboard embedded) and publishes them to a
+# GitHub Release. Also callable from release-signet.yml so the Docker image
+# job reuses these artifacts instead of compiling a second time.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_call:
+    inputs:
+      version:
+        description: 'Binary version override (default: git tag or Cargo.toml version)'
+        required: false
+        type: string
+    outputs:
+      version:
+        description: 'Resolved release version (no leading v)'
+        value: ${{ jobs.meta.outputs.version }}
   workflow_dispatch:
     inputs:
       version:
         description: 'Binary version override (default: git tag or Cargo.toml version)'
         required: false
         type: string
+  # Tag pushes are owned by release-signet.yml, which calls this workflow so the
+  # Docker job can reuse the same artifacts (no second compile). Use
+  # workflow_dispatch here for a binaries-only GitHub Release.
 
 permissions:
   contents: write
@@ -23,23 +36,23 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - name: Checkout signet
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: signet
 
       - name: Resolve version
         id: ver
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${{ inputs.version }}" ]]; then
-            v="${{ inputs.version }}"
+          # workflow_call / workflow_dispatch input, then git tag, then Cargo.toml
+          input_ver="${{ inputs.version }}"
+          if [[ -n "${input_ver}" ]]; then
+            v="${input_ver}"
             v="${v#v}"
           elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             v="${GITHUB_REF#refs/tags/v}"
           else
-            v="$(grep '^version' signet/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+            v="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           fi
           echo "version=${v}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${v}"
@@ -58,10 +71,8 @@ jobs:
             name: macos-arm64
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout signet
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: signet
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -73,12 +84,12 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: signet/dashboard/pnpm-lock.yaml
+          cache-dependency-path: dashboard/pnpm-lock.yaml
 
       # The signet binary embeds the Vue dashboard via rust-embed and the sqlx
       # migrations, so the frontend must be built (dashboard/dist) before cargo.
       - name: Build dashboard
-        working-directory: signet/dashboard
+        working-directory: dashboard
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -88,11 +99,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: signet
 
       - name: Build binary
-        working-directory: signet
         run: cargo build --release -p signet
 
       - name: Stage binary
@@ -101,7 +109,8 @@ jobs:
         run: |
           set -euo pipefail
           name="signet-${{ needs.meta.outputs.version }}-${{ matrix.name }}"
-          cp signet/target/release/signet "$name"
+          cp target/release/signet "$name"
+          chmod +x "$name"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact

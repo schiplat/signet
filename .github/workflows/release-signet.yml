@@ -1,43 +1,65 @@
 name: Build Signet Image
 
+# Packages the linux/amd64 binary produced by release-binary.yml into an ACR
+# image and uploads the deploy config bundle to OSS. Does NOT compile Rust or
+# the dashboard again — that work already happened in release-binary.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: 'Image tag override (default: git tag or Cargo.toml version)'
         required: false
         type: string
+  push:
+    tags:
+      - 'v*'
+    paths:
+      - 'crates/**'
+      - 'dashboard/**'
+      - 'migrations/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build/**'
+      - 'deploy/**'
+      - '.github/workflows/release-signet.yml'
+      - '.github/workflows/release-binary.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Compile once (multi-arch binaries + GitHub Release assets).
+  binary:
+    uses: ./.github/workflows/release-binary.yml
+    with:
+      version: ${{ inputs.version }}
+    secrets: inherit
+
   docker:
+    needs: binary
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout signet
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          path: signet
 
       - name: Resolve version
         id: ver
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${{ inputs.version }}" ]]; then
-            v="${{ inputs.version }}"
-            v="${v#v}"
-          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            v="${GITHUB_REF#refs/tags/v}"
-          else
-            v="$(grep '^version' signet/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          v="${{ needs.binary.outputs.version }}"
+          if [[ -z "${v}" ]]; then
+            if [[ -n "${{ inputs.version }}" ]]; then
+              v="${{ inputs.version }}"
+              v="${v#v}"
+            elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              v="${GITHUB_REF#refs/tags/v}"
+            else
+              v="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+            fi
           fi
           echo "version=${v}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${v}"
@@ -59,6 +81,23 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
 
+      # Reuse the linux/amd64 artifact from the binary job — no second cargo build.
+      - name: Download linux-amd64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-amd64
+          path: image-context
+
+      - name: Stage binary for Docker context
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd image-context
+          bin="$(ls -1 signet-*-linux-amd64 | head -1)"
+          mv "${bin}" signet
+          chmod +x signet
+          ls -la
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -78,11 +117,11 @@ jobs:
             type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push (linux/amd64)
+      - name: Build and push (linux/amd64, binary-only)
         uses: docker/build-push-action@v6
         with:
-          context: signet
-          file: signet/build/Dockerfile
+          context: image-context
+          file: build/Dockerfile.runtime
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -93,9 +132,6 @@ jobs:
           cache-to: type=gha,mode=min,ignore-error=true
 
       # ── Config bundle → OSS (config-as-code for the Buz deploy pipeline) ──
-      # Packages deploy/docker-compose.yml + deploy/env.tpl into
-      # configs.tar.gz (files at archive root) and uploads to:
-      #   config_tpl/signet/<version>/configs.tar.gz  (tagged, rollback)
       - name: Install ossutil
         shell: bash
         run: |
@@ -119,7 +155,7 @@ jobs:
           : "${OSS_BUCKET:?OSS_BUCKET secret missing}"
           : "${OSS_ENDPOINT:?OSS_ENDPOINT secret missing}"
 
-          tar czf configs.tar.gz -C signet/deploy docker-compose.yml env.tpl
+          tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
           echo "==> Bundle contents:"
           tar tzf configs.tar.gz
           echo "==> OSS target: oss://${OSS_BUCKET}/config_tpl/signet/${VERSION}/configs.tar.gz"

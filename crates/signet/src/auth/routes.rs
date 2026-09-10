@@ -42,6 +42,10 @@ pub fn router() -> Router<AppState> {
 struct LoginBody {
     email: String,
     password: String,
+    /// Optional `/oauth/authorize?...` return URL; used to attribute the
+    /// login (and its audit trail) to the initiating OAuth app.
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 async fn login(
@@ -52,6 +56,8 @@ async fn login(
     Json(body): Json<LoginBody>,
 ) -> AppResult<impl IntoResponse> {
     let email = body.email.trim().to_lowercase();
+    let client_id =
+        crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
     let user = sqlx::query_as::<_, User>(&format!(
         "SELECT {USER_COLS} FROM users WHERE email = $1 OR username = $1"
     ))
@@ -88,6 +94,7 @@ async fn login(
             &user,
             ip.clone(),
             crate::http_util::user_agent(&headers),
+            client_id.clone(),
         )
         .await?;
         let attempts = lock.0 + 1;
@@ -123,6 +130,7 @@ async fn login(
         user,
         ip,
         crate::http_util::user_agent(&headers),
+        client_id,
     )
     .await
 }
@@ -132,6 +140,7 @@ async fn record_login_failure(
     user: &User,
     ip: Option<String>,
     user_agent: Option<String>,
+    client_id: Option<String>,
 ) -> AppResult<()> {
     record(
         &state.pool,
@@ -143,6 +152,7 @@ async fn record_login_failure(
             detail: json!({}),
             ip,
             user_agent,
+            client_id,
         },
     )
     .await;
@@ -412,6 +422,7 @@ async fn revoke_my_consent(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -479,6 +490,7 @@ async fn update_me(
             detail: json!({ "display_name": display_name }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -520,6 +532,7 @@ async fn change_password(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;

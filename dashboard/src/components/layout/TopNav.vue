@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AppWindow, ChevronDown, Download, Fingerprint, KeyRound, Laptop, LogOut, PanelLeft, Shield, User } from "@lucide/vue";
+import { AppWindow, ChevronDown, Download, Fingerprint, KeyRound, Laptop, Link2, LogOut, PanelLeft, Shield, User } from "@lucide/vue";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
@@ -8,6 +8,7 @@ import {
   changePassword,
   checkPhone,
   fetchMeMfa,
+  fetchMyIdentities,
   fetchMySessions,
   listPasskeys,
   listMyConsents,
@@ -21,8 +22,10 @@ import {
   revokeMyConsent,
   revokeMySession,
   revokeOtherSessions,
+  unlinkIdentity,
   updateMe,
   type Consent,
+  type LinkedIdentity,
   type Passkey,
   type SessionInfo,
 } from "@/lib/api";
@@ -52,6 +55,11 @@ const showMfa = ref(false);
 const showSessions = ref(false);
 const showPasskeys = ref(false);
 const showConsents = ref(false);
+const showIdentities = ref(false);
+const identities = ref<LinkedIdentity[]>([]);
+const identitiesLoading = ref(false);
+const identitiesErr = ref("");
+const identitiesBusy = ref(false);
 const displayName = ref("");
 const profilePhone = ref("");
 const profileErr = ref("");
@@ -169,6 +177,38 @@ async function openConsents() {
   consentsErr.value = "";
   showConsents.value = true;
   await loadConsents();
+}
+
+async function openIdentities() {
+  menuOpen.value = false;
+  identitiesErr.value = "";
+  showIdentities.value = true;
+  await loadIdentities();
+}
+
+async function loadIdentities() {
+  identitiesLoading.value = true;
+  try {
+    const res = await fetchMyIdentities();
+    identities.value = res.identities;
+  } catch (e) {
+    identitiesErr.value = e instanceof Error ? e.message : "Failed to linked accounts";
+  } finally {
+    identitiesLoading.value = false;
+  }
+}
+
+async function onUnlinkIdentity(providerCode: string) {
+  identitiesErr.value = "";
+  identitiesBusy.value = true;
+  try {
+    await unlinkIdentity(providerCode);
+    await loadIdentities();
+  } catch (e) {
+    identitiesErr.value = e instanceof Error ? e.message : "Unlink failed";
+  } finally {
+    identitiesBusy.value = false;
+  }
 }
 
 async function loadConsents() {
@@ -477,6 +517,7 @@ function onKeydown(e: KeyboardEvent) {
     if (!sessionsBusy.value) showSessions.value = false;
     if (!passkeyBusy.value) showPasskeys.value = false;
     if (!consentsBusy.value) showConsents.value = false;
+    if (!identitiesBusy.value) showIdentities.value = false;
   }
 }
 
@@ -492,7 +533,7 @@ onUnmounted(() => {
 
 <template>
   <header
-    class="shell-inset sticky top-0 z-10 flex h-14 items-center justify-between gap-4 bg-background/90 backdrop-blur-md"
+    class="shell-inset sticky top-0 z-10 flex h-14 items-center justify-between gap-4 border-b border-border bg-background"
   >
     <div class="flex min-w-0 items-center gap-3">
       <UiButton
@@ -591,6 +632,15 @@ onUnmounted(() => {
           >
             <AppWindow class="h-3.5 w-3.5 text-muted-foreground" />
             Connected apps
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            class="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-foreground hover:bg-muted"
+            @click="openIdentities"
+          >
+            <Link2 class="h-3.5 w-3.5 text-muted-foreground" />
+            Linked accounts
           </button>
           <button
             type="button"
@@ -1039,6 +1089,63 @@ onUnmounted(() => {
 
           <div class="flex justify-end">
             <UiButton type="button" size="sm" @click="showConsents = false">Close</UiButton>
+          </div>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- Linked accounts (third-party identities) -->
+  <Teleport to="body">
+    <div v-if="showIdentities" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!identitiesBusy && (showIdentities = false)" />
+      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <h2 class="mb-4 text-base font-semibold">Linked accounts</h2>
+
+        <div v-if="identitiesLoading" class="py-8 text-center text-sm text-muted-foreground">
+          Loading…
+        </div>
+
+        <div v-else class="space-y-3">
+          <p v-if="identitiesErr" class="field-error">{{ identitiesErr }}</p>
+          <p class="text-xs text-muted-foreground">
+            Third-party accounts (GitHub, Google, Feishu, WeChat, OIDC) linked to this account.
+            You can sign in with them directly. Unlinking requires keeping at least one sign-in
+            method.
+          </p>
+
+          <div
+            v-for="i in identities"
+            :key="i.provider_code"
+            class="flex items-start justify-between gap-3 rounded-xl border border-border/50 px-4 py-3"
+          >
+            <div class="min-w-0">
+              <p class="truncate text-sm font-medium">{{ i.provider_display_name }}</p>
+              <p class="mt-0.5 text-[11px] text-muted-foreground">{{ i.email ?? i.provider_code }}</p>
+              <p class="type-meta mt-0.5 text-[11px]">
+                Linked {{ new Date(i.linked_at).toLocaleDateString() }}
+                <template v-if="i.last_login_at">
+                  · Last used {{ new Date(i.last_login_at).toLocaleDateString() }}
+                </template>
+              </p>
+            </div>
+            <UiButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              :disabled="identitiesBusy"
+              @click="onUnlinkIdentity(i.provider_code)"
+            >
+              Unlink
+            </UiButton>
+          </div>
+
+          <div v-if="identities.length === 0" class="py-6 text-center text-sm text-muted-foreground">
+            No linked accounts
+          </div>
+
+          <div class="flex justify-end">
+            <UiButton type="button" size="sm" @click="showIdentities = false">Close</UiButton>
           </div>
         </div>
       </div>

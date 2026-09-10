@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { useQrDataUrl } from "@/composables/useQrDataUrl";
 import {
+  fetchEnabledSsoProviders,
   loginChangePassword,
   mfaEnrollConfirm,
   mfaEnrollStart,
   verifyMfa,
   type LoginResult,
   type PublicUser,
+  type SsoProviderType,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 import { loginWithPasskey } from "@/composables/usePasskeys";
@@ -48,6 +50,12 @@ function safeOAuthReturn(returnTo: string): string {
   if (!returnTo || returnTo.includes("://") || returnTo.startsWith("//")) return "";
   if (!returnTo.startsWith("/oauth/authorize") && !returnTo.startsWith("/oauth/end_session")) return "";
   return returnTo;
+}
+
+/// Sanitized return_to used for OAuth app attribution of login audit events.
+function oauthReturnTo(): string | undefined {
+  const raw = typeof route.query.return_to === "string" ? route.query.return_to : "";
+  return safeOAuthReturn(raw) || undefined;
 }
 
 async function finishWithUser(user: PublicUser) {
@@ -94,7 +102,7 @@ async function handleLogin() {
   error.value = "";
   loading.value = true;
   try {
-    const res = await auth.login(email.value.trim(), password.value);
+    const res = await auth.login(email.value.trim(), password.value, oauthReturnTo());
     await handleLoginResult(res);
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Login failed";
@@ -124,7 +132,7 @@ async function handlePasskeyLogin() {
   error.value = "";
   loading.value = true;
   try {
-    const user = await loginWithPasskey(email.value.trim());
+    const user = await loginWithPasskey(email.value.trim(), oauthReturnTo());
     await finishWithUser(user);
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Passkey sign-in failed";
@@ -137,7 +145,11 @@ async function handleVerify() {
   error.value = "";
   loading.value = true;
   try {
-    const res = await verifyMfa({ code: mfaCode.value.trim(), method: mfaMethod.value });
+    const res = await verifyMfa({
+      code: mfaCode.value.trim(),
+      method: mfaMethod.value,
+      return_to: oauthReturnTo(),
+    });
     await finishWithUser(res.user);
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Verification failed";
@@ -150,7 +162,7 @@ async function handleEnrollConfirm() {
   error.value = "";
   loading.value = true;
   try {
-    const res = await mfaEnrollConfirm(enrollCode.value.trim());
+    const res = await mfaEnrollConfirm(enrollCode.value.trim(), oauthReturnTo());
     recoveryCodes.value = res.recovery_codes;
     recoveryAck.value = false;
     auth.completeLogin(res.user);
@@ -181,6 +193,50 @@ function backToPassword() {
   step.value = "password";
   error.value = "";
 }
+
+// --- Third-party sign-in ---
+
+type EnabledProvider = { code: string; type: SsoProviderType; display_name: string };
+const ssoProviders = ref<EnabledProvider[]>([]);
+
+const SSO_ERROR_MESSAGES: Record<string, string> = {
+  unknown_provider: "This sign-in provider is not configured.",
+  provider_disabled: "This sign-in provider is currently disabled.",
+  state_mismatch: "Sign-in session expired. Please try again.",
+  upstream_error: "The sign-in provider returned an error. Please try again.",
+  missing_code: "Sign-in was cancelled or incomplete. Please try again.",
+  no_matching_account:
+    "No local account matches this third-party email. Sign in with password once to link, or use a matching verified email.",
+};
+
+onMounted(async () => {
+  try {
+    const res = await fetchEnabledSsoProviders();
+    ssoProviders.value = res.providers;
+  } catch {
+    /* provider buttons are optional; ignore load failures */
+  }
+  const err = typeof route.query.sso_error === "string" ? route.query.sso_error : "";
+  if (err) {
+    error.value = SSO_ERROR_MESSAGES[err] ?? "Third-party sign-in failed.";
+  }
+});
+
+function ssoStartUrl(code: string): string {
+  const params = new URLSearchParams();
+  const returnTo = oauthReturnTo();
+  if (returnTo) params.set("client_id", returnTo);
+  const query = params.toString();
+  return `/api/v1/auth/sso/${encodeURIComponent(code)}/start${query ? `?${query}` : ""}`;
+}
+
+const SSO_BADGES: Record<SsoProviderType, { label: string; class: string }> = {
+  github: { label: "GH", class: "bg-[hsl(217_30%_20%)] text-white" },
+  google: { label: "G", class: "bg-[hsl(0_70%_55%)] text-white" },
+  feishu: { label: "FS", class: "bg-[hsl(211_100%_50%)] text-white" },
+  wechat: { label: "WX", class: "bg-[hsl(142_70%_40%)] text-white" },
+  oidc: { label: "ID", class: "bg-primary text-primary-foreground" },
+};
 </script>
 
 <template>
@@ -253,6 +309,32 @@ function backToPassword() {
           <RouterLink to="/reset-password" class="text-xs text-muted-foreground hover:text-foreground">
             Forgot password?
           </RouterLink>
+        </div>
+
+        <div v-if="ssoProviders.length" class="space-y-3 pt-1">
+          <div class="flex items-center gap-3">
+            <span class="h-px flex-1 bg-border" />
+            <span class="text-[11px] uppercase tracking-wider text-muted-foreground">
+              or continue with
+            </span>
+            <span class="h-px flex-1 bg-border" />
+          </div>
+          <div class="grid gap-2" :class="ssoProviders.length > 2 ? 'grid-cols-2' : 'grid-cols-1'">
+            <a
+              v-for="p in ssoProviders"
+              :key="p.code"
+              :href="ssoStartUrl(p.code)"
+              class="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+            >
+              <span
+                class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[9px] font-bold"
+                :class="SSO_BADGES[p.type]?.class ?? SSO_BADGES.oidc.class"
+              >
+                {{ SSO_BADGES[p.type]?.label ?? SSO_BADGES.oidc.label }}
+              </span>
+              <span class="truncate">{{ p.display_name }}</span>
+            </a>
+          </div>
         </div>
       </form>
 

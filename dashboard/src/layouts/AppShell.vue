@@ -28,7 +28,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     <AppSidebar />
     <div class="flex min-w-0 flex-1 flex-col">
       <TopNav />
-      <main class="shell-inset flex-1 overflow-auto pb-8 pt-6">
+      <main class="shell-inset flex-1 overflow-auto py-4">
         <div class="page-stack">
           <RouterView />
         </div>

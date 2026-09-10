@@ -5,7 +5,13 @@ import PageHeader from "@/components/ui/PageHeader.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
-import { fetchAuditLogs, auditLogsExportUrl, type AuditLogItem } from "@/lib/api";
+import {
+  fetchAuditLogs,
+  fetchAuditLogFacets,
+  auditLogsExportUrl,
+  type AuditLogItem,
+  type AuditLogFacets,
+} from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
@@ -17,6 +23,10 @@ const page = ref(1);
 const pageSize = ref(20);
 const searchQuery = ref("");
 const actionFilter = ref("");
+const clientFilter = ref("");
+const browserFilter = ref("");
+const osFilter = ref("");
+const facets = ref<AuditLogFacets | null>(null);
 const sortKey = ref("created_at");
 const sortDir = ref<"asc" | "desc">("desc");
 
@@ -61,6 +71,9 @@ async function load() {
     const res = await fetchAuditLogs({
       q: searchQuery.value.trim() || undefined,
       action: actionFilter.value || undefined,
+      client_id: clientFilter.value || undefined,
+      browser: browserFilter.value || undefined,
+      os: osFilter.value || undefined,
       page: page.value,
       page_size: pageSize.value,
       sort: sortKey.value,
@@ -94,12 +107,19 @@ watch([page, pageSize], () => {
   void load();
 });
 
-watch([searchQuery, actionFilter], () => {
+watch([searchQuery, actionFilter, clientFilter, browserFilter, osFilter], () => {
   page.value = 1;
   void load();
 });
 
-onMounted(load);
+onMounted(() => {
+  void load();
+  void fetchAuditLogFacets()
+    .then((f) => (facets.value = f))
+    .catch(() => {
+      // Non-fatal: filter dropdowns just stay empty.
+    });
+});
 
 function formatTime(iso: string) {
   try {
@@ -121,6 +141,10 @@ function prettyDetail(detail: Record<string, unknown>): string {
   } catch {
     return String(detail);
   }
+}
+
+function deviceLabel(row: AuditLogItem) {
+  return [row.browser, row.os].filter(Boolean).join(" / ") || "—";
 }
 </script>
 
@@ -153,11 +177,37 @@ function prettyDetail(detail: Record<string, unknown>): string {
             {{ a || "All actions" }}
           </option>
         </select>
+        <select
+          v-model="clientFilter"
+          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+        >
+          <option value="">All apps</option>
+          <option v-for="c in facets?.clients ?? []" :key="c.client_id" :value="c.client_id">
+            {{ c.client_id }}{{ c.enabled ? "" : " (disabled)" }}
+          </option>
+        </select>
+        <select
+          v-model="browserFilter"
+          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+        >
+          <option value="">All browsers</option>
+          <option v-for="b in facets?.browsers ?? []" :key="b" :value="b">{{ b }}</option>
+        </select>
+        <select
+          v-model="osFilter"
+          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+        >
+          <option value="">All OSes</option>
+          <option v-for="o in facets?.oses ?? []" :key="o" :value="o">{{ o }}</option>
+        </select>
         <a
           :href="
             auditLogsExportUrl({
               q: searchQuery.trim() || undefined,
               action: actionFilter || undefined,
+              client_id: clientFilter || undefined,
+              browser: browserFilter || undefined,
+              os: osFilter || undefined,
             })
           "
           download
@@ -200,7 +250,10 @@ function prettyDetail(detail: Record<string, unknown>): string {
                   @toggle="toggleSort"
                 />
                 <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                  Client
+                  App
+                </th>
+                <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                  Device
                 </th>
                 <SortableTh
                   label="Action"
@@ -247,8 +300,14 @@ function prettyDetail(detail: Record<string, unknown>): string {
                     {{ row.ip || "—" }}
                   </span>
                 </td>
+                <td class="px-5 py-3 text-xs">
+                  <span v-if="row.client_id" class="rounded bg-muted/60 px-1.5 py-0.5 font-mono">
+                    {{ row.client_id }}
+                  </span>
+                  <span v-else class="text-muted-foreground">—</span>
+                </td>
                 <td class="px-5 py-3 text-xs text-muted-foreground">
-                  {{ [row.browser, row.os].filter(Boolean).join(" / ") || "—" }}
+                  {{ deviceLabel(row) }}
                 </td>
                 <td class="px-5 py-3 font-mono text-xs">{{ row.action }}</td>
                 <td class="px-5 py-3 text-xs">{{ row.resource_type }}</td>
@@ -304,9 +363,21 @@ function prettyDetail(detail: Record<string, unknown>): string {
                 <dd class="mt-0.5 font-mono text-xs">{{ detailRow.ip || "—" }}</dd>
               </div>
               <div>
-                <dt class="type-meta text-[11px] uppercase tracking-wide">Client</dt>
-                <dd class="mt-0.5 text-xs">{{ [detailRow.browser, detailRow.os].filter(Boolean).join(" / ") || "—" }}</dd>
+                <dt class="type-meta text-[11px] uppercase tracking-wide">Device</dt>
+                <dd class="mt-0.5 text-xs">{{ deviceLabel(detailRow) }}</dd>
               </div>
+            </div>
+            <div>
+              <dt class="type-meta text-[11px] uppercase tracking-wide">App</dt>
+              <dd class="mt-0.5">
+                <span
+                  v-if="detailRow.client_id"
+                  class="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs"
+                >
+                  {{ detailRow.client_id }}
+                </span>
+                <span v-else class="text-xs text-muted-foreground">—</span>
+              </dd>
             </div>
             <div>
               <dt class="type-meta text-[11px] uppercase tracking-wide">User agent</dt>

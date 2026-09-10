@@ -251,6 +251,7 @@ async fn register_finish(
             detail: json!({ "credential_id": credential_id }),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -280,6 +281,7 @@ async fn remove_passkey(
             detail: json!({}),
             ip: None,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id: None,
         },
     )
     .await;
@@ -336,6 +338,10 @@ async fn login_start(
 struct LoginFinishBody {
     token: String,
     credential: Value,
+    /// Optional `/oauth/authorize?...` return URL carried through from the
+    /// login page, used to attribute the login to the initiating OAuth app.
+    #[serde(default)]
+    return_to: Option<String>,
 }
 
 async fn login_finish(
@@ -346,6 +352,8 @@ async fn login_finish(
     Json(body): Json<LoginFinishBody>,
 ) -> AppResult<impl IntoResponse> {
     let ip = crate::http_util::client_ip(&headers, Some(addr));
+    let client_id =
+        crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
 
     let ChallengeState::Authenticate {
         state: auth_state,
@@ -423,6 +431,7 @@ async fn login_finish(
             detail: json!({ "mfa": "passkey" }),
             ip,
             user_agent: crate::http_util::user_agent(&headers),
+            client_id,
         },
     )
     .await;

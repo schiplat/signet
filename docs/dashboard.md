@@ -33,7 +33,10 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ### Overview
 
 - 用户 / 角色 / 客户端汇总（全局统计卡）
+- **应用筛选器**：右上角可选全部应用 / 某个接入应用 / `Signet (direct)`（无应用归属的直登）；选中后登录合计、趋势图、最近登录与下方分布图均切换为该应用视角
 - **登录趋势**：近 30 日一张图叠加 **当日 / 7 日滚动 / 30 日滚动** 登录次数；右上角仍显示当前 24h·7d·30d 合计
+- **Logins by app**：近 30 天各应用登录次数对比图（Top 10 横向条形；`(direct)` 归并展示）
+- **Browsers / OS**：近 30 天登录事件的浏览器与操作系统分布图
 - 登录明细统一在 **Audit logs** 查看（Overview 不再内嵌最近登录列表，避免与 Audit logs / Activity 重复）
 
 ### Users
@@ -55,10 +58,10 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 
 ### Audit logs
 
-- 搜索（含 IP）、action 过滤、列排序（含 **Login IP**、**Client**）  
-- 展示 actor、IP、浏览器/OS、action、resource  
-- **点击任意行**查看事件详情（含完整 detail JSON 与 User-Agent）  
-- **Export CSV**：导出当前过滤结果的 CSV  
+- 搜索（含 IP）、action / 应用（App）/ 浏览器 / OS 过滤、列排序（含 **Login IP**）  
+- 展示 actor、IP、应用（`client_id` 徽标）、浏览器/OS（**Device** 列）、action、resource  
+- **点击任意行**查看事件详情（含应用、完整 detail JSON 与 User-Agent）  
+- **Export CSV**：导出当前过滤结果的 CSV（含 `client_id` 列）  
 
 ### Settings（admin only）
 
@@ -67,16 +70,18 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ### Integrations（admin only）
 
 - Webhooks：列出 / 新建 / 删除，类型可选 **飞书（Feishu）** 或 **Generic**，可查看最近投递状态
+- **Third-party sign-in**：GitHub / Google / 飞书 / 微信开放平台 / 通用 OIDC 连接器的增删改查与启用禁用；展示各 provider 需注册的 **Callback URL** 与绑定账号数；编辑时 secret 留空表示保持不变（不回显）
 - SCIM v2：展示启用状态与端点，并支持 **生成 / 轮换 / 吊销** Bearer token（明文仅展示一次，库中只存哈希）
 - WebAuthn：展示 RP ID / RP Origin
 
 ### 账户菜单（右上角，全角色）
 
-- Edit profile / Change password / **Two-factor auth** / **Active sessions** / **Passkeys** / Log out  
+- Edit profile / Change password / **Two-factor auth** / **Active sessions** / **Passkeys** / **Linked accounts** / Log out  
 - Two-factor auth：绑定 / 换绑 / 轮换恢复码；非强制时可 **Disable MFA**（强制时显示策略提示且不可禁用）  
 - Edit profile：可改显示名与**联系电话**（手机实时查重、排除自身）  
 - Active sessions：查看当前会话（IP、设备、时间），撤销单个或「除当前外全部」  
 - Passkeys：列出 / 注册（WebAuthn） / 删除 passkey  
+- **Linked accounts**：查看已绑定的第三方账号（provider、邮箱、绑定/最近使用时间），可 **Unlink**（需保留至少一种登录方式）  
 - 恢复码一次性展示页提供 **Copy** 与 **Download**（含 enroll 与 regenerate 两种入口）
 
 ---
@@ -84,10 +89,12 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ## 3. 登录 UX
 
 1. 密码（或 **Passkey**，输入邮箱后一键登录）  
-2. 若 `mfa_required` → TOTP 或恢复码  
-3. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  
-4. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
-5. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
+2. **第三方登录**：若管理员启用了 provider，密码表单下方出现 "or continue with" 分隔线与按钮（GitHub / Google / 飞书 / 微信 / 自定义 OIDC），点击后跳转上游授权，成功回调后直接签发会话  
+3. 若 `mfa_required` → TOTP 或恢复码  
+4. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  
+5. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
+6. 第三方登录失败回登录页并显示 `?sso_error=` 对应文案  
+7. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
 
 ---
 

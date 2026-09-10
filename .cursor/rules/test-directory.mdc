@@ -1,0 +1,46 @@
+---
+description: All tests live in dedicated test directories, never inline or next to sources
+alwaysApply: true
+---
+
+# Test Directory Layout
+
+Test code never lives inside production source files. Put every test in the
+dedicated test directory for its layer, so `src/` stays free of test modules
+and test helpers.
+
+## Rust (`crates/<crate>/`)
+
+- Tests go in `crates/<crate>/tests/*.rs` (one file per area, e.g. `tests/audit_client_id.rs`).
+- Do **not** add `#[cfg(test)] mod tests { ... }` blocks inside `src/*.rs`.
+- Do **not** create `src/**/tests/` subdirectories.
+- Integration tests can only reach `pub` items. If a helper is only public
+  for testing, say so in its doc comment (`/// Exposed for tests; ...`) and
+  keep its surface minimal.
+- DB-backed tests use the shared harness in `crates/signet/tests/common/` (create if absent).
+
+```rust
+// ❌ BAD — inline test module in crates/signet/src/audit.rs
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses_return_to() { ... }
+}
+
+// ✅ GOOD — crates/signet/tests/audit_client_id.rs
+use signet::audit::resolve_audit_client_id_contract;
+
+#[test]
+fn parses_return_to() { ... }
+```
+
+## Frontend (`dashboard/`)
+
+- Tests go in `dashboard/tests/` with the `*.spec.ts` suffix (e.g. `tests/overview.spec.ts`).
+- Do **not** colocate `*.spec.ts` / `*.test.ts` files next to components or views.
+- Test-only fixtures and helpers live under `dashboard/tests/fixtures/`.
+
+## Running
+
+- Rust: `cargo test --workspace` (picks up every `tests/` target).
+- Frontend: `npm run test` in `dashboard/` (wire up the script when adding the first spec).
