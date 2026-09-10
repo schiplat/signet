@@ -1,67 +1,57 @@
 name: Build Signet Image
 
-# Packages the linux/amd64 binary produced by release-binary.yml into an ACR
-# image and uploads the deploy config bundle to OSS. Does NOT compile Rust or
-# the dashboard again — that work already happened in release-binary.
+# Runs only after Release Signet Binary succeeds (or on manual dispatch).
+# Packages the already-built linux/amd64 binary into an ACR image and uploads
+# the deploy config bundle to OSS. Does not compile Rust or the dashboard.
 on:
+  workflow_run:
+    workflows: ["Release Signet Binary"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image tag override (default: git tag or Cargo.toml version)'
-        required: false
+        description: 'Image tag / GitHub Release version (e.g. 0.4.3 or v0.4.3)'
+        required: true
         type: string
-  push:
-    tags:
-      - 'v*'
-    paths:
-      - 'crates/**'
-      - 'dashboard/**'
-      - 'migrations/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'build/**'
-      - 'deploy/**'
-      - '.github/workflows/release-signet.yml'
-      - '.github/workflows/release-binary.yml'
+
+concurrency:
+  group: signet-image-${{ github.event.workflow_run.head_sha || inputs.version || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
-  contents: write
-
-env:
-  CARGO_TERM_COLOR: always
+  contents: read
+  actions: read
 
 jobs:
-  # Compile once (multi-arch binaries + GitHub Release assets).
-  binary:
-    uses: ./.github/workflows/release-binary.yml
-    with:
-      version: ${{ inputs.version }}
-    secrets: inherit
-
   docker:
-    needs: binary
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # workflow_run checks out the default branch by default; pin to the
+          # commit that produced the binaries so Dockerfile/deploy match.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Resolve version
         id: ver
         shell: bash
         run: |
           set -euo pipefail
-          v="${{ needs.binary.outputs.version }}"
+          v="${{ inputs.version }}"
           if [[ -z "${v}" ]]; then
-            if [[ -n "${{ inputs.version }}" ]]; then
-              v="${{ inputs.version }}"
-              v="${v#v}"
-            elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-              v="${GITHUB_REF#refs/tags/v}"
-            else
-              v="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+            head="${{ github.event.workflow_run.head_branch }}"
+            if [[ "${head}" == v* ]]; then
+              v="${head}"
             fi
           fi
+          if [[ -z "${v}" ]]; then
+            v="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          fi
+          v="${v#v}"
           echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${v}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${v}"
 
       - name: Validate ACR configuration
@@ -81,12 +71,26 @@ jobs:
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
 
-      # Reuse the linux/amd64 artifact from the binary job — no second cargo build.
-      - name: Download linux-amd64 binary
+      - name: Download linux-amd64 from binary workflow
+        if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
           name: linux-amd64
           path: image-context
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download linux-amd64 from GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p image-context
+          gh release download "${TAG}" \
+            --pattern "signet-*-linux-amd64" \
+            --dir image-context
 
       - name: Stage binary for Docker context
         shell: bash

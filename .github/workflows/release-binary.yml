@@ -1,28 +1,22 @@
 name: Release Signet Binary
 
-# Builds multi-arch binaries (dashboard embedded) and publishes them to a
-# GitHub Release. Also callable from release-signet.yml so the Docker image
-# job reuses these artifacts instead of compiling a second time.
+# Tag (or manual dispatch) builds multi-arch binaries with the dashboard
+# embedded and publishes them to a GitHub Release. Build Signet Image waits
+# for this workflow to succeed via workflow_run — it does not compile again.
 on:
-  workflow_call:
-    inputs:
-      version:
-        description: 'Binary version override (default: git tag or Cargo.toml version)'
-        required: false
-        type: string
-    outputs:
-      version:
-        description: 'Resolved release version (no leading v)'
-        value: ${{ jobs.meta.outputs.version }}
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       version:
         description: 'Binary version override (default: git tag or Cargo.toml version)'
         required: false
         type: string
-  # Tag pushes are owned by release-signet.yml, which calls this workflow so the
-  # Docker job can reuse the same artifacts (no second compile). Use
-  # workflow_dispatch here for a binaries-only GitHub Release.
+
+concurrency:
+  group: release-binary-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -44,7 +38,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # workflow_call / workflow_dispatch input, then git tag, then Cargo.toml
           input_ver="${{ inputs.version }}"
           if [[ -n "${input_ver}" ]]; then
             v="${input_ver}"
@@ -86,8 +79,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: dashboard/pnpm-lock.yaml
 
-      # The signet binary embeds the Vue dashboard via rust-embed and the sqlx
-      # migrations, so the frontend must be built (dashboard/dist) before cargo.
+      # The signet binary embeds the Vue dashboard via rust-embed, so
+      # dashboard/dist must exist before cargo build.
       - name: Build dashboard
         working-directory: dashboard
         run: |
@@ -119,6 +112,7 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ steps.stage.outputs.name }}
           if-no-files-found: error
+          retention-days: 7
 
   release:
     needs: [meta, build]
