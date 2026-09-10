@@ -249,7 +249,7 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 
 ## 12. 第三方登录（身份联邦）
 
-管理员在后台配置上游身份源后，用户可用第三方账号注册/登录。配置存于 `upstream_providers`（`client_secret` AES-256-GCM 加密存储），绑定关系存于 `user_identities`（`(provider_code, subject)` 唯一）。
+管理员在后台配置上游身份源后，用户可用第三方账号登录。配置存于 `upstream_providers`（`client_secret` AES-256-GCM 加密存储），绑定关系存于 `user_identities`（`(provider_code, subject)` 唯一）。
 
 支持类型：`github` / `google` / `feishu` / `wechat` / `oidc`（通用 OIDC discovery，需 `issuer_url`）。
 
@@ -258,12 +258,27 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 | 路径 | 说明 |
 |------|------|
 | `GET /api/v1/auth/sso/{provider}/start?client_id=` | 生成 CSRF state（HttpOnly cookie 存明文、库中仅存 SHA-256，一次性，10 分钟），302 到上游授权页 |
-| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话（`auth.login.thirdparty` 审计） |
+| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话或暂存待绑定（`auth.login.thirdparty` 审计） |
 | `GET /api/v1/auth/sso/providers` | 公开接口：返回启用中的 provider（登录页按钮用） |
 
-绑定策略（防账号接管）：上游 email **已验证** 且精确匹配本地 active 账号时自动绑定并登录；否则拒绝（审计记录 `result=failure`），用户需先本地登录后手动绑定。
+### 绑定策略（防账号接管）
 
-失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error`。
+回调时按以下顺序判定（任一成功即结束）：
+
+1. **已绑定**：`(provider_code, subject)` 已在 `user_identities` → 直接签发会话登录。
+2. **已登录会话**：浏览器已有有效 `signet_session`（例如在个人中心主动去绑）→ 把该上游身份绑到当前用户并登录。
+3. **邮箱自动绑定**：上游返回的 email **已验证**（`email_verified`），且 `lower(email)` 精确匹配本地 `status=active` 用户 → 自动写入 `user_identities` 并登录。
+4. **否则 → 暂存待绑定**：不创建本地账号。将 `(provider, subject, profile)` 写入 `identity_link_challenges`（`subject` 非空），并设置 HttpOnly cookie `signet_sso_pending`（**15 分钟**）；浏览器重定向回 `/login?sso_error=no_matching_account`。
+
+**完成待绑定**：用户在 15 分钟内用密码 / MFA / Passkey **成功登录本地账号**后，服务端消费 `signet_sso_pending`，把暂存身份写入 `user_identities`（审计 `auth.identity.link`，`via=pending_after_login`）。之后再点同一第三方即可直接登录。
+
+注意：
+
+- 不会因未匹配而自动注册新用户。
+- 若暂存的 `subject` 已被其他本地用户占用，登录后不会抢绑（仅清除 pending cookie）。
+- 飞书 / 微信等若未返回可用邮箱，通常走第 4 步（暂存 → 本地登录完成绑定）。微信 Open Platform 一般无邮箱。
+
+失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `missing_code` / `no_matching_account`。
 
 ### 管理端 API（admin）
 

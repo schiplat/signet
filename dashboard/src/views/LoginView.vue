@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
+import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import { useQrDataUrl } from "@/composables/useQrDataUrl";
 import {
   fetchEnabledSsoProviders,
@@ -206,7 +207,7 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   upstream_error: "The sign-in provider returned an error. Please try again.",
   missing_code: "Sign-in was cancelled or incomplete. Please try again.",
   no_matching_account:
-    "No local account matches this third-party email. Sign in with password once to link, or use a matching verified email.",
+    "No Signet account matches this third-party identity yet. Sign in with your password now to link it (valid for 15 minutes).",
 };
 
 onMounted(async () => {
@@ -229,14 +230,6 @@ function ssoStartUrl(code: string): string {
   const query = params.toString();
   return `/api/v1/auth/sso/${encodeURIComponent(code)}/start${query ? `?${query}` : ""}`;
 }
-
-const SSO_BADGES: Record<SsoProviderType, { label: string; class: string }> = {
-  github: { label: "GH", class: "bg-[hsl(217_30%_20%)] text-white" },
-  google: { label: "G", class: "bg-[hsl(0_70%_55%)] text-white" },
-  feishu: { label: "FS", class: "bg-[hsl(211_100%_50%)] text-white" },
-  wechat: { label: "WX", class: "bg-[hsl(142_70%_40%)] text-white" },
-  oidc: { label: "ID", class: "bg-primary text-primary-foreground" },
-};
 </script>
 
 <template>
@@ -319,20 +312,16 @@ const SSO_BADGES: Record<SsoProviderType, { label: string; class: string }> = {
             </span>
             <span class="h-px flex-1 bg-border" />
           </div>
-          <div class="grid gap-2" :class="ssoProviders.length > 2 ? 'grid-cols-2' : 'grid-cols-1'">
+          <div class="flex flex-wrap justify-center gap-4">
             <a
               v-for="p in ssoProviders"
               :key="p.code"
               :href="ssoStartUrl(p.code)"
-              class="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2 text-xs font-medium text-foreground transition-colors hover:bg-muted/60"
+              class="inline-flex items-center justify-center rounded-lg p-1.5 transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :aria-label="`Continue with ${p.display_name}`"
+              :title="p.display_name"
             >
-              <span
-                class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[9px] font-bold"
-                :class="SSO_BADGES[p.type]?.class ?? SSO_BADGES.oidc.class"
-              >
-                {{ SSO_BADGES[p.type]?.label ?? SSO_BADGES.oidc.label }}
-              </span>
-              <span class="truncate">{{ p.display_name }}</span>
+              <SsoProviderIcon :type="p.type" class="h-10 w-10" />
             </a>
           </div>
         </div>

@@ -81,7 +81,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 - Edit profile：可改显示名与**联系电话**（手机实时查重、排除自身）  
 - Active sessions：查看当前会话（IP、设备、时间），撤销单个或「除当前外全部」  
 - Passkeys：列出 / 注册（WebAuthn） / 删除 passkey  
-- **Linked accounts**：查看已绑定的第三方账号（provider、邮箱、绑定/最近使用时间），可 **Unlink**（需保留至少一种登录方式）  
+- **Linked accounts**：查看已绑定的第三方账号（provider、邮箱、绑定/最近使用时间），可 **Unlink**（需保留至少一种登录方式）。首次绑定见登录页第三方流程（邮箱自动匹配，或「暂存 15 分钟 → 本地登录完成绑定」）  
 - 恢复码一次性展示页提供 **Copy** 与 **Download**（含 enroll 与 regenerate 两种入口）
 
 ---
@@ -89,12 +89,18 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ## 3. 登录 UX
 
 1. 密码（或 **Passkey**，输入邮箱后一键登录）  
-2. **第三方登录**：若管理员启用了 provider，密码表单下方出现 "or continue with" 分隔线与按钮（GitHub / Google / 飞书 / 微信 / 自定义 OIDC），点击后跳转上游授权，成功回调后直接签发会话  
-3. 若 `mfa_required` → TOTP 或恢复码  
-4. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  
-5. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
-6. 第三方登录失败回登录页并显示 `?sso_error=` 对应文案  
-7. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
+2. **第三方登录**：若管理员启用了 provider，密码表单下方出现 "or continue with" 分隔线与按钮（GitHub / Google / 飞书 / 微信 / 自定义 OIDC），点击后跳转上游授权  
+3. **绑定结果**（回调后）：  
+   - 已绑定或邮箱自动匹配 → 直接签发会话进入系统  
+   - 尚无匹配本地账号 → 回登录页 `?sso_error=no_matching_account`，并暂存待绑定（HttpOnly cookie，**15 分钟**）。用户**立即**用密码 / MFA / Passkey 登录本地账号后，自动完成绑定；之后同一第三方可直接登录  
+   - 已登录状态下走 SSO 回调 → 把该上游身份绑到当前用户  
+4. 若 `mfa_required` → TOTP 或恢复码  
+5. 若 `enroll_required` → 扫码绑定 → 一次性展示恢复码  
+6. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
+7. 其他第三方失败同样回登录页并显示 `?sso_error=` 对应文案（`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `missing_code` 等）  
+8. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
+
+详情与防接管规则见 [api-v1.md §12](./api-v1.md#12-第三方登录身份联邦)。
 
 ---
 

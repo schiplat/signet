@@ -245,6 +245,7 @@ async fn issue_session(
             state.config.session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
+    let jar = crate::federation::consume_pending_link(state, jar, &user).await;
 
     crate::login_alert::track_login(&state.pool, &user, ip.as_deref(), user_agent.as_deref()).await;
 
@@ -397,6 +398,7 @@ pub async fn begin_login_mfa_flow(
         state.config.cookie_secure,
         state.config.session_ttl_hours,
     ));
+    let jar = crate::federation::consume_pending_link(state, jar, &user).await;
     crate::login_alert::track_login(&state.pool, &user, ip.as_deref(), user_agent.as_deref()).await;
     record(
         &state.pool,
@@ -725,6 +727,7 @@ async fn enroll_confirm_challenge(
             state.config.session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
+    let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
     crate::login_alert::track_login(
         &state.pool,

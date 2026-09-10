@@ -8,9 +8,8 @@ name: Build Signet Image
 # Required secrets / vars:
 #   ACR: ACR_REGISTRY, ACR_NAMESPACE, ACR_USERNAME, ACR_PASSWORD (secrets)
 #        ACR_REPOSITORY (var)
-#   Docker Hub: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN (secrets)
-#               DOCKERHUB_NAMESPACE (var, default dadoulab)
-#               DOCKERHUB_REPOSITORY (var, default = ACR_REPOSITORY)
+#   Docker Hub: DOCKERHUB_USERNAME (var), DOCKERHUB_TOKEN (secret)
+#               image → ${DOCKERHUB_USERNAME}/signet
 on:
   workflow_run:
     workflows: ["Release Signet Binary"]
@@ -72,15 +71,11 @@ jobs:
           : "${ACR_REPOSITORY:?ACR_REPOSITORY var missing}"
           : "${ACR_USERNAME:?ACR_USERNAME secret missing}"
           : "${ACR_PASSWORD:?ACR_PASSWORD secret missing}"
-          : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME secret missing}"
+          : "${DOCKERHUB_USERNAME:?DOCKERHUB_USERNAME var missing}"
           : "${DOCKERHUB_TOKEN:?DOCKERHUB_TOKEN secret missing}"
 
-          # Defaults: dadoulab org + same repository name as ACR.
-          hub_ns="${DOCKERHUB_NAMESPACE:-dadoulab}"
-          hub_repo="${DOCKERHUB_REPOSITORY:-${ACR_REPOSITORY}}"
-
           acr_image="${ACR_REGISTRY}/${ACR_NAMESPACE}/${ACR_REPOSITORY}"
-          hub_image="${hub_ns}/${hub_repo}"
+          hub_image="${DOCKERHUB_USERNAME}/signet"
           echo "acr_image=${acr_image}" >> "$GITHUB_OUTPUT"
           echo "hub_image=${hub_image}" >> "$GITHUB_OUTPUT"
           echo "ACR target: ${acr_image}"
@@ -91,10 +86,8 @@ jobs:
           ACR_REPOSITORY: ${{ vars.ACR_REPOSITORY }}
           ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
           ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-          DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE }}
-          DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY }}
 
       - name: Download linux-amd64 from binary workflow
         if: github.event_name == 'workflow_run'
@@ -140,7 +133,7 @@ jobs:
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Docker meta
