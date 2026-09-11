@@ -1,14 +1,22 @@
+# Local image build + optional Postgres.
+# From the repository root:
+#   docker compose -f build/docker-compose.yml --profile dev up -d db
+#   docker compose -f build/docker-compose.yml up -d --build
+#
+# Production pull-only stack lives under deploy/ (see deploy/docker-compose.yml).
+
 services:
-  # Production application. Connects to an existing PostgreSQL via
-  # SIGNET_DATABASE_URL (from .env) — no database is started here.
+  # Builds the multi-stage image (Node + Rust). Connects to Postgres via
+  # SIGNET_DATABASE_URL in the repo-root .env — no DB is started unless
+  # the `dev` profile is enabled.
   signet:
     build:
-      context: .
+      context: ..
       dockerfile: build/Dockerfile
     image: signet:latest
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     ports:
       - "8443:8443"
     volumes:
@@ -17,7 +25,7 @@ services:
       - signet_data:/app/data
 
   # Local development only. Production uses an existing PostgreSQL container,
-  # so this service is opt-in via `docker compose --profile dev up db`.
+  # so this service is opt-in via `--profile dev`.
   db:
     image: postgres:16-alpine
     profiles: ["dev"]

@@ -12,8 +12,8 @@
 # display name, password).
 #
 # signet connects to an EXISTING PostgreSQL via SIGNET_DATABASE_URL (from .env).
-# No database is started here — the `db` service in the repo-root
-# docker-compose.yml is a local-dev convenience only.
+# No database is started here — the `db` service in
+# build/docker-compose.yml is a local-dev convenience only.
 #
 # On gz4, signet joins the `manager-net` Docker network created by the
 # super-manager stack. The DB URL is composed here (see `environment:`) from

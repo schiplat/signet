@@ -17,6 +17,8 @@ Unified identity authentication (SSO / OIDC IdP) service.
 - **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
   Binding: verified email match → auto-link; else **JIT create** a `member` when Settings → JIT is on (default; also `SIGNET_SSO_JIT_PROVISION` fallback) and the provider returns a verified email; otherwise stash pending identity (15 min) for password bind. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
+![Dashboard overview](./docs/screenshot_overview.png)
+
 ## Documentation
 
 | Document | Contents |
@@ -28,6 +30,7 @@ Unified identity authentication (SSO / OIDC IdP) service.
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API** (unified `/api/v1/...`, incl. SSO federation) |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / recovery codes / global & per-user enforcement |
 | [docs/dashboard.md](./docs/dashboard.md) | Dashboard pages & permissions |
+| [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
 
 ## Local development
 
@@ -123,7 +126,8 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 
 Tag a release (example): `git tag -a v0.4.3 -m v0.4.3 && git push origin v0.4.3`.
 
-Deploy compose lives under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`).
+Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
+(`docker compose -f build/docker-compose.yml --profile dev up -d db`).
 
 ## Repository structure
 
@@ -131,8 +135,8 @@ Deploy compose lives under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tp
 crates/signet/          Axum OIDC IdP + /api/v1 (+ federation/)
 dashboard/              Vue 3 + Tailwind CSS v4
 migrations/             Postgres migrations (… audit client_id, identity federation, …)
-build/Dockerfile.runtime  Runtime image (copies prebuilt binary; no compile)
+build/                  Dockerfiles + local compose (image build, optional Postgres)
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
-deploy/                 Production compose + env template
+deploy/                 Production compose + env template (OSS config bundle)
 docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard
 ```

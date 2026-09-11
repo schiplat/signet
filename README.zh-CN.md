@@ -17,6 +17,8 @@
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
   绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则在 Settings「JIT provision」开启（**默认开**，亦可用 `SIGNET_SSO_JIT_PROVISION` 回退）时 **JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
+![Dashboard 总览](./docs/screenshot_overview.png)
+
 ## 文档
 
 | 文档 | 内容 |
@@ -28,6 +30,7 @@
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API**（统一 `/api/v1/...`，含第三方登录） |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / 恢复码 / 全局与用户强制策略 |
 | [docs/dashboard.md](./docs/dashboard.md) | 管理台页面与权限说明 |
+| [docs/deploy.md](./docs/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
 
 ## 本地开发
 
@@ -121,7 +124,8 @@ cd .. && cargo build -p signet
 
 发版示例：`git tag -a v0.4.3 -m v0.4.3 && git push origin v0.4.3`。
 
-生产编排见 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`）。
+构建与部署布局见 [`docs/deploy.md`](./docs/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
+（`docker compose -f build/docker-compose.yml --profile dev up -d db`）。
 
 ## 仓库结构
 
@@ -129,8 +133,8 @@ cd .. && cargo build -p signet
 crates/signet/          Axum OIDC IdP + /api/v1（含 federation/）
 dashboard/              Vue 3 + Tailwind CSS v4
 migrations/             Postgres 迁移（… audit client_id、身份联邦 …）
-build/Dockerfile.runtime  运行时镜像（拷贝预编译二进制，不再编译）
+build/                  Dockerfile + 本地 compose（镜像构建、可选 Postgres）
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
-deploy/                 生产 compose + env 模板
+deploy/                 生产 compose + env 模板（OSS 配置包）
 docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard
 ```

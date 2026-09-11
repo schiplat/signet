@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# NOTE: build context is the repository root (see docker-compose.yml), so all
-# COPY source paths below are relative to the repo root, not to this file.
+# NOTE: build context is the repository root (see build/docker-compose.yml),
+# so all COPY source paths below are relative to the repo root, not to this file.
 
 # --- Stage 1: build the Vue dashboard ------------------------------------
 FROM node:20-alpine AS frontend

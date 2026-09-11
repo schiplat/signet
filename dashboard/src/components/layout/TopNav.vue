@@ -3,6 +3,7 @@ import { AppWindow, ChevronDown, Download, Fingerprint, KeyRound, Laptop, Link2,
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
+import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import { useQrDataUrl } from "@/composables/useQrDataUrl";
 import {
   changePassword,
@@ -178,18 +179,6 @@ const CONSENT_SCOPE_LABELS: Record<string, string> = {
 
 function scopeLabel(s: string) {
   return CONSENT_SCOPE_LABELS[s] ?? s;
-}
-
-const SSO_TYPE_TAG_CLASS: Record<SsoProviderType, string> = {
-  github: "bg-[hsl(217_30%_20%)] text-white",
-  google: "bg-[hsl(0_70%_55%)] text-white",
-  feishu: "bg-[hsl(211_100%_50%)] text-white",
-  wechat: "bg-[hsl(142_70%_40%)] text-white",
-  oidc: "bg-primary/10 text-primary",
-};
-
-function ssoTypeTagClass(type: string) {
-  return SSO_TYPE_TAG_CLASS[type as SsoProviderType] ?? SSO_TYPE_TAG_CLASS.oidc;
 }
 
 async function openConsents() {
@@ -1151,9 +1140,9 @@ onUnmounted(() => {
           >
             <div class="min-w-0">
               <div class="flex min-w-0 items-center gap-2">
+                <SsoProviderIcon :type="i.provider_type" class="h-5 w-5" />
                 <span
-                  class="inline-flex max-w-full truncate items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold tracking-wide"
-                  :class="ssoTypeTagClass(i.provider_type)"
+                  class="max-w-full truncate text-sm font-medium"
                   :title="i.provider_code"
                 >
                   {{ i.provider_display_name }}
@@ -1197,10 +1186,10 @@ onUnmounted(() => {
               :href="linkIdentityUrl(p.code)"
               class="flex items-center justify-between gap-3 rounded-xl border border-dashed border-border px-4 py-3 text-sm transition-colors hover:bg-muted/50"
             >
-              <span class="min-w-0">
+              <span class="flex min-w-0 items-center gap-2">
+                <SsoProviderIcon :type="p.type" class="h-5 w-5" />
                 <span
-                  class="inline-flex max-w-full truncate items-center rounded-md px-1.5 py-0.5 text-[11px] font-semibold tracking-wide"
-                  :class="ssoTypeTagClass(p.type)"
+                  class="max-w-full truncate text-sm font-medium"
                   :title="p.code"
                 >
                   {{ p.display_name }}

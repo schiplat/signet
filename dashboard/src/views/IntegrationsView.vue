@@ -2,6 +2,7 @@
 import { Check, Copy, Fingerprint, Globe, KeyRound, Link2, Plus, RefreshCw, Send, Trash2, Webhook as WebhookIcon, X } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
+import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import {
   createSsoProvider,
@@ -76,30 +77,6 @@ const SSO_TYPE_LABELS: Record<SsoProviderType, string> = {
   wechat: "WeChat Open Platform",
   oidc: "Generic OIDC",
 };
-
-const SSO_TYPE_BADGES: Record<SsoProviderType, string> = {
-  github: "bg-[hsl(217_30%_20%)] text-white",
-  google: "bg-[hsl(0_70%_55%)] text-white",
-  feishu: "bg-[hsl(211_100%_50%)] text-white",
-  wechat: "bg-[hsl(142_70%_40%)] text-white",
-  oidc: "bg-primary text-primary-foreground",
-};
-
-const SSO_TYPE_SHORTS: Record<SsoProviderType, string> = {
-  github: "GH",
-  google: "G",
-  feishu: "FS",
-  wechat: "WX",
-  oidc: "ID",
-};
-
-function providerBadge(type: SsoProviderType) {
-  return SSO_TYPE_BADGES[type] ?? SSO_TYPE_BADGES.oidc;
-}
-
-function providerShort(type: SsoProviderType) {
-  return SSO_TYPE_SHORTS[type] ?? SSO_TYPE_SHORTS.oidc;
-}
 
 function openSsoCreate() {
   ssoEditing.value = null;
@@ -541,12 +518,7 @@ async function copyText(text: string): Promise<boolean> {
           >
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-2">
-                <span
-                  class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[9px] font-bold"
-                  :class="providerBadge(p.provider_type)"
-                >
-                  {{ providerShort(p.provider_type) }}
-                </span>
+                <SsoProviderIcon :type="p.provider_type" class="h-5 w-5" />
                 <span class="text-sm font-medium">{{ p.display_name }}</span>
                 <span class="type-meta font-mono text-[10px]">{{ p.code }}</span>
                 <span
