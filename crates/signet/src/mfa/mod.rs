@@ -96,7 +96,7 @@ async fn patch_mfa_settings(
     require_admin_role(&actor)?;
     set_global_mfa_required(&state.pool, body.required_globally).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "settings.mfa_update",
@@ -247,10 +247,10 @@ async fn issue_session(
         .add(clear_mfa_cookie(state.config.cookie_secure));
     let jar = crate::federation::consume_pending_link(state, jar, &user).await;
 
-    crate::login_alert::track_login(&state.pool, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
 
     record(
-        &state.pool,
+        state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.login",
@@ -399,9 +399,9 @@ pub async fn begin_login_mfa_flow(
         state.config.session_ttl_hours,
     ));
     let jar = crate::federation::consume_pending_link(state, jar, &user).await;
-    crate::login_alert::track_login(&state.pool, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
     record(
-        &state.pool,
+        state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.login",
@@ -474,7 +474,7 @@ pub(crate) async fn force_password_change(
     delete_challenge(&state.pool, challenge.id).await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.password_change",
@@ -543,7 +543,7 @@ async fn verify_mfa(
             }
             crate::metrics::inc_mfa_verify();
             record(
-                &state.pool,
+                &state,
                 AuditEvent {
                     actor: Some(user.clone()),
                     action: "mfa.verify",
@@ -584,7 +584,7 @@ async fn verify_mfa(
                 .execute(&state.pool)
                 .await?;
             record(
-                &state.pool,
+                &state,
                 AuditEvent {
                     actor: Some(user.clone()),
                     action: "mfa.recovery_use",
@@ -698,7 +698,7 @@ async fn enroll_confirm_challenge(
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "mfa.enroll",
@@ -730,7 +730,7 @@ async fn enroll_confirm_challenge(
     let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
     crate::login_alert::track_login(
-        &state.pool,
+        &state,
         &user,
         ip.as_deref(),
         crate::http_util::user_agent(&headers).as_deref(),
@@ -738,7 +738,7 @@ async fn enroll_confirm_challenge(
     .await;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.login",
@@ -851,7 +851,7 @@ async fn enroll_confirm_session(
     let user = load_user(&state.pool, user.id).await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "mfa.enroll",
@@ -899,7 +899,7 @@ async fn regenerate_recovery(
     }
     let codes = replace_recovery_codes(&state.pool, user.id).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user),
             action: "mfa.recovery_regen",
@@ -946,7 +946,7 @@ async fn disable_mfa(
     clear_user_mfa(&state.pool, user.id).await?;
     let user = load_user(&state.pool, user.id).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "mfa.disable",
@@ -1033,7 +1033,7 @@ async fn rebind_confirm(
     let user = load_user(&state.pool, user.id).await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "mfa.rebind",
@@ -1072,7 +1072,7 @@ async fn admin_reset_mfa(
         .execute(&state.pool)
         .await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "mfa.reset",

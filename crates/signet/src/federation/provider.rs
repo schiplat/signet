@@ -103,25 +103,26 @@ impl TokenSet {
 
 /// POSTs a form-encoded token request and parses the JSON response.
 pub async fn post_token_form(token_url: &str, form: &[(&str, &str)]) -> Result<TokenSet> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = crate::outbound::client()
         .post(token_url)
         .form(form)
         .header("Accept", "application/json")
         .send()
         .await?;
     let status = resp.status();
-    let body = resp.text().await?;
+    let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
-        return Err(anyhow!("token endpoint returned {status}: {body}"));
+        return Err(anyhow!(
+            "token endpoint returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
-    Ok(serde_json::from_str(&body)?)
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// GETs a JSON API endpoint with a bearer token.
 pub async fn get_json(url: &str, access_token: &str) -> Result<serde_json::Value> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = crate::outbound::client()
         .get(url)
         .bearer_auth(access_token)
         .header("Accept", "application/json")
@@ -129,25 +130,30 @@ pub async fn get_json(url: &str, access_token: &str) -> Result<serde_json::Value
         .send()
         .await?;
     let status = resp.status();
-    let body = resp.text().await?;
+    let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
-        return Err(anyhow!("GET {url} returned {status}: {body}"));
+        return Err(anyhow!(
+            "GET {url} returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
-    Ok(serde_json::from_str(&body)?)
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// GETs a JSON API endpoint with no Authorization header (e.g. WeChat token).
 pub async fn get_json_plain(url: &str) -> Result<serde_json::Value> {
-    let client = reqwest::Client::new();
-    let resp = client
+    let resp = crate::outbound::client()
         .get(url)
         .header("Accept", "application/json")
         .send()
         .await?;
     let status = resp.status();
-    let body = resp.text().await?;
+    let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
-        return Err(anyhow!("GET {url} returned {status}: {body}"));
+        return Err(anyhow!(
+            "GET {url} returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
-    Ok(serde_json::from_str(&body)?)
+    Ok(serde_json::from_slice(&body)?)
 }

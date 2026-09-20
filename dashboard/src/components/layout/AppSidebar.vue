@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AppWindow, History, LayoutDashboard, PanelLeft, Plug, ScrollText, Settings, UserRound } from "@lucide/vue";
+import { AppWindow, History, LayoutDashboard, PanelLeft, Plug, ScrollText, Settings, UserRound, Waypoints } from "@lucide/vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { cn } from "@/lib/utils";
@@ -89,6 +89,14 @@ const allEntries: NavEntry[] = [
     label: "Integrations",
     icon: Plug,
     to: "/integrations",
+    adminOnly: true,
+  },
+  {
+    kind: "link",
+    name: "directory",
+    label: "Directory sync",
+    icon: Waypoints,
+    to: "/directory",
     adminOnly: true,
   },
 ];

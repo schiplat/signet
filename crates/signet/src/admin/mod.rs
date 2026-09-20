@@ -92,7 +92,7 @@ async fn scim_generate_token(
     .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "scim.token_rotate",
@@ -121,7 +121,7 @@ async fn scim_revoke_token(
         .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "scim.token_revoke",
@@ -542,6 +542,25 @@ async fn list_users(
     .fetch_all(&state.pool)
     .await?;
 
+    #[derive(sqlx::FromRow)]
+    struct ManagedRow {
+        user_id: Uuid,
+        code: String,
+    }
+
+    // Same precedence order as `directory::managing_source`, batched for the
+    // whole list rather than one query per row.
+    let managed = sqlx::query_as::<_, ManagedRow>(
+        r#"
+        SELECT e.user_id, s.code
+        FROM directory_entries e
+        JOIN directory_sources s ON s.id = e.source_id
+        ORDER BY s.priority ASC, s.code ASC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
     let mut by_user: std::collections::HashMap<Uuid, Vec<SsoIdentityBrief>> =
         std::collections::HashMap::new();
     for row in idents {
@@ -555,15 +574,26 @@ async fn list_users(
             });
     }
 
+    let mut managed_by_user: std::collections::HashMap<Uuid, Vec<String>> =
+        std::collections::HashMap::new();
+    for row in managed {
+        managed_by_user
+            .entry(row.user_id)
+            .or_default()
+            .push(row.code);
+    }
+
     let out = users
         .into_iter()
         .map(|u| {
             let has_password = !u.password_hash.is_empty();
             let sso_identities = by_user.remove(&u.id).unwrap_or_default();
+            let directory_sources = managed_by_user.remove(&u.id).unwrap_or_default();
             AdminUserListItem {
                 user: PublicUser::from(u),
                 has_password,
                 sso_identities,
+                directory_sources,
             }
         })
         .collect();
@@ -583,6 +613,9 @@ struct AdminUserListItem {
     user: PublicUser,
     has_password: bool,
     sso_identities: Vec<SsoIdentityBrief>,
+    /// Directory sources owning this user's managed attributes, highest
+    /// precedence first. Empty = not directory-managed, i.e. locally editable.
+    directory_sources: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -795,7 +828,7 @@ async fn create_user(
     record_password_history(&state.pool, user.id, &user.password_hash).await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.create",
@@ -836,6 +869,44 @@ async fn update_user(
     let target = load_user(&state, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
+    }
+
+    // Directory-owned attributes are read-only locally (§5). Checked here —
+    // before any side effect such as password history or session revocation —
+    // and against the *normalized* incoming value, so re-sending the current
+    // value is not treated as a write.
+    if let Some(source) = crate::directory::managing_source(&state.pool, id).await? {
+        let attempts = [
+            (
+                "email",
+                body.email
+                    .as_deref()
+                    .map(|e| e.trim().to_lowercase())
+                    .is_some_and(|e| e != target.email),
+            ),
+            (
+                "username",
+                body.username.as_ref().is_some_and(|_| {
+                    normalize_username(body.username.as_deref()) != target.username
+                }),
+            ),
+            (
+                "display_name",
+                body.display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|d| !d.is_empty() && d != target.display_name),
+            ),
+        ];
+        for (field, changed) in attempts {
+            if !changed {
+                continue;
+            }
+            if let Some(msg) = crate::directory::managed_write_error(&source, field) {
+                audit_managed_write_blocked(&state, &headers, &actor, id, &source, field).await;
+                return Err(AppError::forbidden(msg));
+            }
+        }
     }
 
     let email = if let Some(e) = body.email {
@@ -898,6 +969,7 @@ async fn update_user(
         target.role.clone()
     };
 
+    let status_requested = body.status.is_some();
     let status = if let Some(s) = body.status {
         match s.as_str() {
             "active" | "disabled" => s,
@@ -929,6 +1001,14 @@ async fn update_user(
         }
     }
 
+    // An explicit local status change also records the disable *intent*, so the
+    // next directory sync cannot silently re-enable the account (migration 024).
+    let local_disabled = if status_requested {
+        status == "disabled"
+    } else {
+        target.local_disabled
+    };
+
     // If a new password is provided, validate strength + history before persisting.
     if let Some(pw) = body.password.as_deref() {
         if !pw.is_empty() {
@@ -948,7 +1028,7 @@ async fn update_user(
         UPDATE users
         SET email = $2, display_name = $3, role = $4, status = $5,
             mfa_required = $6, must_change_password = $7, groups = $8, phone = $9,
-            username = $10, updated_at = NOW()
+            username = $10, local_disabled = $11, updated_at = NOW()
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
@@ -963,6 +1043,7 @@ async fn update_user(
     .bind(groups)
     .bind(phone)
     .bind(&username)
+    .bind(local_disabled)
     .fetch_one(&state.pool)
     .await
     .map_err(|e| match e {
@@ -986,7 +1067,7 @@ async fn update_user(
     }
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.update",
@@ -1019,6 +1100,14 @@ async fn delete_user(
         return Err(AppError::bad_request("cannot delete yourself"));
     }
     let target = load_user(&state, id).await?;
+    // Upstream deletions only disable (D3) and the same rule holds locally, so a
+    // managed user is never hard-deleted — use the local disable intent instead.
+    if let Some(source) = crate::directory::managing_source(&state.pool, id).await? {
+        audit_managed_write_blocked(&state, &headers, &actor, id, &source, "delete").await;
+        return Err(AppError::forbidden(crate::directory::managed_delete_error(
+            &source,
+        )));
+    }
     let res = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
         .execute(&state.pool)
@@ -1027,7 +1116,7 @@ async fn delete_user(
         return Err(AppError::NotFound("user not found".into()));
     }
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.delete",
@@ -1056,9 +1145,9 @@ async fn disable_user(
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
-    let user = set_status(&state, id, "disabled").await?;
+    let user = set_status(&state, id, "disabled", true).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.disable",
@@ -1084,9 +1173,9 @@ async fn enable_user(
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
-    let user = set_status(&state, id, "active").await?;
+    let user = set_status(&state, id, "active", false).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.enable",
@@ -1128,7 +1217,7 @@ async fn batch_disable_users(
         if !actor.can_mutate_user(&target) {
             continue;
         }
-        match set_status(&state, *id, "disabled").await {
+        match set_status(&state, *id, "disabled", true).await {
             Ok(_) => disabled += 1,
             Err(AppError::NotFound(_)) => {}
             Err(e) => return Err(e),
@@ -1158,7 +1247,7 @@ async fn revoke_user_sessions(
     }
     let revoked = revoke_all_sessions(&state.pool, id).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "user.sessions_revoked",
@@ -1174,16 +1263,27 @@ async fn revoke_user_sessions(
     Ok(Json(json!({ "revoked": revoked })))
 }
 
-async fn set_status(state: &AppState, id: Uuid, status: &str) -> AppResult<User> {
+/// Applies a local status change together with the local disable intent.
+///
+/// `local_disabled` must be set by every local disable and cleared only by an
+/// explicit enable, otherwise the next directory sync would treat the account as
+/// simply "upstream active" and silently re-enable it (migration 024).
+async fn set_status(
+    state: &AppState,
+    id: Uuid,
+    status: &str,
+    local_disabled: bool,
+) -> AppResult<User> {
     let user = sqlx::query_as::<_, User>(&format!(
         r#"
-        UPDATE users SET status = $2, updated_at = NOW()
+        UPDATE users SET status = $2, local_disabled = $3, updated_at = NOW()
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
     ))
     .bind(id)
     .bind(status)
+    .bind(local_disabled)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("user not found".into()))?;
@@ -1195,4 +1295,32 @@ async fn set_status(state: &AppState, id: Uuid, status: &str) -> AppResult<User>
             .await?;
     }
     Ok(user)
+}
+
+/// Records a refused local write to a directory-owned attribute.
+///
+/// The refusal itself is visible in the API response; the audit entry keeps the
+/// attempt on record even though nothing changed.
+async fn audit_managed_write_blocked(
+    state: &AppState,
+    headers: &HeaderMap,
+    actor: &User,
+    user_id: Uuid,
+    source: &str,
+    field: &str,
+) {
+    record(
+        state,
+        AuditEvent {
+            actor: Some(actor.clone()),
+            action: crate::directory::AUDIT_MANAGED_WRITE_BLOCKED,
+            resource_type: "user",
+            resource_id: Some(user_id.to_string()),
+            detail: json!({ "source": source, "field": field }),
+            ip: None,
+            user_agent: crate::http_util::user_agent(headers),
+            client_id: None,
+        },
+    )
+    .await;
 }

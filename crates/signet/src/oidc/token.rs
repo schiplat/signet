@@ -2,7 +2,7 @@ use crate::client_ip::check_client_source_ip;
 use crate::crypto_util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::http_util::client_ip;
-use crate::models::{ClientApp, User};
+use crate::models::{ClientApp, User, USER_COLS};
 use crate::password::verify_password;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, State};
@@ -235,14 +235,12 @@ async fn issue_from_refresh(
 }
 
 async fn load_user(state: &AppState, user_id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>(
+    sqlx::query_as::<_, User>(&format!(
         r#"
-        SELECT id, sub, email, username, display_name, password_hash, status, role,
-               mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone,
-               provisioned_via, created_at, updated_at
+        SELECT {USER_COLS}
         FROM users WHERE id = $1 AND status = 'active'
-        "#,
-    )
+        "#
+    ))
     .bind(user_id)
     .fetch_optional(&state.pool)
     .await?
@@ -282,7 +280,8 @@ async fn build_token_response(
         name: crate::oidc::scope_contains(scope, "profile").then(|| user.display_name.clone()),
         preferred_username: crate::oidc::scope_contains(scope, "profile")
             .then(|| user.username.clone().unwrap_or_else(|| user.email.clone())),
-        groups: crate::oidc::scope_contains(scope, "groups").then(|| user.groups.clone()),
+        groups: crate::oidc::scope_contains(scope, "groups")
+            .then(|| crate::models::effective_groups(&user.groups, &user.directory_groups)),
         phone_number: crate::oidc::scope_contains(scope, "phone")
             .then(|| user.phone.clone())
             .flatten(),

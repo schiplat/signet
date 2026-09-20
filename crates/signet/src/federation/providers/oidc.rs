@@ -13,14 +13,22 @@ async fn discovery(issuer: &str) -> Result<Value> {
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = crate::outbound::client();
+    // `issuer` is operator-supplied, so reject anything that is not a plain
+    // http(s) URL with a publicly routable literal host before making the call.
+    // `false` = strict: this path carries no deployment policy, and internal
+    // IdPs are reachable by name anyway (only *literal* private IPs are blocked).
+    crate::outbound::validate_shape(&url, false).map_err(|e| anyhow!(e.to_string()))?;
     let resp = client.get(&url).send().await?;
     let status = resp.status();
-    let body = resp.text().await?;
+    let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
-        return Err(anyhow!("discovery {url} returned {status}: {body}"));
+        return Err(anyhow!(
+            "discovery {url} returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
     }
-    Ok(serde_json::from_str(&body)?)
+    Ok(serde_json::from_slice(&body)?)
 }
 
 /// Resolve the authorization endpoint: if `issuer_url` already looks like an

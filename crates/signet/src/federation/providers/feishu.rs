@@ -48,7 +48,7 @@ impl UpstreamProvider for Feishu {
         Box::pin(async move {
             let _ = redirect_uri;
             // Feishu needs an app_access_token before exchanging the code.
-            let client = reqwest::Client::new();
+            let client = crate::outbound::client();
             let app: Value = client
                 .post(Self::APP_TOKEN)
                 .json(&serde_json::json!({
@@ -100,7 +100,7 @@ impl UpstreamProvider for Feishu {
     {
         Box::pin(async move {
             let access = tokens.require_access()?;
-            let client = reqwest::Client::new();
+            let client = crate::outbound::client();
             let resp: Value = client
                 .get(Self::USERINFO)
                 .header("Authorization", format!("Bearer {access}"))

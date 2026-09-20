@@ -9,6 +9,10 @@ pub struct Config {
     pub http_bind: SocketAddr,
     pub issuer: String,
     pub cookie_secure: bool,
+    /// Deployment opt-in letting outbound HTTP reach private/loopback/link-local
+    /// addresses, for webhook receivers that live on a trusted intranet. Off by
+    /// default: the server would otherwise be an SSRF proxy into its own network.
+    pub outbound_allow_private: bool,
     pub jwt_private_key_path: PathBuf,
     pub encryption_key_path: PathBuf,
     pub session_ttl_hours: i64,
@@ -54,6 +58,10 @@ impl Config {
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
             .unwrap_or(false);
 
+        let outbound_allow_private = env::var("SIGNET_OUTBOUND_ALLOW_PRIVATE")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false);
+
         let jwt_private_key_path = env::var("SIGNET_JWT_PRIVATE_KEY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/jwt_private.pem"));
@@ -66,6 +74,7 @@ impl Config {
             http_bind,
             issuer,
             cookie_secure,
+            outbound_allow_private,
             jwt_private_key_path,
             encryption_key_path,
             session_ttl_hours: 12,

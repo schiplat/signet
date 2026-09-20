@@ -15,13 +15,20 @@ axum = { version = "0.8", features = ["macros"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 dotenvy = "0.15"
 jsonwebtoken = "9"
+ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 mime_guess = "2"
 password-hash = "0.5"
 rand = "0.8"
 rsa = { version = "0.9", features = ["pem", "std"] }
 rust-embed = "8"
+# Same version ldap3/reqwest already resolve to; only used to build an explicit
+# LDAPS ClientConfig (self-signed CA support) and to pick the crypto provider.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

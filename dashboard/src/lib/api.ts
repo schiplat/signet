@@ -976,3 +976,294 @@ export async function unlinkIdentity(providerCode: string) {
   });
   return parseJson<{ ok: boolean }>(res);
 }
+
+// --- Directory sync (LDAP pull) ---
+
+export type DirectorySourceKind = "ldap" | "scim" | "http_json";
+
+/** Typed `config` for a `kind = "ldap"` source (mirrors `LdapConfig`). */
+export type LdapSourceConfig = {
+  url: string;
+  bind_dn: string;
+  base_dn: string;
+  user_filter: string;
+  /**
+   * Domains this source may own, matched on the email (§7). Empty means no
+   * domain scoping. Subdomains are matched automatically.
+   */
+  email_domains?: string[];
+  /** Attribute the scope reads the department from, e.g. `department`. */
+  department_attribute?: string;
+  /** Departments this source may own (§7). Empty means no department scoping. */
+  department_values?: string[];
+  username_attribute: string;
+  email_attribute: string;
+  display_name_attribute?: string;
+  external_id_attribute: string;
+  group_base_dn?: string;
+  group_filter: string;
+  group_member_attribute: string;
+  group_name_attribute: string;
+  page_size: number;
+};
+
+/**
+ * Auth for an `http_json` source. The secret itself is the source's
+ * `credential`, encrypted at rest, and never appears in `config`.
+ */
+export type HttpJsonAuth = "none" | "bearer" | { basic: { username: string } };
+
+/** Pagination for an `http_json` source; matches the server's tagged enum. */
+export type HttpJsonPagination =
+  | { mode: "none" }
+  | {
+      mode: "page";
+      param: string;
+      start?: number;
+      size_param?: string;
+      size?: number;
+      max_pages: number;
+    }
+  | { mode: "cursor"; param: string; next_path: string; max_pages: number };
+
+export type HttpJsonSourceConfig = {
+  url: string;
+  /** Only "GET" is supported today. */
+  method: string;
+  auth: HttpJsonAuth;
+  /** Dotted path to the array of user objects, e.g. `data.users`. */
+  users_path: string;
+  external_id_path: string;
+  email_path: string;
+  /** Domains this source may own, matched on the email (§7). */
+  email_domains?: string[];
+  /** Path the scope reads the department from, e.g. `dept`. */
+  department_path?: string;
+  /** Departments this source may own (§7). */
+  department_values?: string[];
+  username_path?: string;
+  display_name_path?: string;
+  groups_path?: string;
+  pagination?: HttpJsonPagination;
+};
+
+export type DirectorySource = {
+  id: string;
+  code: string;
+  name: string;
+  kind: DirectorySourceKind;
+  enabled: boolean;
+  /** Lower wins when two sources manage the same user. */
+  priority: number;
+  config: LdapSourceConfig | HttpJsonSourceConfig;
+  /** Whether a credential is stored — the value itself is never returned. */
+  credential_set: boolean;
+  ca_cert_set: boolean;
+  sync_groups: boolean;
+  /** null = manual trigger only. */
+  interval_minutes: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DirectoryRun = {
+  id: string;
+  source_id: string;
+  trigger: "manual" | "schedule" | "cli" | "push";
+  status: "running" | "succeeded" | "partial" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  scanned: number;
+  created_count: number;
+  updated_count: number;
+  disabled_count: number;
+  skipped_count: number;
+  conflict_count: number;
+  error_count: number;
+  error: string | null;
+  actor_user_id: string | null;
+  stats: Record<string, unknown>;
+};
+
+export type DirectorySourceBody = {
+  code: string;
+  name: string;
+  kind: DirectorySourceKind;
+  enabled: boolean;
+  priority: number;
+  config: LdapSourceConfig | HttpJsonSourceConfig;
+  /**
+   * Tri-state on update: omit to keep the stored credential, send "" to clear
+   * it, send a value to replace it. The stored secret is never sent to the
+   * browser, so a UI that always echoed it would wipe it on every edit.
+   */
+  credential?: string;
+  ca_cert_pem?: string;
+  sync_groups: boolean;
+  interval_minutes: number | null;
+};
+
+export async function listDirectorySources() {
+  const res = await fetch("/api/v1/admin/directory/sources", { credentials: "include" });
+  return parseJson<DirectorySource[]>(res);
+}
+
+export async function createDirectorySource(body: DirectorySourceBody) {
+  const res = await fetch("/api/v1/admin/directory/sources", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<DirectorySource>(res);
+}
+
+export async function updateDirectorySource(code: string, body: DirectorySourceBody) {
+  const res = await fetch(`/api/v1/admin/directory/sources/${encodeURIComponent(code)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<DirectorySource>(res);
+}
+
+export async function deleteDirectorySource(code: string) {
+  const res = await fetch(`/api/v1/admin/directory/sources/${encodeURIComponent(code)}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
+export async function setDirectorySourceEnabled(code: string, enabled: boolean) {
+  const res = await fetch(`/api/v1/admin/directory/sources/${encodeURIComponent(code)}/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ enabled }),
+  });
+  return parseJson<DirectorySource>(res);
+}
+
+/** Starts a background run and returns its id; poll `listDirectoryRuns` for the result. */
+export async function triggerDirectorySync(code: string) {
+  const res = await fetch(`/api/v1/admin/directory/sources/${encodeURIComponent(code)}/sync`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return parseJson<{ run_id: string; source: string }>(res);
+}
+
+export async function listDirectoryRuns(code: string, limit = 20) {
+  const qs = new URLSearchParams({ limit: String(limit) });
+  const res = await fetch(
+    `/api/v1/admin/directory/sources/${encodeURIComponent(code)}/runs?${qs}`,
+    { credentials: "include" },
+  );
+  return parseJson<DirectoryRun[]>(res);
+}
+
+/**
+ * Row ids the preview reports against. These mirror the constants in
+ * `crates/signet/src/directory/mapping.rs` — changing one here without changing
+ * it there silently detaches a row from its verdict.
+ */
+export type MappingRow =
+  | "scope"
+  | "external_id"
+  | "email"
+  | "username"
+  | "display_name"
+  | "groups";
+
+export type MappingPreviewField = {
+  row: MappingRow;
+  ok: boolean;
+  error: string | null;
+  /** Sampled entries this row resolved for, when the row is per-entry. */
+  resolved: number | null;
+  total: number | null;
+  /** True for a row that is deliberately not configurable for this kind. */
+  fixed: boolean;
+};
+
+export type MappingPreviewTarget = {
+  key: string;
+  count: number;
+  multi: boolean;
+  source: "user" | "group" | "both";
+  /** One real value, so the attribute list can be read by recognition. */
+  sample_value: string | null;
+  /** How many user entries carry it; denominator is the preview's entry_count. */
+  user_entries: number;
+  /** How many group entries carry it. */
+  group_entries: number;
+};
+
+export type MappingPreviewRow = {
+  external_id: string;
+  external_dn: string | null;
+  email: string;
+  username: string | null;
+  display_name: string;
+  groups: string[];
+};
+
+export type MappingPreview = {
+  fields: MappingPreviewField[];
+  /** LDAP attribute names; JSON targets are rendered as a tree client-side. */
+  targets: MappingPreviewTarget[];
+  /** One *page* of normalized rows: what a sync would actually write. */
+  rows: MappingPreviewRow[];
+  warnings: string[];
+  /**
+   * Every entry the sample yielded — the denominator behind `fields`, and the
+   * total the `rows` page is taken from. Deliberately not the page size: the
+   * panel shows this next to the per-row denominators, so the two must agree.
+   */
+  entry_count: number;
+  /** Index of the first returned row, counted in source entries. */
+  offset: number;
+  /**
+   * How many entries one page spans — the page capacity, and the step to move by.
+   * Deliberately not `rows.length`: a page returns fewer rows than it spans when
+   * an entry yields none, so stepping by the row count would overlap windows.
+   */
+  page_size: number;
+  /** True when rows exist beyond this page. */
+  truncated: boolean;
+};
+
+/**
+ * Checks a mapping against a pasted sample without saving anything.
+ *
+ * The sample is read in memory by a pure endpoint (no database, no upstream
+ * request) and is never stored or logged. Omitting it still validates the
+ * configuration structure, and the response says which checks were skipped.
+ */
+export async function previewDirectoryMapping(body: {
+  kind: DirectorySourceKind;
+  /**
+   * Only the mapping keys are read. Connection settings (`url`, `bind_dn`, the
+   * credential, pagination) are not needed, and a blank mapping key is reported
+   * as "not set yet" rather than rejected — the preview never fetches anything.
+   */
+  config: Record<string, unknown>;
+  sample?: string;
+  sync_groups?: boolean;
+  /**
+   * Which page of rows to return, counted in source entries. Affects only the
+   * `rows` array — every verdict is computed across the whole sample whatever
+   * this is set to, so paging never changes what the check says.
+   */
+  offset?: number;
+}) {
+  const res = await fetch("/api/v1/admin/directory/sources/preview-mapping", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<MappingPreview>(res);
+}

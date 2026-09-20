@@ -37,7 +37,11 @@ pub struct AuditEvent {
     pub client_id: Option<String>,
 }
 
-pub async fn record(pool: &PgPool, event: AuditEvent) {
+/// Records an audit event and fans it out to webhooks.
+///
+/// Takes the whole [`AppState`] rather than a bare `&PgPool` because the
+/// webhook fan-out needs the application encryptor to decrypt stored secrets.
+pub async fn record(state: &AppState, event: AuditEvent) {
     let id = Uuid::new_v4();
     let (actor_id, actor_email, actor_role) = match &event.actor {
         Some(u) => (Some(u.id), Some(u.email.clone()), Some(u.role.clone())),
@@ -81,7 +85,7 @@ pub async fn record(pool: &PgPool, event: AuditEvent) {
     .bind(browser.as_ref())
     .bind(os.as_ref())
     .bind(&client_id)
-    .execute(pool)
+    .execute(&state.pool)
     .await
     {
         tracing::warn!(error = %e, action = event.action, "failed to write audit log");
@@ -89,6 +93,16 @@ pub async fn record(pool: &PgPool, event: AuditEvent) {
     }
 
     // Best-effort webhook fan-out (fire-and-forget).
+    //
+    // Per-entry directory sync events are recorded but not fanned out: with
+    // 100k users, one sync would otherwise produce 100k webhook deliveries, with
+    // no retry and no aggregation (§11.1). Each run's
+    // `directory.sync.finished` event carries the same totals, which is the
+    // intended delivery. The audit row above is still written for every event —
+    // that is the compliance record, and it is deliberately unaffected.
+    if crate::directory::is_summary_only_action(event.action) {
+        return;
+    }
     let payload = json!({
         "id": id,
         "action": event.action,
@@ -104,7 +118,7 @@ pub async fn record(pool: &PgPool, event: AuditEvent) {
         "os": os,
         "created_at": now.to_rfc3339(),
     });
-    crate::webhooks::dispatch(pool, id, payload);
+    crate::webhooks::dispatch(state, id, payload);
 }
 
 /// Extracts the OAuth `client_id` from a login `return_to` URL of the form

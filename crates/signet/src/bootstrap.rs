@@ -1,6 +1,8 @@
 use crate::config::Config;
+use crate::encryption::Encryptor;
 use anyhow::Result;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// True when at least one active `admin` user exists. Generic over the SQL
 /// executor so it can run against either a `&PgPool` or a `&mut Transaction`.
@@ -32,5 +34,43 @@ pub async fn ensure_scim_token(pool: &PgPool, cfg: &Config) -> Result<()> {
     .bind(hash)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Seals legacy plaintext `webhooks.secret` values with the application key and
+/// clears the plaintext column.
+///
+/// Idempotent, so it runs on every boot and from every replica: the UPDATE is
+/// guarded on `secret IS NOT NULL`, and a concurrent migrator simply finds
+/// nothing left to do.
+pub async fn encrypt_webhook_secrets(pool: &PgPool, encryptor: &Encryptor) -> Result<()> {
+    // NULL `secret_enc` distinguishes "not migrated yet" from "no secret set",
+    // which is why the condition needs both predicates.
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, secret FROM webhooks WHERE secret IS NOT NULL AND secret_enc IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    for (id, secret) in &rows {
+        let enc = encryptor.encrypt(secret);
+        sqlx::query(
+            "UPDATE webhooks SET secret_enc = $2, secret = NULL, updated_at = NOW() \
+             WHERE id = $1 AND secret IS NOT NULL",
+        )
+        .bind(id)
+        .bind(&enc)
+        .execute(pool)
+        .await?;
+    }
+
+    tracing::info!(
+        count = rows.len(),
+        "migrated webhook secrets to encrypted storage"
+    );
     Ok(())
 }

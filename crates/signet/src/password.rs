@@ -79,6 +79,14 @@ pub async fn record_password_history(
 }
 
 /// Validates strength + history, then sets the user's password and records it.
+///
+/// Refuses outright for a user a *live* directory manages. The login path
+/// authenticates those users by bind-through (§8.1), so a local hash is never
+/// consulted — writing one would not just be useless, it would leave a dormant
+/// credential behind that turns live the moment the source is disabled or
+/// removed. Failing here is the single choke point for all four callers (self
+/// change, admin reset, emailed reset, forced change), so none of them can
+/// accidentally create that credential.
 pub async fn set_user_password(
     pool: &PgPool,
     user_id: Uuid,
@@ -86,6 +94,12 @@ pub async fn set_user_password(
     min_length: usize,
     history_size: i64,
 ) -> AppResult<()> {
+    if let Some(source) = crate::directory::enabled_managing_source(pool, user_id).await? {
+        return Err(AppError::bad_request(format!(
+            "this account's password is held by directory source {source}; \
+             change it in the directory"
+        )));
+    }
     validate_password_strength(new_password, min_length)
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     validate_password_history(pool, user_id, new_password, history_size).await?;

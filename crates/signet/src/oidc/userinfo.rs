@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::models::User;
+use crate::models::{User, USER_COLS};
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderMap};
@@ -39,14 +39,12 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
         return Err(AppError::unauthorized("not an access token"));
     }
 
-    let user = sqlx::query_as::<_, User>(
+    let user = sqlx::query_as::<_, User>(&format!(
         r#"
-        SELECT id, sub, email, username, display_name, password_hash, status, role,
-               mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone,
-               provisioned_via, created_at, updated_at
+        SELECT {USER_COLS}
         FROM users WHERE sub = $1 AND status = 'active'
-        "#,
-    )
+        "#
+    ))
     .bind(&data.claims.sub)
     .fetch_optional(&state.pool)
     .await?
@@ -66,7 +64,13 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
         );
     }
     if crate::oidc::scope_contains(scope, "groups") {
-        out.insert("groups".into(), json!(user.groups));
+        out.insert(
+            "groups".into(),
+            json!(crate::models::effective_groups(
+                &user.groups,
+                &user.directory_groups
+            )),
+        );
     }
     if crate::oidc::scope_contains(scope, "phone") {
         if let Some(p) = &user.phone {

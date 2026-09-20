@@ -7,6 +7,7 @@ pub mod client_ip;
 pub mod config;
 pub mod crypto_util;
 pub mod db;
+pub mod directory;
 pub mod email;
 pub mod encryption;
 pub mod error;
@@ -18,6 +19,7 @@ pub mod metrics;
 pub mod mfa;
 pub mod models;
 pub mod oidc;
+pub mod outbound;
 pub mod passkey;
 pub mod password;
 pub mod password_reset;
@@ -39,34 +41,11 @@ use axum::Router;
 use std::sync::Arc;
 
 pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
-    let pool = db::connect(&cfg.database_url).await?;
-    db::migrate(&pool).await?;
-    bootstrap::ensure_scim_token(&pool, &cfg).await?;
+    let state = build_state(cfg).await?;
 
-    if let Err(e) = audit::prune_audit_logs(&pool, cfg.audit_retention_days).await {
-        tracing::warn!(error = %e, "failed to prune old audit logs");
-    }
-
-    let keys = keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
-    let encryption_key = encryption::load_or_generate_key(&cfg.encryption_key_path)?;
-    let rate_limit_per_minute = cfg.rate_limit_per_minute;
-    let webauthn = {
-        let origin = url::Url::parse(&cfg.webauthn_rp_origin)
-            .context("invalid SIGNET_WEBAUTHN_RP_ORIGIN")?;
-        webauthn_rs::WebauthnBuilder::new(&cfg.webauthn_rp_id, &origin)
-            .context("invalid webauthn configuration")?
-            .build()
-            .context("invalid webauthn configuration")?
-    };
-    let state = AppState {
-        pool,
-        config: Arc::new(cfg),
-        keys: Arc::new(keys),
-        encryptor: Arc::new(encryption::Encryptor::new(&encryption_key)),
-        rate_limiter: Arc::new(ratelimit::RateLimiter::new(rate_limit_per_minute)),
-        webauthn: Arc::new(webauthn),
-        passkey_challenges: passkey::new_store(),
-    };
+    // Started here rather than in `build_state`: the CLI and the tests want the
+    // engine without a background loop firing syncs at them.
+    directory::scheduler::spawn(state.clone());
 
     let api_v1 = Router::new()
         .merge(auth::router())
@@ -78,6 +57,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(audit::router())
         .merge(password_reset::router())
         .merge(webhooks::router())
+        .merge(directory::api::router())
         .merge(setup::router());
 
     let api = Router::new()
@@ -97,4 +77,48 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .with_state(state);
 
     Ok(api)
+}
+
+/// Builds the application state, running migrations and the boot-time fixups.
+///
+/// Split out of [`build_app`] so the CLI can drive the same engine against the
+/// same database and encryption key without standing up an HTTP server.
+pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
+    if cfg.outbound_allow_private {
+        // Security-relevant downshift: make it loud in the logs.
+        tracing::warn!("outbound private-address blocking is disabled");
+    }
+    let pool = db::connect(&cfg.database_url).await?;
+    db::migrate(&pool).await?;
+    bootstrap::ensure_scim_token(&pool, &cfg).await?;
+
+    if let Err(e) = audit::prune_audit_logs(&pool, cfg.audit_retention_days).await {
+        tracing::warn!(error = %e, "failed to prune old audit logs");
+    }
+
+    let keys = keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
+    let encryption_key = encryption::load_or_generate_key(&cfg.encryption_key_path)?;
+    let encryptor = encryption::Encryptor::new(&encryption_key);
+    // One-way move of webhook secrets out of the legacy plaintext column.
+    // Deliberately fatal: carrying on would leave `secret_enc` NULL and
+    // silently downgrade webhook deliveries to unsigned.
+    bootstrap::encrypt_webhook_secrets(&pool, &encryptor).await?;
+    let rate_limit_per_minute = cfg.rate_limit_per_minute;
+    let webauthn = {
+        let origin = url::Url::parse(&cfg.webauthn_rp_origin)
+            .context("invalid SIGNET_WEBAUTHN_RP_ORIGIN")?;
+        webauthn_rs::WebauthnBuilder::new(&cfg.webauthn_rp_id, &origin)
+            .context("invalid webauthn configuration")?
+            .build()
+            .context("invalid webauthn configuration")?
+    };
+    Ok(AppState {
+        pool,
+        config: Arc::new(cfg),
+        keys: Arc::new(keys),
+        encryptor: Arc::new(encryptor),
+        rate_limiter: Arc::new(ratelimit::RateLimiter::new(rate_limit_per_minute)),
+        webauthn: Arc::new(webauthn),
+        passkey_challenges: passkey::new_store(),
+    })
 }

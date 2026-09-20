@@ -3,6 +3,7 @@ use crate::auth::session::{
     clear_session_cookie, cookie_value, current_user, destroy_session, list_sessions,
     revoke_all_sessions, revoke_session_by_id, session_id_for_token, SESSION_COOKIE,
 };
+use crate::directory;
 use crate::error::{AppError, AppResult};
 use crate::http_util::client_ip;
 use crate::mfa::{begin_login_mfa_flow, force_password_change};
@@ -87,8 +88,65 @@ async fn login(
         }
     }
 
-    if !verify_password(&body.password, &user.password_hash)? {
-        crate::metrics::inc_login_failures();
+    // ── Credential check: local (argon2) or bind-through (LDAP) ─────────
+    //
+    // Federated (SSO JIT) and directory-provisioned users carry an empty
+    // `password_hash` and so have no local password — they must sign in through
+    // their upstream provider. Handing "" to the hash parser would surface a 500
+    // instead of a 401, so the local branch checks for it explicitly.
+    let credential = match directory::auth::resolve(&state, user.id).await? {
+        directory::auth::LoginPath::Local => {
+            let ok = !user.password_hash.is_empty()
+                && verify_password(&body.password, &user.password_hash)?;
+            if ok {
+                directory::auth::Credential::Valid
+            } else {
+                directory::auth::Credential::Invalid {
+                    counts_toward_lockout: true,
+                }
+            }
+        }
+        directory::auth::LoginPath::Ldap(target) => {
+            directory::auth::verify(&target, &body.password).await
+        }
+    };
+
+    let counts_toward_lockout = match credential {
+        directory::auth::Credential::Valid => None,
+        directory::auth::Credential::Invalid {
+            counts_toward_lockout,
+        } => Some(counts_toward_lockout),
+        directory::auth::Credential::Unavailable {
+            source_code,
+            detail,
+        } => {
+            // D6: fail closed. The password is neither accepted nor rejected —
+            // nobody could check it — so this must not look like a credential
+            // failure, and there is no local fallback to slide into.
+            crate::metrics::inc_directory_unavailable();
+            audit_directory_login_failure(
+                &state,
+                &user,
+                ip.clone(),
+                crate::http_util::user_agent(&headers),
+                client_id.clone(),
+                &source_code,
+                &detail,
+            )
+            .await;
+            return Err(AppError::unavailable("directory unavailable"));
+        }
+    };
+
+    if let Some(counts_toward_lockout) = counts_toward_lockout {
+        if counts_toward_lockout {
+            crate::metrics::inc_login_failures();
+        } else {
+            // A directory rejection is counted on its own series, so "our
+            // verifier rejected this" and "the directory rejected this" can be
+            // told apart on a dashboard (§8.4).
+            crate::metrics::inc_directory_login_failures();
+        }
         record_login_failure(
             &state,
             &user,
@@ -97,6 +155,13 @@ async fn login(
             client_id.clone(),
         )
         .await?;
+
+        if !counts_toward_lockout {
+            // §8.4: the rejection is recorded (above) but not charged against the
+            // local counter, because the directory's own lockout policy owns it.
+            return Err(AppError::unauthorized("invalid email or password"));
+        }
+
         let attempts = lock.0 + 1;
         if (attempts as i64) >= state.config.max_login_attempts {
             let until = Utc::now() + Duration::minutes(state.config.lockout_minutes);
@@ -143,7 +208,7 @@ async fn record_login_failure(
     client_id: Option<String>,
 ) -> AppResult<()> {
     record(
-        &state.pool,
+        state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.login_failed",
@@ -157,6 +222,39 @@ async fn record_login_failure(
     )
     .await;
     Ok(())
+}
+
+/// Records that a login could not be attempted because the owning directory was
+/// unreachable (§8.3).
+///
+/// Separate from `auth.login_failed` on purpose: a rejected password and an
+/// outage have completely different responses, and an operator debugging "nobody
+/// can log in" must be able to tell them apart with one query. The credential is
+/// never included — the event exists to show the outage, not the attempt.
+#[allow(clippy::too_many_arguments)]
+async fn audit_directory_login_failure(
+    state: &AppState,
+    user: &User,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    client_id: Option<String>,
+    source_code: &str,
+    detail: &str,
+) {
+    record(
+        state,
+        AuditEvent {
+            actor: Some(user.clone()),
+            action: "auth.directory_unavailable",
+            resource_type: "user",
+            resource_id: Some(user.id.to_string()),
+            detail: json!({ "source": source_code, "error": detail }),
+            ip,
+            user_agent,
+            client_id,
+        },
+    )
+    .await;
 }
 
 async fn logout(
@@ -413,7 +511,7 @@ async fn revoke_my_consent(
     .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user),
             action: "oauth.consent_revoke",
@@ -481,7 +579,7 @@ async fn update_me(
     })?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user),
             action: "me.profile_update",
@@ -523,7 +621,7 @@ async fn change_password(
     .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.password_change",

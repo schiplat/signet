@@ -31,6 +31,20 @@ async fn request_reset(
     let email = body.email.trim().to_lowercase();
 
     if let Some(user) = find_user_by_email(&state, &email).await? {
+        // A directory-managed account has no local password to reset (§8.1), so
+        // creating a token would send someone a link that cannot work. Staying
+        // silent about it preserves the always-200 anti-enumeration behaviour
+        // below while skipping the pointless mail.
+        if let Some(source) = crate::directory::enabled_managing_source(&state.pool, user.0).await?
+        {
+            tracing::info!(
+                email = %user.1,
+                source = %source,
+                "password reset requested for a directory-managed account; nothing to reset"
+            );
+            return Ok(Json(json!({ "ok": true })));
+        }
+
         let token = random_token(32);
         let token_hash = sha256_hex(&token);
         let id = Uuid::new_v4();

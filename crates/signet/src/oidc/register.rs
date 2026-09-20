@@ -95,7 +95,7 @@ pub async fn register(
     })?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: None,
             action: "client.register",

@@ -520,7 +520,7 @@ async fn sso_fail_redirect(
     user_agent: Option<String>,
 ) -> Response {
     crate::audit::record(
-        &state.pool,
+        state,
         crate::audit::AuditEvent {
             actor: None,
             action: "auth.login.thirdparty",
@@ -583,10 +583,10 @@ async fn finish_sign_in(
         state.config.session_ttl_hours,
     );
 
-    crate::login_alert::track_login(&state.pool, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::login_alert::track_login(&state, &user, ip.as_deref(), user_agent.as_deref()).await;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: Some(user),
             action: "auth.login.thirdparty",

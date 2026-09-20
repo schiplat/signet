@@ -1,6 +1,7 @@
 use crate::audit::{record, AuditEvent};
 use crate::email;
 use crate::models::User;
+use crate::state::AppState;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -8,13 +9,18 @@ use uuid::Uuid;
 /// Track a successful login source and emit a new-device alert on first sight.
 ///
 /// Best-effort: failures are logged but never fail the login itself.
-pub async fn track_login(pool: &PgPool, user: &User, ip: Option<&str>, user_agent: Option<&str>) {
+pub async fn track_login(
+    state: &AppState,
+    user: &User,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+) {
     let Some(ip) = ip else { return };
     if ip.is_empty() {
         return;
     }
 
-    let is_new = match upsert_device(pool, user.id, ip, user_agent).await {
+    let is_new = match upsert_device(&state.pool, user.id, ip, user_agent).await {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error = %e, "failed to track login device");
@@ -27,7 +33,7 @@ pub async fn track_login(pool: &PgPool, user: &User, ip: Option<&str>, user_agen
     }
 
     record(
-        pool,
+        state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "auth.new_device",

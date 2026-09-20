@@ -171,7 +171,7 @@ async fn create_client(
     })?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.create",
@@ -274,7 +274,7 @@ async fn update_client(
     .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.update",
@@ -308,7 +308,7 @@ async fn delete_client(
         .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.delete",
@@ -333,7 +333,7 @@ async fn disable_client(
     let actor = require_staff_user(&state, &headers).await?;
     let client = set_enabled(&state, id, false).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.disable",
@@ -357,7 +357,7 @@ async fn enable_client(
     let actor = require_staff_user(&state, &headers).await?;
     let client = set_enabled(&state, id, true).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.enable",
@@ -397,7 +397,7 @@ async fn rotate_secret(
     .ok_or_else(|| AppError::NotFound("client not found".into()))?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.rotate_secret",
@@ -441,7 +441,7 @@ async fn create_registration_token(
     .await?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "client.registration_token",

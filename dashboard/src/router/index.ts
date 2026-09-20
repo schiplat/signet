@@ -4,6 +4,7 @@ import ActivityView from "@/views/ActivityView.vue";
 import AuditLogsView from "@/views/AuditLogsView.vue";
 import ClientsView from "@/views/ClientsView.vue";
 import ConsentView from "@/views/ConsentView.vue";
+import DirectoryView from "@/views/DirectoryView.vue";
 import IntegrationsView from "@/views/IntegrationsView.vue";
 import LoginView from "@/views/LoginView.vue";
 import OverviewView from "@/views/OverviewView.vue";
@@ -93,6 +94,12 @@ export const router = createRouter({
           name: "integrations",
           component: IntegrationsView,
           meta: { title: "Integrations", admin: true },
+        },
+        {
+          path: "directory",
+          name: "directory",
+          component: DirectoryView,
+          meta: { title: "Directory sync", admin: true },
         },
       ],
     },

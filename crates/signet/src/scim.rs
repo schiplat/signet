@@ -3,7 +3,7 @@ use crate::models::normalize_username;
 use crate::password::{hash_password, record_password_history};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -225,7 +225,7 @@ async fn create_user(
     let row = sqlx::query_as::<_, ScimUserRow>(&format!(
         r#"
         INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role, groups, phone, external_id, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'user', ARRAY[]::text[], NULL, $8, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'member', ARRAY[]::text[], NULL, $8, NOW(), NOW())
         RETURNING {USER_SELECT}
         "#
     ))
@@ -255,7 +255,7 @@ async fn create_user(
     record_password_history(&state.pool, row.id, &password_hash).await?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: None,
             action: "scim.user.create",
@@ -402,16 +402,190 @@ async fn put_user(
     Ok(Json(user_resource(&row)))
 }
 
+/// A SCIM PATCH body for users.
+///
+/// `Exposed for tests` — see [`user_attrs_from_body`].
 #[derive(Debug, Deserialize)]
-struct PatchUserBody {
-    #[serde(default)]
+pub struct PatchUserBody {
+    /// SCIM spells this `Operations`; RFC 7644's examples and every IdP surveyed
+    /// send it capitalised, so the lowercase spelling is accepted as an alias
+    /// rather than as the only name.
+    ///
+    /// This mattered more than it looks. `#[serde(default)]` means an
+    /// unrecognised spelling deserialises to an *empty* list rather than an
+    /// error, so with only `operations` accepted, a real client's body was
+    /// discarded whole and the route answered `200` with the unchanged user —
+    /// a PATCH that reported success and changed nothing.
+    #[serde(default, rename = "Operations", alias = "operations")]
     operations: Vec<PatchOp>,
 }
 
+/// One SCIM PATCH operation.
+///
+/// `Exposed for tests` — the route is a thin wrapper over
+/// [`user_attrs_from_patch`], and the interesting part is interpreting these.
 #[derive(Debug, Deserialize)]
-struct PatchOp {
+pub struct PatchOp {
+    /// `add` / `remove` / `replace`. Absent on some clients' operations.
+    #[serde(default)]
+    op: String,
+    /// `active`, `displayName`, or an attribute-qualified path. When present, the
+    /// value is the attribute's new value; when absent, the value is an object
+    /// carrying the attributes.
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     value: Value,
+}
+
+/// The user attributes a PATCH can change.
+///
+/// Only the attributes this route stores are modelled. `emails` and `userName`
+/// are deliberately absent: writing them means deciding what a UNIQUE violation
+/// means for a provisioning client, which is separate work (docs/directory-sync.md
+/// §14).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct UserAttrs {
+    /// `None` leaves `status` as it is.
+    pub active: Option<bool>,
+    /// `None` leaves `display_name` as it is.
+    pub display_name: Option<String>,
+}
+
+/// Interprets RFC 7644 §3.5.2 operations into the attributes to write.
+///
+/// `Exposed for tests`; the handler is a thin wrapper over this.
+///
+/// Two things have to be right here, and both were wrong before:
+///
+/// * **`op` matters.** The field was not even deserialized, so `remove` was
+///   treated as a write like any other. On the group route that inverted the
+///   request (removing a member added them); here, `{"op":"remove","path":
+///   "active"}` — one of the standard ways an IdP deprovisions — carried no
+///   `value` and so silently did nothing at all.
+/// * **`path` matters, and it changes the value's shape.** Okta sends
+///   `{"op":"replace","value":{"active":false}}`; Entra sends
+///   `{"op":"Replace","path":"active","value":false}` — a scalar. Reading only
+///   the object form meant Entra's deactivation was accepted and ignored, which
+///   is the worst kind of failure for a deprovisioning request: a 200 that did
+///   not do it.
+///
+/// `op` is matched case-insensitively because Entra capitalises it (`Replace`)
+/// while the RFC's examples are lowercase.
+pub fn user_attrs_from_patch(ops: &[PatchOp]) -> AppResult<UserAttrs> {
+    let mut attrs = UserAttrs::default();
+
+    for op in ops {
+        let name = normalize_op(&op.op)?;
+        match op.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            Some(path) => match attribute_of(path).as_str() {
+                "active" => match name {
+                    // The RFC gives `active` a default of `true`, so unsetting it
+                    // cannot mean "activate" — and deprovisioning by removing
+                    // `active` is common enough that ignoring it is not an option.
+                    "remove" => attrs.active = Some(false),
+                    _ => attrs.active = Some(scalar_bool(&op.value, "active")?),
+                },
+                "displayname" => match name {
+                    // `users.display_name` is NOT NULL, so there is nothing to
+                    // unassign. Ignoring a `remove` is better than failing an
+                    // IdP's sync over an attribute we cannot clear.
+                    "remove" => {}
+                    _ => attrs.display_name = Some(scalar_string(&op.value, "displayName")?),
+                },
+                // An attribute this route does not store (`name.givenName`,
+                // `emails`, …). Ignored rather than rejected: a PATCH routinely
+                // carries attributes we have no column for, and 400ing the whole
+                // operation would fail the rest of the sync.
+                _ => {}
+            },
+            // No `path`: the value object carries the attributes. This is the
+            // shape Okta uses.
+            None => {
+                if let Some(obj) = op.value.as_object() {
+                    if let Some(v) = obj.get("active") {
+                        attrs.active = Some(coerce_bool(v, "active")?);
+                    }
+                    if let Some(v) = obj.get("displayName") {
+                        let s = v.as_str().ok_or_else(|| not_a_string("displayName", v))?;
+                        attrs.display_name = Some(s.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(attrs)
+}
+
+/// The attributes to write for a PATCH body, as the route receives it.
+///
+/// `Exposed for tests`: this is the boundary where the body's field *names*
+/// matter, and where a misspelled one degrades to "no operations" instead of an
+/// error (see [`PatchUserBody`]).
+pub fn user_attrs_from_body(body: PatchUserBody) -> AppResult<UserAttrs> {
+    user_attrs_from_patch(&body.operations)
+}
+
+/// Lowercases and validates `op`, defaulting a missing one to `replace`.
+///
+/// An unrecognised operation is rejected rather than guessed at: the whole
+/// problem this function exists to fix is operations being treated as something
+/// they are not.
+fn normalize_op(op: &str) -> AppResult<&'static str> {
+    match op.trim().to_ascii_lowercase().as_str() {
+        "" | "replace" => Ok("replace"),
+        "add" => Ok("add"),
+        "remove" => Ok("remove"),
+        other => Err(AppError::bad_request(format!(
+            "unsupported PATCH op `{other}`; expected add, remove or replace"
+        ))),
+    }
+}
+
+/// The attribute a `path` names, lowercased, with any schema URN or sub-attribute
+/// selector removed.
+///
+/// `urn:ietf:params:scim:schemas:core:2.0:User:active` and `emails[type eq
+/// "work"].value` both have to reduce to `active` and `emails` respectively.
+fn attribute_of(path: &str) -> String {
+    let path = path.trim();
+    let path = path.rsplit(':').next().unwrap_or(path);
+    let path = path.split(['[', '.']).next().unwrap_or(path);
+    path.trim().to_ascii_lowercase()
+}
+
+/// Reads a boolean sent as the direct `value` of a path-qualified operation.
+fn scalar_bool(value: &Value, attribute: &str) -> AppResult<bool> {
+    coerce_bool(value, attribute)
+}
+
+/// Accepts a real boolean and the string spellings some clients send.
+fn coerce_bool(value: &Value, attribute: &str) -> AppResult<bool> {
+    match value {
+        Value::Bool(b) => Ok(*b),
+        Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+            "true" => Ok(true),
+            "false" => Ok(false),
+            _ => Err(AppError::bad_request(format!(
+                "`{attribute}` must be a boolean, got `{s}`"
+            ))),
+        },
+        other => Err(AppError::bad_request(format!(
+            "`{attribute}` must be a boolean, got {other}"
+        ))),
+    }
+}
+
+fn scalar_string(value: &Value, attribute: &str) -> AppResult<String> {
+    value
+        .as_str()
+        .map(|s| s.trim().to_string())
+        .ok_or_else(|| not_a_string(attribute, value))
+}
+
+fn not_a_string(attribute: &str, value: &Value) -> AppError {
+    AppError::bad_request(format!("`{attribute}` must be a string, got {value}"))
 }
 
 async fn patch_user(
@@ -423,16 +597,13 @@ async fn patch_user(
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
 
-    let mut active = existing.status == "active";
-    let mut display_name = existing.display_name.clone();
-    for op in &body.operations {
-        if let Some(a) = op.value.get("active").and_then(|v| v.as_bool()) {
-            active = a;
-        }
-        if let Some(d) = op.value.get("displayName").and_then(|v| v.as_str()) {
-            display_name = d.trim().to_string();
-        }
-    }
+    // Attributes the PATCH did not mention keep their current value — a PATCH is
+    // partial by definition, so "absent" must not be read as "set to default".
+    let attrs = user_attrs_from_body(body)?;
+    let active = attrs.active.unwrap_or(existing.status == "active");
+    let display_name = attrs
+        .display_name
+        .unwrap_or_else(|| existing.display_name.clone());
 
     let row = sqlx::query_as::<_, ScimUserRow>(&format!(
         "UPDATE users SET status = $2, display_name = $3, updated_at = NOW() WHERE id = $1 RETURNING {USER_SELECT}"
@@ -450,7 +621,7 @@ async fn delete_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<StatusCode> {
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
 
@@ -464,7 +635,7 @@ async fn delete_user(
         .await?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: None,
             action: "scim.user.delete",
@@ -478,9 +649,11 @@ async fn delete_user(
     )
     .await;
 
-    Ok(Json(
-        json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"] }),
-    ))
+    // 204, not `200` with a body. RFC 7644 §3.6 defines DELETE success as `204 No
+    // Content`; the previous response was worse than merely non-conformant — it
+    // was a `200` carrying a `2.0:Error` schema, telling a conforming client both
+    // "this worked" and "this failed" at once.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Groups ---
@@ -619,14 +792,28 @@ async fn find_group(state: &AppState, id: &str) -> AppResult<ScimGroupRow> {
     .ok_or_else(|| AppError::NotFound("group not found".into()))
 }
 
+/// A SCIM PATCH body for groups. `Exposed for tests`; see [`group_member_changes_from_body`].
 #[derive(Debug, Deserialize)]
-struct PatchGroupBody {
-    #[serde(default)]
+pub struct PatchGroupBody {
+    /// `Operations`, for the same reason as on the user body.
+    #[serde(default, rename = "Operations", alias = "operations")]
     operations: Vec<GroupPatchOp>,
 }
 
+/// One SCIM PATCH operation on a group.
+///
+/// `Exposed for tests` — see [`group_member_changes`].
 #[derive(Debug, Deserialize)]
-struct GroupPatchOp {
+pub struct GroupPatchOp {
+    /// `add` / `remove` / `replace`.
+    #[serde(default)]
+    op: String,
+    /// Usually `members`, optionally with a value filter:
+    /// `members[value eq "<id>"]`.
+    #[serde(default)]
+    path: Option<String>,
+    /// Present on `add` and `replace`; often absent on `remove`, which may name
+    /// the member in `path` instead.
     #[serde(default)]
     value: Vec<GroupMemberRef>,
 }
@@ -640,6 +827,92 @@ struct GroupMemberRef {
     display: Option<String>,
 }
 
+/// What a group PATCH asks of the membership.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GroupMemberChange {
+    Add(Vec<Uuid>),
+    /// An empty list means "every member" — `remove` on `members` with nothing
+    /// selecting a particular member.
+    Remove(Vec<Uuid>),
+    /// The membership becomes exactly this list.
+    Replace(Vec<Uuid>),
+}
+
+/// Interprets group PATCH operations into membership changes.
+///
+/// `Exposed for tests`; the handler is a thin wrapper over this.
+///
+/// The `op` was previously ignored entirely and every operation was applied as
+/// an add, so `{"op":"remove","path":"members[value eq \"<id>\"]"}` — Okta's way
+/// of removing one member — **added** that member to the group. Returned as
+/// changes rather than applied directly so the interpretation can be tested
+/// without a database, and so the handler stays a short list of SQL calls.
+pub fn group_member_changes(ops: &[GroupPatchOp]) -> AppResult<Vec<GroupMemberChange>> {
+    let mut changes = Vec::new();
+
+    for op in ops {
+        let ids = member_ids(op);
+        match normalize_op(&op.op)? {
+            "add" => changes.push(GroupMemberChange::Add(ids)),
+            "replace" => changes.push(GroupMemberChange::Replace(ids)),
+            // No ids and no filter: the operation is "clear the members".
+            _ => changes.push(GroupMemberChange::Remove(ids)),
+        }
+    }
+
+    Ok(changes)
+}
+
+/// The membership changes a group PATCH body asks for.
+///
+/// `Exposed for tests`, and the counterpart of [`user_attrs_from_body`]: a body
+/// whose `Operations` was not recognised arrives here as an empty list, so this is
+/// where "the client's operations were read at all" is pinned down.
+pub fn group_member_changes_from_body(body: PatchGroupBody) -> AppResult<Vec<GroupMemberChange>> {
+    group_member_changes(&body.operations)
+}
+
+/// The user ids an operation names, from the `value` array or the `path` filter.
+fn member_ids(op: &GroupPatchOp) -> Vec<Uuid> {
+    let mut ids: Vec<Uuid> = op
+        .value
+        .iter()
+        .filter_map(|m| m.value.as_deref())
+        .filter_map(|v| Uuid::parse_str(v.trim()).ok())
+        .collect();
+
+    if ids.is_empty() {
+        if let Some(from_filter) = op
+            .path
+            .as_deref()
+            .and_then(filter_value)
+            .and_then(|v| Uuid::parse_str(v.trim()).ok())
+        {
+            ids.push(from_filter);
+        }
+    }
+
+    ids
+}
+
+/// The id in a SCIM value filter, as in `members[value eq "3f1b…"]`.
+///
+/// Okta removes a single member with no `value` array on the operation at all, so
+/// without reading the filter a removal is indistinguishable from "remove
+/// everyone" — the difference between dropping one member and dropping the group's
+/// entire membership.
+fn filter_value(path: &str) -> Option<String> {
+    const NEEDLE: &str = "value eq";
+
+    let at = path.to_ascii_lowercase().find(NEEDLE)?;
+    let rest = path[at + NEEDLE.len()..].trim_start();
+    // Both quote styles appear in the wild; SCIM's examples use `"`.
+    let quote = rest.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let rest = &rest[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
 async fn patch_group(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -649,11 +922,26 @@ async fn patch_group(
     authorize(&state, &headers).await?;
     let group = find_group(&state, &id).await?;
 
-    for op in &body.operations {
-        for m in &op.value {
-            let user_id = m.value.as_ref().and_then(|v| Uuid::parse_str(v).ok());
-            if let Some(user_id) = user_id {
-                add_group_to_user(&state, user_id, &group.display_name).await?;
+    for change in group_member_changes_from_body(body)? {
+        match change {
+            GroupMemberChange::Add(ids) => {
+                for user_id in ids {
+                    add_group_to_user(&state, user_id, &group.display_name).await?;
+                }
+            }
+            GroupMemberChange::Remove(ids) if ids.is_empty() => {
+                clear_group(&state, &group.display_name).await?;
+            }
+            GroupMemberChange::Remove(ids) => {
+                for user_id in ids {
+                    remove_group_from_user(&state, user_id, &group.display_name).await?;
+                }
+            }
+            GroupMemberChange::Replace(ids) => {
+                clear_group(&state, &group.display_name).await?;
+                for user_id in ids {
+                    add_group_to_user(&state, user_id, &group.display_name).await?;
+                }
             }
         }
     }
@@ -673,30 +961,50 @@ async fn add_group_to_user(state: &AppState, user_id: Uuid, group_name: &str) ->
     Ok(())
 }
 
+async fn remove_group_from_user(
+    state: &AppState,
+    user_id: Uuid,
+    group_name: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE users SET groups = array_remove(groups, $2), updated_at = NOW() WHERE id = $1",
+    )
+    .bind(user_id)
+    .bind(group_name)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
+/// Drops `group_name` from every user that carries it.
+async fn clear_group(state: &AppState, group_name: &str) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE users SET groups = array_remove(groups, $1), updated_at = NOW() WHERE $1 = ANY(groups)",
+    )
+    .bind(group_name)
+    .execute(&state.pool)
+    .await?;
+    Ok(())
+}
+
 async fn delete_group(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<StatusCode> {
     authorize(&state, &headers).await?;
     let group = find_group(&state, &id).await?;
 
-    sqlx::query(
-        "UPDATE users SET groups = array_remove(groups, $2), updated_at = NOW() WHERE $2 = ANY(groups)",
-    )
-    .bind(group.id)
-    .bind(&group.display_name)
-    .execute(&state.pool)
-    .await?;
+    clear_group(&state, &group.display_name).await?;
 
     sqlx::query("DELETE FROM scim_groups WHERE id = $1")
         .bind(group.id)
         .execute(&state.pool)
         .await?;
 
-    Ok(Json(
-        json!({ "schemas": ["urn:ietf:params:scim:api:messages:2.0:Error"] }),
-    ))
+    // 204 for the same reason as `delete_user`: RFC 7644 §3.6, and a `200` with
+    // an Error schema is a contradiction rather than an answer.
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn service_provider_config(

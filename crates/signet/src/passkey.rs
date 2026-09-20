@@ -242,7 +242,7 @@ async fn register_finish(
     })?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: Some(user),
             action: "mfa.passkey_enroll",
@@ -272,7 +272,7 @@ async fn remove_passkey(
         .await?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: Some(user),
             action: "mfa.passkey_remove",
@@ -415,7 +415,7 @@ async fn login_finish(
     let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
     crate::login_alert::track_login(
-        &state.pool,
+        &state,
         &user,
         ip.as_deref(),
         crate::http_util::user_agent(&headers).as_deref(),
@@ -423,7 +423,7 @@ async fn login_finish(
     .await;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         crate::audit::AuditEvent {
             actor: Some(user.clone()),
             action: "auth.login",

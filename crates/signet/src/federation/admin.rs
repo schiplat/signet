@@ -100,7 +100,7 @@ async fn patch_sso_settings(
     require_admin_role(&actor)?;
     set_sso_jit_provision(&state.pool, body.jit_provision).await?;
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "settings.sso_update",
@@ -207,7 +207,7 @@ struct ProviderBody {
 
 const VALID_TYPES: &[&str] = &["github", "google", "feishu", "wechat", "oidc"];
 
-fn validate_body(body: &ProviderBody) -> AppResult<()> {
+fn validate_body(body: &ProviderBody, allow_private: bool) -> AppResult<()> {
     let code_ok = !body.code.is_empty()
         && body
             .code
@@ -224,6 +224,17 @@ fn validate_body(body: &ProviderBody) -> AppResult<()> {
     if body.provider_type == "oidc" && body.issuer_url.as_deref().unwrap_or("").is_empty() {
         return Err(AppError::bad_request("oidc providers require issuer_url"));
     }
+    // Reject non-http(s) or literal private/loopback hosts up front. Only the
+    // URL shape is checked here (no DNS): internal IdPs are commonly reached by
+    // name, which must keep working.
+    if let Some(issuer) = body
+        .issuer_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        crate::outbound::validate_shape(issuer, allow_private)?;
+    }
     if body.client_id.trim().is_empty() {
         return Err(AppError::bad_request("client_id is required"));
     }
@@ -236,7 +247,7 @@ async fn admin_create(
     Json(body): Json<ProviderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
-    validate_body(&body)?;
+    validate_body(&body, state.config.outbound_allow_private)?;
     let secret = body
         .client_secret
         .as_deref()
@@ -285,7 +296,7 @@ async fn admin_create(
     .map_err(|e| db_conflict(e, &body.code))?;
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "admin.sso_provider.create",
@@ -309,7 +320,7 @@ async fn admin_update(
     Json(body): Json<ProviderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
-    validate_body(&body)?;
+    validate_body(&body, state.config.outbound_allow_private)?;
 
     // NOT NULL columns: empty form values become "" / code, never SQL NULL.
     let scopes_value = body
@@ -387,7 +398,7 @@ async fn admin_update(
     }
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "admin.sso_provider.update",
@@ -419,7 +430,7 @@ async fn admin_delete(
     }
     // user_identities rows cascade; record how many links were dropped.
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "admin.sso_provider.delete",
@@ -457,7 +468,7 @@ async fn admin_set_enabled(
         return Err(AppError::not_found("provider not found"));
     }
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "admin.sso_provider.update",
@@ -569,7 +580,7 @@ async fn unlink_identity(
     }
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             resource_id: Some(user.id.to_string()),
             actor: Some(user),

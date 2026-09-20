@@ -10,7 +10,6 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
@@ -32,7 +31,7 @@ struct Webhook {
     secret_set: bool,
 }
 
-const WEBHOOK_COLS: &str = "id, url, kind, enabled, (secret IS NOT NULL) AS secret_set";
+const WEBHOOK_COLS: &str = "id, url, kind, enabled, (secret_enc IS NOT NULL) AS secret_set";
 
 async fn list_webhooks(
     State(state): State<AppState>,
@@ -77,31 +76,34 @@ async fn create_webhook(
     require_admin_role(&actor)?;
 
     let url = body.url.trim().to_string();
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(AppError::bad_request("webhook url must be http(s)"));
-    }
+    // Admin-supplied destination: must be http(s) and publicly routable, or the
+    // server becomes an SSRF proxy into the deployment's own network.
+    crate::outbound::ensure_allowed(&url, state.config.outbound_allow_private).await?;
     let kind = normalize_kind(body.kind)?;
 
     let row = sqlx::query_as::<_, Webhook>(&format!(
         r#"
-        INSERT INTO webhooks (id, url, secret, kind) VALUES ($1, $2, $3, $4)
+        INSERT INTO webhooks (id, url, secret_enc, kind) VALUES ($1, $2, $3, $4)
         RETURNING {WEBHOOK_COLS}
         "#,
     ))
     .bind(Uuid::new_v4())
     .bind(&url)
+    // Signed with the application key at rest, matching how SSO client secrets
+    // and TOTP secrets are handled.
     .bind(
         body.secret
             .as_deref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| state.encryptor.encrypt(s)),
     )
     .bind(&kind)
     .fetch_one(&state.pool)
     .await?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "webhook.create",
@@ -132,7 +134,7 @@ async fn delete_webhook(
         .await?;
 
     crate::audit::record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(actor),
             action: "webhook.delete",
@@ -182,10 +184,10 @@ async fn list_deliveries(
 }
 
 /// Fire-and-forget dispatch of an audit event to all enabled webhooks.
-pub fn dispatch(pool: &PgPool, event_id: Uuid, payload: Value) {
-    let pool = pool.clone();
+pub fn dispatch(state: &AppState, event_id: Uuid, payload: Value) {
+    let state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = deliver_all(&pool, event_id, &payload).await {
+        if let Err(e) = deliver_all(&state, event_id, &payload).await {
             tracing::warn!(error = %e, "webhook dispatch failed");
         }
     });
@@ -196,21 +198,22 @@ struct WebhookRow {
     id: Uuid,
     url: String,
     kind: String,
-    secret: Option<String>,
+    /// AES-256-GCM blob, decrypted at delivery time with the application key.
+    secret_enc: Option<String>,
 }
 
-async fn deliver_all(pool: &PgPool, event_id: Uuid, payload: &Value) -> AppResult<()> {
+async fn deliver_all(state: &AppState, event_id: Uuid, payload: &Value) -> AppResult<()> {
     let rows = sqlx::query_as::<_, WebhookRow>(
-        "SELECT id, url, kind, secret FROM webhooks WHERE enabled = TRUE",
+        "SELECT id, url, kind, secret_enc FROM webhooks WHERE enabled = TRUE",
     )
-    .fetch_all(pool)
+    .fetch_all(&state.pool)
     .await?;
 
     for wh in rows {
-        let pool = pool.clone();
+        let state = state.clone();
         let payload = payload.clone();
         tokio::spawn(async move {
-            if let Err(e) = deliver_one(&pool, &wh, event_id, &payload).await {
+            if let Err(e) = deliver_one(&state, &wh, event_id, &payload).await {
                 tracing::warn!(webhook = %wh.id, error = %e, "webhook delivery failed");
             }
         });
@@ -219,24 +222,27 @@ async fn deliver_all(pool: &PgPool, event_id: Uuid, payload: &Value) -> AppResul
 }
 
 async fn deliver_one(
-    pool: &PgPool,
+    state: &AppState,
     wh: &WebhookRow,
     event_id: Uuid,
     payload: &Value,
 ) -> AppResult<()> {
+    // A secret we cannot decrypt is treated as "no secret": signing would be
+    // wrong, and failing the delivery outright would be worse than an unsigned
+    // (still HMAC-less) attempt. The mismatch is already visible via
+    // `secret_set` in the admin list.
+    let secret = wh
+        .secret_enc
+        .as_deref()
+        .and_then(|enc| state.encryptor.decrypt(enc));
+
     let (body, content_type) = if wh.kind == "feishu" {
-        (
-            feishu_body(payload, wh.secret.as_deref()),
-            "application/json",
-        )
+        (feishu_body(payload, secret.as_deref()), "application/json")
     } else {
         (payload.to_string(), "application/json")
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Anyhow(e.into()))?;
+    let client = crate::outbound::client();
 
     let mut req = client
         .post(&wh.url)
@@ -245,20 +251,27 @@ async fn deliver_one(
 
     // Generic webhooks sign via header; Feishu embeds sign in the body instead.
     if wh.kind != "feishu" {
-        if let Some(s) = wh.secret.as_deref() {
+        if let Some(s) = secret.as_deref() {
             let sig = hmac_sha256_hex(s.as_bytes(), body.as_bytes());
             req = req.header("x-signet-signature", format!("sha256={sig}"));
         }
     }
 
-    let (success, status_code, err) = match req.body(body).send().await {
-        Ok(resp) => {
-            let code = resp.status().as_u16();
-            let ok = (200..300).contains(&code);
-            (ok, Some(code as i16), None)
-        }
-        Err(e) => (false, None, Some(e.to_string())),
-    };
+    // Re-validate on every attempt: the URL was checked when it was saved, but
+    // DNS can be re-pointed afterwards. A blocked destination is recorded as a
+    // failed delivery so it stays visible in the delivery history.
+    let (success, status_code, err) =
+        match crate::outbound::ensure_allowed(&wh.url, state.config.outbound_allow_private).await {
+            Err(e) => (false, None, Some(e.to_string())),
+            Ok(_) => match req.body(body).send().await {
+                Ok(resp) => {
+                    let code = resp.status().as_u16();
+                    let ok = (200..300).contains(&code);
+                    (ok, Some(code as i16), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            },
+        };
 
     sqlx::query(
         r#"
@@ -272,7 +285,7 @@ async fn deliver_one(
     .bind(status_code)
     .bind(success)
     .bind(err)
-    .execute(pool)
+    .execute(&state.pool)
     .await?;
 
     Ok(())

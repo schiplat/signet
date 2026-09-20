@@ -120,7 +120,7 @@ async fn setup_admin(
     ));
 
     record(
-        &state.pool,
+        &state,
         AuditEvent {
             actor: Some(user.clone()),
             action: "setup.complete",

@@ -156,7 +156,7 @@ pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User)
     }
 
     crate::audit::record(
-        &state.pool,
+        state,
         crate::audit::AuditEvent {
             actor: Some(user.clone()),
             action: "auth.identity.link",
@@ -228,7 +228,7 @@ pub(crate) async fn jit_create_user(
 
     let user_id = if let Some(uid) = inserted {
         crate::audit::record(
-            &state.pool,
+            state,
             crate::audit::AuditEvent {
                 actor: None,
                 action: "user.create",

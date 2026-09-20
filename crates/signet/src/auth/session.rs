@@ -104,18 +104,17 @@ pub async fn destroy_session(pool: &PgPool, token: &str) -> AppResult<()> {
 
 pub async fn user_from_session_token(pool: &PgPool, token: &str) -> AppResult<Option<User>> {
     let token_hash = sha256_hex(token);
-    let user = sqlx::query_as::<_, User>(
+    let user = sqlx::query_as::<_, User>(&format!(
         r#"
-        SELECT u.id, u.sub, u.email, u.username, u.display_name, u.password_hash, u.status, u.role,
-               u.mfa_required, u.must_change_password, u.totp_enabled, u.totp_secret,
-               u.groups, u.phone, u.provisioned_via, u.created_at, u.updated_at
+        SELECT {}
         FROM sessions s
         JOIN users u ON u.id = s.user_id
         WHERE s.token_hash = $1
           AND s.expires_at > NOW()
           AND u.status = 'active'
         "#,
-    )
+        crate::models::user_cols_with("u")
+    ))
     .bind(token_hash)
     .fetch_optional(pool)
     .await?;
