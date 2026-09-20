@@ -10,15 +10,11 @@ pub mod email;
 pub mod error;
 pub mod federation;
 pub mod http;
-pub mod login_alert;
 pub mod metrics;
 pub mod mfa;
 pub mod models;
 pub mod oidc;
 pub mod outbound;
-pub mod passkey;
-pub mod password;
-pub mod password_reset;
 pub mod roles;
 pub mod scim;
 pub mod setup;
@@ -42,12 +38,12 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     let api_v1 = Router::new()
         .merge(auth::router())
         .merge(mfa::router())
-        .merge(passkey::router())
+        .merge(auth::passkey::router())
         .merge(federation::routes::router())
         .merge(federation::admin::router())
         .merge(admin::router())
         .merge(audit::router())
-        .merge(password_reset::router())
+        .merge(auth::password_reset::router())
         .merge(webhooks::router())
         .merge(directory::api::router())
         .merge(setup::router());
@@ -111,6 +107,6 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         encryptor: Arc::new(encryptor),
         rate_limiter: Arc::new(http::ratelimit::RateLimiter::new(rate_limit_per_minute)),
         webauthn: Arc::new(webauthn),
-        passkey_challenges: passkey::new_store(),
+        passkey_challenges: auth::passkey::new_store(),
     })
 }

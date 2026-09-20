@@ -2,13 +2,13 @@ mod clients;
 
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
+use crate::auth::password::{
+    hash_password, record_password_history, set_user_password, validate_password_strength,
+};
 use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::models::{normalize_username, PublicUser, User, USER_COLS};
-use crate::password::{
-    hash_password, record_password_history, set_user_password, validate_password_strength,
-};
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};

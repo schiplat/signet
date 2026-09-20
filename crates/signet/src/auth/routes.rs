@@ -1,4 +1,5 @@
 use crate::audit::{record, AuditEvent};
+use crate::auth::password::{set_user_password, verify_password};
 use crate::auth::session::{
     clear_session_cookie, cookie_value, current_user, destroy_session, list_sessions,
     revoke_all_sessions, revoke_session_by_id, session_id_for_token, SESSION_COOKIE,
@@ -8,7 +9,6 @@ use crate::error::{AppError, AppResult};
 use crate::http::extract::client_ip;
 use crate::mfa::{begin_login_mfa_flow, force_password_change};
 use crate::models::{PublicUser, User, USER_COLS};
-use crate::password::{set_user_password, verify_password};
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::HeaderMap;

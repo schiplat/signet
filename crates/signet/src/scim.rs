@@ -1,6 +1,6 @@
+use crate::auth::password::{hash_password, record_password_history};
 use crate::error::{AppError, AppResult};
 use crate::models::normalize_username;
-use crate::password::{hash_password, record_password_history};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};

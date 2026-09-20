@@ -414,7 +414,7 @@ async fn login_finish(
     ));
     let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
-    crate::login_alert::track_login(
+    crate::auth::login_alert::track_login(
         &state,
         &user,
         ip.as_deref(),

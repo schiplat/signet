@@ -1,9 +1,9 @@
 use crate::admin::{require_admin_user, require_staff_user};
 use crate::audit::{record, AuditEvent};
+use crate::auth::password::hash_password;
 use crate::crypto::util::random_token;
 use crate::error::{AppError, AppResult};
 use crate::http::source_ip::normalize_cidrs;
-use crate::password::hash_password;
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;

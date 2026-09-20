@@ -583,7 +583,8 @@ async fn finish_sign_in(
         state.config.session_ttl_hours,
     );
 
-    crate::login_alert::track_login(&state, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::auth::login_alert::track_login(&state, &user, ip.as_deref(), user_agent.as_deref())
+        .await;
 
     crate::audit::record(
         &state,

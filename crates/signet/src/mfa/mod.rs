@@ -1,10 +1,10 @@
 mod totp_util;
 
 use crate::audit::{record, AuditEvent};
+use crate::auth::password::set_user_password;
 use crate::auth::session::{cookie_value, create_session, current_user, session_cookie};
 use crate::error::{AppError, AppResult};
 use crate::models::{PublicUser, User, USER_COLS};
-use crate::password::set_user_password;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, State};
@@ -247,7 +247,7 @@ async fn issue_session(
         .add(clear_mfa_cookie(state.config.cookie_secure));
     let jar = crate::federation::consume_pending_link(state, jar, &user).await;
 
-    crate::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
 
     record(
         state,
@@ -399,7 +399,7 @@ pub async fn begin_login_mfa_flow(
         state.config.session_ttl_hours,
     ));
     let jar = crate::federation::consume_pending_link(state, jar, &user).await;
-    crate::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
+    crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
     record(
         state,
         AuditEvent {
@@ -729,7 +729,7 @@ async fn enroll_confirm_challenge(
         .add(clear_mfa_cookie(state.config.cookie_secure));
     let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
-    crate::login_alert::track_login(
+    crate::auth::login_alert::track_login(
         &state,
         &user,
         ip.as_deref(),

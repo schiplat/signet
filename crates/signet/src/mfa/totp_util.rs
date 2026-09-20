@@ -1,5 +1,5 @@
+use crate::auth::password::{hash_password, verify_password};
 use crate::error::{AppError, AppResult};
-use crate::password::{hash_password, verify_password};
 use rand::RngCore;
 use totp_rs::{Algorithm, Secret, TOTP};
 

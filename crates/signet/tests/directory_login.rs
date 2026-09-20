@@ -341,7 +341,7 @@ async fn a_local_password_cannot_be_set_for_a_managed_user() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    let err = signet::password::set_user_password(
+    let err = signet::auth::password::set_user_password(
         &state.pool,
         user_id,
         "CorrectHorse1",
@@ -383,7 +383,7 @@ async fn a_disabled_source_releases_the_account_to_local_administration() {
         .await
         .expect("disable the source");
 
-    signet::password::set_user_password(
+    signet::auth::password::set_user_password(
         &state.pool,
         user_id,
         "CorrectHorse1",

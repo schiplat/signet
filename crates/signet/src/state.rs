@@ -1,8 +1,8 @@
+use crate::auth::passkey::ChallengeStore;
 use crate::config::Config;
 use crate::crypto::encryption::Encryptor;
 use crate::crypto::keys::JwtKeys;
 use crate::http::ratelimit::RateLimiter;
-use crate::passkey::ChallengeStore;
 use sqlx::PgPool;
 use std::sync::Arc;
 use webauthn_rs::prelude::Webauthn;

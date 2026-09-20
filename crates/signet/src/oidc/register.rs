@@ -1,6 +1,6 @@
+use crate::auth::password::hash_password;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
-use crate::password::hash_password;
 use crate::state::AppState;
 use axum::extract::State;
 use axum::http::HeaderMap;
