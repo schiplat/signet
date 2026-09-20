@@ -19,7 +19,6 @@ pub mod outbound;
 pub mod passkey;
 pub mod password;
 pub mod password_reset;
-pub mod ratelimit;
 pub mod roles;
 pub mod scim;
 pub mod setup;
@@ -62,7 +61,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .fallback(http::static_files::spa_fallback)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            ratelimit::track,
+            http::ratelimit::track,
         ))
         .layer(axum::middleware::from_fn(metrics::track))
         .layer(axum::middleware::from_fn(http::access_log::track))
@@ -110,7 +109,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         config: Arc::new(cfg),
         keys: Arc::new(keys),
         encryptor: Arc::new(encryptor),
-        rate_limiter: Arc::new(ratelimit::RateLimiter::new(rate_limit_per_minute)),
+        rate_limiter: Arc::new(http::ratelimit::RateLimiter::new(rate_limit_per_minute)),
         webauthn: Arc::new(webauthn),
         passkey_challenges: passkey::new_store(),
     })
