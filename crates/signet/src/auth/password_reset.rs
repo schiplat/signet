@@ -71,11 +71,7 @@ async fn request_reset(
 
         let link = format!(
             "{}/reset-password?token={token}",
-            state
-                .config
-                .public_base_url
-                .as_deref()
-                .unwrap_or(&state.config.issuer)
+            state.config.public_base()
         );
         crate::email::send(
             &user.1,

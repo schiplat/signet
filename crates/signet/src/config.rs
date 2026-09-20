@@ -40,6 +40,21 @@ pub struct Config {
 }
 
 impl Config {
+    /// The externally reachable base URL for absolute links handed to a browser
+    /// or to an upstream IdP: the SSO callback URL, password-reset links, and
+    /// the SCIM base URL shown to IdPs.
+    ///
+    /// Prefers `SIGNET_PUBLIC_BASE_URL`, falling back to the issuer for
+    /// single-host deployments. Trailing slashes are trimmed because callers
+    /// append a leading-slash path, and because the issuer is the only one of
+    /// the two that [`Config::from_env`] rejects a trailing slash on.
+    pub fn public_base(&self) -> &str {
+        self.public_base_url
+            .as_deref()
+            .unwrap_or(&self.issuer)
+            .trim_end_matches('/')
+    }
+
     pub fn from_env() -> Result<Self> {
         let _ = dotenvy::dotenv();
 

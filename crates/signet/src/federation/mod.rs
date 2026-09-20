@@ -22,18 +22,6 @@ pub use link::consume_pending_link;
 
 use crate::state::AppState;
 
-/// Public base URL for provider redirect URIs: `SIGNET_PUBLIC_BASE_URL` when
-/// set, falling back to the issuer (single-host deployments).
-fn public_base(state: &AppState) -> String {
-    state
-        .config
-        .public_base_url
-        .clone()
-        .unwrap_or_else(|| state.config.issuer.clone())
-        .trim_end_matches('/')
-        .to_string()
-}
-
 /// The one redirect-URI pattern shared by every provider type.
 ///
 /// Composed here rather than at each use site, because the same URL has to
@@ -46,7 +34,7 @@ fn public_base(state: &AppState) -> String {
 fn callback_url(state: &AppState, code: &str) -> String {
     format!(
         "{}{}/auth/sso/{code}/callback",
-        public_base(state),
+        state.config.public_base(),
         crate::API_PREFIX
     )
 }

@@ -49,11 +49,11 @@ async fn integrations(
 ) -> AppResult<Json<serde_json::Value>> {
     let _ = require_admin_user(&state, &headers).await?;
     let scim_configured: bool = scim_token_configured(&state.pool).await?;
-    let issuer = state.config.issuer.trim_end_matches('/');
+    let base = state.config.public_base();
     Ok(Json(json!({
         "scim": {
             "enabled": scim_configured,
-            "base_url": format!("{issuer}/scim/v2"),
+            "base_url": format!("{base}/scim/v2"),
             "token_configured": scim_configured,
         },
         "webauthn": {
