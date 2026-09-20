@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { confirmPasswordReset, requestPasswordReset } from "@/lib/api";
@@ -7,7 +7,9 @@ import { confirmPasswordReset, requestPasswordReset } from "@/lib/api";
 const route = useRoute();
 const router = useRouter();
 
-const step = ref<"request" | "confirm" | "done">("request");
+type Step = "request" | "confirm" | "done";
+
+const step = ref<Step>("request");
 const email = ref("");
 const newPassword = ref("");
 const confirmPassword = ref("");
@@ -19,6 +21,27 @@ const token = typeof route.query.token === "string" ? route.query.token : "";
 if (token) {
   step.value = "confirm";
 }
+
+// --- Focus management ---
+// Steps are rendered with `v-if`, so the target input only exists after the
+// re-render triggered by `step` changing; focusing must wait for `nextTick`.
+const emailInput = ref<HTMLInputElement | null>(null);
+const newPasswordInput = ref<HTMLInputElement | null>(null);
+
+const stepInputs: Partial<Record<Step, () => HTMLInputElement | null>> = {
+  request: () => emailInput.value,
+  confirm: () => newPasswordInput.value,
+};
+
+async function focusStepInput() {
+  await nextTick();
+  stepInputs[step.value]?.()?.focus();
+}
+
+watch(step, focusStepInput);
+// `step` may already be "confirm" on mount (reset link with a token), and
+// `watch` does not fire for the initial value.
+onMounted(focusStepInput);
 
 async function handleRequest() {
   error.value = "";
@@ -75,6 +98,7 @@ async function handleConfirm() {
         <div class="space-y-1.5">
           <label class="type-label">Email or username</label>
           <input
+            ref="emailInput"
             v-model="email"
             type="text"
             autocomplete="username"
@@ -93,6 +117,7 @@ async function handleConfirm() {
         <div class="space-y-1.5">
           <label class="type-label">New password</label>
           <input
+            ref="newPasswordInput"
             v-model="newPassword"
             type="password"
             autocomplete="new-password"

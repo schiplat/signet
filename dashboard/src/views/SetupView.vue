@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { nextTick, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { fetchSetupStatus } from "@/lib/api";
@@ -15,6 +15,13 @@ const confirm = ref("");
 const showPassword = ref(false);
 const error = ref("");
 const loading = ref(false);
+
+const emailInput = ref<HTMLInputElement | null>(null);
+
+onMounted(async () => {
+  await nextTick();
+  emailInput.value?.focus();
+});
 
 onMounted(async () => {
   try {
@@ -68,6 +75,7 @@ async function handleSubmit() {
         <div class="space-y-1.5">
           <label class="type-label">Email</label>
           <input
+            ref="emailInput"
             v-model="email"
             type="email"
             autocomplete="username"

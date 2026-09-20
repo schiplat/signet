@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
@@ -43,6 +43,26 @@ const { dataUrl: qrUrl } = useQrDataUrl(enrollUri);
 
 const recoveryCodes = ref<string[]>([]);
 const recoveryAck = ref(false);
+
+// --- Focus management ---
+// Steps are rendered with `v-if`, so the target input only exists after the
+// re-render triggered by `step` changing; focusing must wait for `nextTick`.
+const emailInput = ref<HTMLInputElement | null>(null);
+const mfaCodeInput = ref<HTMLInputElement | null>(null);
+const enrollCodeInput = ref<HTMLInputElement | null>(null);
+const newPasswordInput = ref<HTMLInputElement | null>(null);
+
+const stepInputs: Partial<Record<Step, () => HTMLInputElement | null>> = {
+  password: () => emailInput.value,
+  mfa: () => mfaCodeInput.value,
+  enroll: () => enrollCodeInput.value,
+  password_change: () => newPasswordInput.value,
+};
+
+watch(step, async (next) => {
+  await nextTick();
+  stepInputs[next]?.()?.focus();
+});
 
 // Only allow return_to to bounce back to the OIDC endpoints; reject absolute
 // (https://) and protocol-relative (//) URLs. Final redirect targets are still
@@ -214,6 +234,12 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
 };
 
 onMounted(async () => {
+  // The password step is the initial state, so `watch(step)` never fires for it.
+  await nextTick();
+  emailInput.value?.focus();
+});
+
+onMounted(async () => {
   try {
     const res = await fetchEnabledSsoProviders();
     ssoProviders.value = res.providers;
@@ -260,6 +286,7 @@ function ssoStartUrl(code: string): string {
         <div class="space-y-1.5">
           <label class="type-label">Email or username</label>
           <input
+            ref="emailInput"
             v-model="email"
             type="text"
             autocomplete="username"
@@ -354,6 +381,7 @@ function ssoStartUrl(code: string): string {
             {{ mfaMethod === "totp" ? "Authentication code" : "Recovery code" }}
           </label>
           <input
+            ref="mfaCodeInput"
             v-model="mfaCode"
             class="field-input font-mono tracking-wider"
             :placeholder="mfaMethod === 'totp' ? '123456' : 'ABCD-EFGH'"
@@ -385,6 +413,7 @@ function ssoStartUrl(code: string): string {
         <div class="space-y-1.5">
           <label class="type-label">Authentication code</label>
           <input
+            ref="enrollCodeInput"
             v-model="enrollCode"
             class="field-input font-mono tracking-wider"
             placeholder="123456"
@@ -406,6 +435,7 @@ function ssoStartUrl(code: string): string {
           <label class="type-label">New password</label>
           <div class="relative">
             <input
+              ref="newPasswordInput"
               v-model="newPassword"
               :type="showNewPassword ? 'text' : 'password'"
               autocomplete="new-password"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { AppWindow, ChevronDown, Download, Fingerprint, KeyRound, Laptop, Link2, LogOut, PanelLeft, Shield, User } from "@lucide/vue";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
@@ -109,6 +109,29 @@ const enrollSecret = ref("");
 const enrollUri = ref("");
 const { dataUrl: qrUrl } = useQrDataUrl(enrollUri);
 const recoveryCodes = ref<string[]>([]);
+
+// Each MFA panel that asks for a code renders a distinct form, so give every
+// form its own ref (`enroll`/`rebind` and `regen`/`rebind_auth` share one).
+const mfaEnrollCodeInput = ref<HTMLInputElement | null>(null);
+const mfaVerifyCodeInput = ref<HTMLInputElement | null>(null);
+const mfaDisableCodeInput = ref<HTMLInputElement | null>(null);
+
+const mfaCodeInputs: Partial<Record<MfaPanel, () => HTMLInputElement | null>> = {
+  enroll: () => mfaEnrollCodeInput.value,
+  rebind: () => mfaEnrollCodeInput.value,
+  regen: () => mfaVerifyCodeInput.value,
+  rebind_auth: () => mfaVerifyCodeInput.value,
+  disable: () => mfaDisableCodeInput.value,
+};
+
+watch([showMfa, mfaPanel], async ([open, panel]) => {
+  if (!open) return;
+  const target = mfaCodeInputs[panel];
+  if (!target) return;
+  // Panels are rendered with `v-if`, so wait for the re-render before focusing.
+  await nextTick();
+  target()?.focus();
+});
 
 async function handleLogout() {
   menuOpen.value = false;
@@ -850,7 +873,7 @@ onUnmounted(() => {
           <p class="break-all rounded-lg bg-muted px-3 py-2 font-mono text-[11px]">{{ enrollSecret }}</p>
           <div>
             <label class="type-label mb-1.5 block">Authentication code</label>
-            <input v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <input ref="mfaEnrollCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
@@ -871,7 +894,7 @@ onUnmounted(() => {
           <p class="text-xs text-muted-foreground">Enter a current authenticator code to continue.</p>
           <div>
             <label class="type-label mb-1.5 block">Authentication code</label>
-            <input v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <input ref="mfaVerifyCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
@@ -892,7 +915,7 @@ onUnmounted(() => {
           </p>
           <div>
             <label class="type-label mb-1.5 block">Authentication code</label>
-            <input v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <input ref="mfaDisableCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
