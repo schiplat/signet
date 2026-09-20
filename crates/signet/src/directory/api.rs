@@ -422,7 +422,7 @@ async fn audit(
             resource_id: Some(code.to_string()),
             detail,
             ip: None,
-            user_agent: crate::http_util::user_agent(headers),
+            user_agent: crate::http::extract::user_agent(headers),
             client_id: None,
         },
     )

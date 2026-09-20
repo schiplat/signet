@@ -104,7 +104,7 @@ async fn patch_mfa_settings(
             resource_id: Some("mfa.required_globally".into()),
             detail: json!({ "required_globally": body.required_globally }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -154,8 +154,8 @@ async fn create_challenge(
     purpose: &str,
     pending_secret: Option<&str>,
 ) -> AppResult<String> {
-    let token = crate::crypto_util::random_token(32);
-    let token_hash = crate::crypto_util::sha256_hex(&token);
+    let token = crate::crypto::util::random_token(32);
+    let token_hash = crate::crypto::util::sha256_hex(&token);
     let id = Uuid::new_v4();
     let expires_at = Utc::now() + Duration::minutes(MFA_TTL_MINUTES);
     sqlx::query(
@@ -178,7 +178,7 @@ async fn create_challenge(
 async fn load_challenge(pool: &PgPool, headers: &HeaderMap) -> AppResult<MfaChallenge> {
     let token = cookie_value(headers, MFA_COOKIE)
         .ok_or_else(|| AppError::unauthorized("mfa challenge required"))?;
-    let token_hash = crate::crypto_util::sha256_hex(&token);
+    let token_hash = crate::crypto::util::sha256_hex(&token);
     sqlx::query_as::<_, MfaChallenge>(
         r#"
         SELECT id, user_id, purpose, pending_secret
@@ -442,8 +442,8 @@ pub(crate) async fn force_password_change(
     jar: CookieJar,
     Json(body): Json<ForcePasswordChangeBody>,
 ) -> AppResult<impl IntoResponse> {
-    let ip = crate::http_util::client_ip(&headers, Some(addr));
-    let user_agent = crate::http_util::user_agent(&headers);
+    let ip = crate::http::extract::client_ip(&headers, Some(addr));
+    let user_agent = crate::http::extract::user_agent(&headers);
 
     let challenge = load_challenge(&state.pool, &headers).await?;
     if challenge.purpose != "change_password" {
@@ -516,7 +516,7 @@ async fn verify_mfa(
     jar: CookieJar,
     Json(body): Json<VerifyBody>,
 ) -> AppResult<impl IntoResponse> {
-    let ip = crate::http_util::client_ip(&headers, Some(addr));
+    let ip = crate::http::extract::client_ip(&headers, Some(addr));
     let challenge = load_challenge(&state.pool, &headers).await?;
     if challenge.purpose != "login" {
         return Err(AppError::bad_request("login challenge required"));
@@ -551,7 +551,7 @@ async fn verify_mfa(
                     resource_id: Some(user.id.to_string()),
                     detail: json!({ "method": "totp" }),
                     ip: ip.clone(),
-                    user_agent: crate::http_util::user_agent(&headers),
+                    user_agent: crate::http::extract::user_agent(&headers),
                     client_id: None,
                 },
             )
@@ -592,7 +592,7 @@ async fn verify_mfa(
                     resource_id: Some(user.id.to_string()),
                     detail: json!({}),
                     ip: ip.clone(),
-                    user_agent: crate::http_util::user_agent(&headers),
+                    user_agent: crate::http::extract::user_agent(&headers),
                     client_id: None,
                 },
             )
@@ -609,7 +609,7 @@ async fn verify_mfa(
         jar,
         user,
         ip,
-        crate::http_util::user_agent(&headers),
+        crate::http::extract::user_agent(&headers),
         client_id,
     )
     .await
@@ -665,7 +665,7 @@ async fn enroll_confirm_challenge(
     jar: CookieJar,
     Json(body): Json<EnrollConfirmBody>,
 ) -> AppResult<impl IntoResponse> {
-    let ip = crate::http_util::client_ip(&headers, Some(addr));
+    let ip = crate::http::extract::client_ip(&headers, Some(addr));
     let challenge = load_challenge(&state.pool, &headers).await?;
     if challenge.purpose != "enroll" {
         return Err(AppError::bad_request("enroll challenge required"));
@@ -706,7 +706,7 @@ async fn enroll_confirm_challenge(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "via": "login" }),
             ip: ip.clone(),
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: client_id.clone(),
         },
     )
@@ -717,7 +717,7 @@ async fn enroll_confirm_challenge(
         user.id,
         state.config.session_ttl_hours,
         ip.as_deref(),
-        crate::http_util::user_agent(&headers).as_deref(),
+        crate::http::extract::user_agent(&headers).as_deref(),
     )
     .await?;
     let jar = jar
@@ -733,7 +733,7 @@ async fn enroll_confirm_challenge(
         &state,
         &user,
         ip.as_deref(),
-        crate::http_util::user_agent(&headers).as_deref(),
+        crate::http::extract::user_agent(&headers).as_deref(),
     )
     .await;
 
@@ -746,7 +746,7 @@ async fn enroll_confirm_challenge(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "mfa": true, "enrolled": true }),
             ip,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id,
         },
     )
@@ -859,7 +859,7 @@ async fn enroll_confirm_session(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "via": "session" }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -907,7 +907,7 @@ async fn regenerate_recovery(
             resource_id: None,
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -954,7 +954,7 @@ async fn disable_mfa(
             resource_id: Some(user.id.to_string()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1041,7 +1041,7 @@ async fn rebind_confirm(
             resource_id: Some(user.id.to_string()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1080,7 +1080,7 @@ async fn admin_reset_mfa(
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

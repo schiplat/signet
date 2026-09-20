@@ -1,10 +1,10 @@
 use crate::auth::session::{
     cookie_value, destroy_session, user_from_session_token, SESSION_COOKIE,
 };
-use crate::client_ip::check_client_source_ip;
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
-use crate::http_util::client_ip;
+use crate::http::extract::client_ip;
+use crate::http::source_ip::check_client_source_ip;
 use crate::models::ClientApp;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Query, State};

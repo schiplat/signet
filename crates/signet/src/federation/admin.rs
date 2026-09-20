@@ -108,7 +108,7 @@ async fn patch_sso_settings(
             resource_id: Some("sso.jit_provision".into()),
             detail: json!({ "jit_provision": body.jit_provision }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

@@ -1,4 +1,4 @@
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::password::hash_password;
 use crate::state::AppState;
@@ -107,7 +107,7 @@ pub async fn register(
                 "via": "rfc7591",
             }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

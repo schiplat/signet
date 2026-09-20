@@ -156,7 +156,7 @@ async fn seeded_user_with_session(pool: &PgPool) -> (Uuid, String) {
     )
     .bind(Uuid::new_v4())
     .bind(user_id)
-    .bind(signet::crypto_util::sha256_hex(&token))
+    .bind(signet::crypto::util::sha256_hex(&token))
     .execute(pool)
     .await
     .expect("insert the contract-test session");

@@ -1,8 +1,8 @@
 use crate::admin::{require_admin_user, require_staff_user};
 use crate::audit::{record, AuditEvent};
-use crate::client_ip::normalize_cidrs;
-use crate::crypto_util::random_token;
+use crate::crypto::util::random_token;
 use crate::error::{AppError, AppResult};
+use crate::http::source_ip::normalize_cidrs;
 use crate::password::hash_password;
 use crate::state::AppState;
 use axum::extract::{Path, State};
@@ -183,7 +183,7 @@ async fn create_client(
                 "allowed_cidrs": client.allowed_cidrs,
             }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -285,7 +285,7 @@ async fn update_client(
                 "allowed_cidrs": client.allowed_cidrs,
             }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -316,7 +316,7 @@ async fn delete_client(
             resource_id: Some(existing.client_id),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -341,7 +341,7 @@ async fn disable_client(
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -365,7 +365,7 @@ async fn enable_client(
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -405,7 +405,7 @@ async fn rotate_secret(
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -424,7 +424,7 @@ async fn create_registration_token(
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
     let plaintext = random_token(32);
-    let token_hash = crate::crypto_util::sha256_hex(&plaintext);
+    let token_hash = crate::crypto::util::sha256_hex(&plaintext);
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
 
     sqlx::query(
@@ -449,7 +449,7 @@ async fn create_registration_token(
             resource_id: None,
             detail: json!({ "expires_at": expires_at.to_rfc3339() }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

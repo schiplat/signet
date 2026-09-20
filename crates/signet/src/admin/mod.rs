@@ -3,7 +3,7 @@ mod clients;
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
 use crate::auth::session::revoke_all_sessions;
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::models::{normalize_username, PublicUser, User, USER_COLS};
 use crate::password::{
@@ -100,7 +100,7 @@ async fn scim_generate_token(
             resource_id: None,
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -129,7 +129,7 @@ async fn scim_revoke_token(
             resource_id: None,
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -836,7 +836,7 @@ async fn create_user(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email, "role": user.role }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1081,7 +1081,7 @@ async fn update_user(
                 "must_change_password": user.must_change_password,
             }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1124,7 +1124,7 @@ async fn delete_user(
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email, "role": target.role }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1155,7 +1155,7 @@ async fn disable_user(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1183,7 +1183,7 @@ async fn enable_user(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1255,7 +1255,7 @@ async fn revoke_user_sessions(
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email, "revoked": revoked }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -1318,7 +1318,7 @@ async fn audit_managed_write_blocked(
             resource_id: Some(user_id.to_string()),
             detail: json!({ "source": source, "field": field }),
             ip: None,
-            user_agent: crate::http_util::user_agent(headers),
+            user_agent: crate::http::extract::user_agent(headers),
             client_id: None,
         },
     )

@@ -61,7 +61,7 @@ impl JwtKeys {
 
         let n = URL_SAFE_NO_PAD.encode(public.n().to_bytes_be());
         let e = URL_SAFE_NO_PAD.encode(public.e().to_bytes_be());
-        let kid = crate::crypto_util::sha256_hex(&n)[..16].to_string();
+        let kid = crate::crypto::util::sha256_hex(&n)[..16].to_string();
 
         let encoding_key = EncodingKey::from_rsa_pem(pem.as_bytes()).context("encoding key")?;
         let jwks = Arc::new(Jwks {

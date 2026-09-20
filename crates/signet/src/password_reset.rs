@@ -1,4 +1,4 @@
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::password::set_user_password;
 use crate::state::AppState;

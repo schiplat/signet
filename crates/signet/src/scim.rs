@@ -54,7 +54,7 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
         .map(str::trim);
 
     match provided {
-        Some(p) if crate::crypto_util::sha256_hex(p) == stored_hash => Ok(()),
+        Some(p) if crate::crypto::util::sha256_hex(p) == stored_hash => Ok(()),
         _ => Err(AppError::unauthorized("invalid SCIM bearer token")),
     }
 }
@@ -214,7 +214,7 @@ async fn create_user(
     let sub = id.to_string();
     let password = body
         .password
-        .unwrap_or_else(|| crate::crypto_util::random_token(24));
+        .unwrap_or_else(|| crate::crypto::util::random_token(24));
     let password_hash = hash_password(&password)?;
     let status = if body.active == Some(false) {
         "disabled"
@@ -263,7 +263,7 @@ async fn create_user(
             resource_id: Some(row.id.to_string()),
             detail: json!({ "email": row.email }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -643,7 +643,7 @@ async fn delete_user(
             resource_id: Some(existing.id.to_string()),
             detail: json!({ "email": existing.email }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

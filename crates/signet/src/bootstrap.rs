@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::encryption::Encryptor;
+use crate::crypto::encryption::Encryptor;
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -24,7 +24,7 @@ pub async fn ensure_scim_token(pool: &PgPool, cfg: &Config) -> Result<()> {
     let Some(env_token) = cfg.scim_bearer_token.as_deref() else {
         return Ok(());
     };
-    let hash = crate::crypto_util::sha256_hex(env_token);
+    let hash = crate::crypto::util::sha256_hex(env_token);
     sqlx::query(
         r#"
         INSERT INTO scim_config (id, token_hash) VALUES (TRUE, $1)

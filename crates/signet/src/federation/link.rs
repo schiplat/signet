@@ -6,7 +6,7 @@
 //! - stashes a pending link cookie for the next local password / MFA / passkey
 //!   login to complete the bind.
 
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::models::User;
 use crate::state::AppState;

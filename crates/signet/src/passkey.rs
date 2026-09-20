@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::auth::session::{create_session, current_user, session_cookie};
-use crate::crypto_util::{b64url_encode, random_token};
+use crate::crypto::util::{b64url_encode, random_token};
 use crate::error::{AppError, AppResult};
 use crate::models::{PublicUser, User, USER_COLS};
 use crate::state::AppState;
@@ -250,7 +250,7 @@ async fn register_finish(
             resource_id: Some(id.to_string()),
             detail: json!({ "credential_id": credential_id }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -280,7 +280,7 @@ async fn remove_passkey(
             resource_id: Some(id.to_string()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -351,7 +351,7 @@ async fn login_finish(
     jar: CookieJar,
     Json(body): Json<LoginFinishBody>,
 ) -> AppResult<impl IntoResponse> {
-    let ip = crate::http_util::client_ip(&headers, Some(addr));
+    let ip = crate::http::extract::client_ip(&headers, Some(addr));
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
 
@@ -404,7 +404,7 @@ async fn login_finish(
         user.id,
         state.config.session_ttl_hours,
         ip.as_deref(),
-        crate::http_util::user_agent(&headers).as_deref(),
+        crate::http::extract::user_agent(&headers).as_deref(),
     )
     .await?;
     let jar = jar.add(session_cookie(
@@ -418,7 +418,7 @@ async fn login_finish(
         &state,
         &user,
         ip.as_deref(),
-        crate::http_util::user_agent(&headers).as_deref(),
+        crate::http::extract::user_agent(&headers).as_deref(),
     )
     .await;
 
@@ -431,7 +431,7 @@ async fn login_finish(
             resource_id: Some(user.id.to_string()),
             detail: json!({ "mfa": "passkey" }),
             ip,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id,
         },
     )

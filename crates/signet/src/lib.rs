@@ -1,19 +1,15 @@
-pub mod access_log;
 pub mod admin;
 pub mod audit;
 pub mod auth;
 pub mod bootstrap;
-pub mod client_ip;
 pub mod config;
-pub mod crypto_util;
+pub mod crypto;
 pub mod db;
 pub mod directory;
 pub mod email;
-pub mod encryption;
 pub mod error;
 pub mod federation;
-pub mod http_util;
-pub mod keys;
+pub mod http;
 pub mod login_alert;
 pub mod metrics;
 pub mod mfa;
@@ -24,13 +20,10 @@ pub mod passkey;
 pub mod password;
 pub mod password_reset;
 pub mod ratelimit;
-pub mod request_id;
 pub mod roles;
 pub mod scim;
 pub mod setup;
 pub mod state;
-pub mod static_files;
-pub mod ua;
 pub mod webhooks;
 
 use crate::config::Config;
@@ -66,14 +59,14 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .nest("/api/v1", api_v1)
         .merge(scim::router())
         .merge(oidc::router())
-        .fallback(static_files::spa_fallback)
+        .fallback(http::static_files::spa_fallback)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ratelimit::track,
         ))
         .layer(axum::middleware::from_fn(metrics::track))
-        .layer(axum::middleware::from_fn(access_log::track))
-        .layer(axum::middleware::from_fn(request_id::track))
+        .layer(axum::middleware::from_fn(http::access_log::track))
+        .layer(axum::middleware::from_fn(http::request_id::track))
         .with_state(state);
 
     Ok(api)
@@ -96,9 +89,9 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         tracing::warn!(error = %e, "failed to prune old audit logs");
     }
 
-    let keys = keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
-    let encryption_key = encryption::load_or_generate_key(&cfg.encryption_key_path)?;
-    let encryptor = encryption::Encryptor::new(&encryption_key);
+    let keys = crypto::keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
+    let encryption_key = crypto::encryption::load_or_generate_key(&cfg.encryption_key_path)?;
+    let encryptor = crypto::encryption::Encryptor::new(&encryption_key);
     // One-way move of webhook secrets out of the legacy plaintext column.
     // Deliberately fatal: carrying on would leave `secret_enc` NULL and
     // silently downgrade webhook deliveries to unsigned.

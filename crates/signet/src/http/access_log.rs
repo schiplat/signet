@@ -4,8 +4,8 @@ use axum::response::Response;
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use crate::http_util::client_ip;
-use crate::request_id::RequestId;
+use crate::http::extract::client_ip;
+use crate::http::request_id::RequestId;
 
 /// Single-line access log: one INFO line per request with method, path, query,
 /// client IP, status and latency. The correlation id is carried as a plain

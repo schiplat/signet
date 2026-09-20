@@ -1,6 +1,6 @@
 use crate::config::Config;
-use crate::encryption::Encryptor;
-use crate::keys::JwtKeys;
+use crate::crypto::encryption::Encryptor;
+use crate::crypto::keys::JwtKeys;
 use crate::passkey::ChallengeStore;
 use crate::ratelimit::RateLimiter;
 use sqlx::PgPool;

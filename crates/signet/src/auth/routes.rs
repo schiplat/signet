@@ -5,7 +5,7 @@ use crate::auth::session::{
 };
 use crate::directory;
 use crate::error::{AppError, AppResult};
-use crate::http_util::client_ip;
+use crate::http::extract::client_ip;
 use crate::mfa::{begin_login_mfa_flow, force_password_change};
 use crate::models::{PublicUser, User, USER_COLS};
 use crate::password::{set_user_password, verify_password};
@@ -128,7 +128,7 @@ async fn login(
                 &state,
                 &user,
                 ip.clone(),
-                crate::http_util::user_agent(&headers),
+                crate::http::extract::user_agent(&headers),
                 client_id.clone(),
                 &source_code,
                 &detail,
@@ -151,7 +151,7 @@ async fn login(
             &state,
             &user,
             ip.clone(),
-            crate::http_util::user_agent(&headers),
+            crate::http::extract::user_agent(&headers),
             client_id.clone(),
         )
         .await?;
@@ -194,7 +194,7 @@ async fn login(
         jar,
         user,
         ip,
-        crate::http_util::user_agent(&headers),
+        crate::http::extract::user_agent(&headers),
         client_id,
     )
     .await
@@ -519,7 +519,7 @@ async fn revoke_my_consent(
             resource_id: Some(client_id),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -587,7 +587,7 @@ async fn update_me(
             resource_id: Some(updated.id.to_string()),
             detail: json!({ "display_name": display_name }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -629,7 +629,7 @@ async fn change_password(
             resource_id: Some(user.id.to_string()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )

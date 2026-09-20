@@ -13,7 +13,7 @@ use crate::audit::{record, AuditEvent};
 use crate::auth::session::{create_session, session_cookie};
 use crate::bootstrap::admin_exists;
 use crate::error::{AppError, AppResult};
-use crate::http_util::{client_ip, user_agent};
+use crate::http::extract::{client_ip, user_agent};
 use crate::models::{PublicUser, User, USER_COLS};
 use crate::password::{hash_password, record_password_history, validate_password_strength};
 use crate::state::AppState;

@@ -48,7 +48,7 @@ pub async fn record(state: &AppState, event: AuditEvent) {
         None => (None, None, None),
     };
     let (browser, os) = match event.user_agent.as_deref() {
-        Some(ua) => crate::ua::parse(ua),
+        Some(ua) => crate::http::user_agent::parse(ua),
         None => (None, None),
     };
     // Derive client attribution from the resource for client-targeted events

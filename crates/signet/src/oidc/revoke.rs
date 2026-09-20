@@ -1,4 +1,4 @@
-use crate::crypto_util::sha256_hex;
+use crate::crypto::util::sha256_hex;
 use crate::error::AppResult;
 use crate::oidc::token::{load_client, resolve_client_credentials_parts};
 use crate::password::verify_password;

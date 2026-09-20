@@ -16,7 +16,7 @@
 //! MFA note: federation proves the upstream identity only. Users with TOTP
 //! enforced still satisfy the local MFA challenge via the standard flow later.
 
-use crate::crypto_util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -253,8 +253,8 @@ async fn callback(
     Path(provider_code): Path<String>,
     Query(q): Query<CallbackQuery>,
 ) -> Result<Response, AppError> {
-    let ip = crate::http_util::client_ip(&headers, Some(addr));
-    let user_agent = crate::http_util::user_agent(&headers);
+    let ip = crate::http::extract::client_ip(&headers, Some(addr));
+    let user_agent = crate::http::extract::user_agent(&headers);
 
     // 1. Upstream error short-circuit (user denied access, etc.).
     if let Some(err) = q.error {

@@ -1,7 +1,7 @@
-use crate::client_ip::check_client_source_ip;
-use crate::crypto_util::{random_token, sha256_b64url, sha256_hex};
+use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
-use crate::http_util::client_ip;
+use crate::http::extract::client_ip;
+use crate::http::source_ip::check_client_source_ip;
 use crate::models::{ClientApp, User, USER_COLS};
 use crate::password::verify_password;
 use crate::state::AppState;

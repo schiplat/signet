@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::http_util::parse_ip;
+use crate::http::extract::parse_ip;
 use ipnet::IpNet;
 use std::net::IpAddr;
 use std::str::FromStr;

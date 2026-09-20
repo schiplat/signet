@@ -1,5 +1,5 @@
 use crate::audit::AuditEvent;
-use crate::crypto_util::{hmac_sha256_b64, hmac_sha256_hex};
+use crate::crypto::util::{hmac_sha256_b64, hmac_sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::roles::require_admin_role;
 use crate::state::AppState;
@@ -111,7 +111,7 @@ async fn create_webhook(
             resource_id: Some(row.id.to_string()),
             detail: json!({ "url": row.url, "kind": row.kind }),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
@@ -142,7 +142,7 @@ async fn delete_webhook(
             resource_id: Some(id.to_string()),
             detail: json!({}),
             ip: None,
-            user_agent: crate::http_util::user_agent(&headers),
+            user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
