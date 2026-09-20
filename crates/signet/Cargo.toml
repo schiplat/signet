@@ -46,4 +46,5 @@ urlencoding.workspace = true
 webauthn-rs = "0.5"
 totp-rs.workspace = true
 data-encoding.workspace = true
+hmac.workspace = true
 ipnet.workspace = true

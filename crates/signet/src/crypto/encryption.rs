@@ -8,7 +8,6 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rand::RngCore;
-use std::fs;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -51,19 +50,11 @@ impl Encryptor {
 /// Loads a 32-byte key from `path` (hex-encoded), generating and persisting a
 /// fresh one on first use — mirroring the JWT key bootstrap behavior.
 pub fn load_or_generate_key(path: &Path) -> Result<[u8; 32]> {
-    let hex = if path.exists() {
-        fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
-    } else {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
+    let hex = crate::crypto::util::read_or_generate_file(path, "encryption key", || {
         let mut key = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut key);
-        let hex = data_encoding::HEXLOWER.encode(&key);
-        fs::write(path, &hex).with_context(|| format!("write {}", path.display()))?;
-        tracing::info!(path = %path.display(), "generated encryption key");
-        hex
-    };
+        Ok(data_encoding::HEXLOWER.encode(&key))
+    })?;
 
     let bytes = data_encoding::HEXLOWER
         .decode(hex.trim().as_bytes())

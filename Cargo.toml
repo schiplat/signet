@@ -44,4 +44,5 @@ url = "2"
 urlencoding = "2"
 totp-rs = { version = "5.7", features = ["otpauth", "gen_secret"] }
 data-encoding = "2"
+hmac = "0.12"
 ipnet = "2"

@@ -7,7 +7,6 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use serde::Serialize;
-use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,23 +35,14 @@ pub struct Jwk {
 
 impl JwtKeys {
     pub fn load_or_generate(path: &Path) -> Result<Self> {
-        let pem = if path.exists() {
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?
-        } else {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("create {}", parent.display()))?;
-            }
+        let pem = crate::crypto::util::read_or_generate_file(path, "JWT signing key", || {
             let mut rng = rand::thread_rng();
             let private = RsaPrivateKey::new(&mut rng, 2048).context("generate RSA key")?;
-            let pem = private
+            Ok(private
                 .to_pkcs1_pem(LineEnding::LF)
                 .context("encode PEM")?
-                .to_string();
-            fs::write(path, &pem).with_context(|| format!("write {}", path.display()))?;
-            tracing::info!(path = %path.display(), "generated JWT signing key");
-            pem
-        };
+                .to_string())
+        })?;
 
         let private = RsaPrivateKey::from_pkcs1_pem(&pem)
             .or_else(|_| RsaPrivateKey::from_pkcs8_pem(&pem))
