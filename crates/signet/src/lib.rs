@@ -28,6 +28,15 @@ use axum::routing::get;
 use axum::Router;
 use std::sync::Arc;
 
+/// The prefix every JSON API route is nested under.
+///
+/// This is a constant rather than a literal because the SSO callback URL is
+/// composed as an *absolute* path: it is sent upstream as the OAuth
+/// `redirect_uri` and also shown to admins to register with the provider, so
+/// it cannot be derived from the router at runtime. Changing the nest below
+/// without changing this would break sign-in with a redirect-URI mismatch.
+pub const API_PREFIX: &str = "/api/v1";
+
 pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     let state = build_state(cfg).await?;
 
@@ -51,7 +60,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     let api = Router::new()
         .route("/health", get(metrics::health))
         .route("/metrics", get(metrics::metrics))
-        .nest("/api/v1", api_v1)
+        .nest(API_PREFIX, api_v1)
         .merge(scim::router())
         .merge(oidc::router())
         .fallback(http::static_files::spa_fallback)

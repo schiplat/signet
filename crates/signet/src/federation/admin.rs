@@ -140,25 +140,6 @@ struct AdminProvider {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Public base URL for provider redirect URIs: SIGNET_PUBLIC_BASE_URL when
-/// set, falling back to the issuer (single-host deployments).
-pub(crate) fn public_base(state: &AppState) -> String {
-    state
-        .config
-        .public_base_url
-        .clone()
-        .unwrap_or_else(|| state.config.issuer.clone())
-        .trim_end_matches('/')
-        .to_string()
-}
-
-/// The one redirect-URI pattern shared by every provider type. Platform
-/// quirks (WeChat encoding, Feishu app tokens, OIDC discovery) are absorbed
-/// by the adapters, never by the URL shape.
-fn provider_callback_url(state: &AppState, code: &str) -> String {
-    format!("{}/api/v1/auth/sso/{}/callback", public_base(state), code)
-}
-
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
     let user = current_user(state, headers).await?;
     require_admin_role(&user)?;
@@ -183,7 +164,7 @@ async fn admin_list(
     .fetch_all(&state.pool)
     .await?;
     for p in &mut providers {
-        p.callback_url = provider_callback_url(&state, &p.code);
+        p.callback_url = super::callback_url(&state, &p.code);
     }
     Ok(Json(json!({ "providers": providers })))
 }
@@ -604,6 +585,6 @@ async fn callback_url(
     require_admin(&state, &headers).await?;
     Ok(Json(json!({
         // Same shape for every provider; {provider} is the configured code.
-        "callback_url": provider_callback_url(&state, "{provider}"),
+        "callback_url": super::callback_url(&state, "{provider}"),
     })))
 }

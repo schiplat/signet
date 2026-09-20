@@ -191,11 +191,6 @@ fn sso_cookie(
     cookie
 }
 
-/// Base URL for provider redirect URIs (shared helper in admin.rs).
-fn base_url(state: &AppState) -> String {
-    super::admin::public_base(state)
-}
-
 async fn start(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -226,7 +221,7 @@ async fn start(
     .await
     .map_err(AppError::from)?;
 
-    let redirect_uri = redirect_uri(&state, &provider_code);
+    let redirect_uri = super::callback_url(&state, &provider_code);
     let url = loaded
         .adapter
         .authorize_url(&loaded.cfg, &redirect_uri, &state_value, &nonce)
@@ -335,7 +330,7 @@ async fn callback(
 
     // 3. Drive the provider adapter.
     let loaded = load_provider(&state, &provider_code).await?;
-    let redirect_uri = redirect_uri(&state, &provider_code);
+    let redirect_uri = super::callback_url(&state, &provider_code);
     let tokens = loaded
         .adapter
         .exchange(&loaded.cfg, &redirect_uri, code)
@@ -500,13 +495,6 @@ async fn callback(
     };
 
     finish_sign_in(state, jar, user_id, provider_code, profile, ip, user_agent).await
-}
-
-fn redirect_uri(state: &AppState, provider_code: &str) -> String {
-    format!(
-        "{}/api/v1/auth/sso/{provider_code}/callback",
-        base_url(state),
-    )
 }
 
 /// Audits a failed SSO attempt and redirects the browser to the login page
