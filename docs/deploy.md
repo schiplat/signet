@@ -80,11 +80,42 @@ tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
 
 ---
 
-## 4. 和日常开发的关系
+## 4. 容器内执行目录同步 CLI
+
+`signet sync …` 复用与 server 相同的 `build_state`，因此它**不是**一个轻量客户端：启动时会连库、跑迁移、加载（必要时**生成**）`jwt_private.pem` 与 `encryption.key`、重加密 webhook secret，并修剪审计日志。
+
+```bash
+# 在目标容器内执行，工作目录与 server 一致，env / 密钥卷完全相同
+docker compose -f deploy/docker-compose.yml exec signet \
+  signet sync sources
+
+docker compose -f deploy/docker-compose.yml exec signet \
+  signet sync run --source corp-ldap --dry-run
+```
+
+要点：
+
+- **必须在 server 容器内执行**（或至少保证 `SIGNET_DATABASE_URL` 与 `SIGNET_ENCRYPTION_KEY_PATH` 指向同一份）。在别处用不同密钥路径执行，会在当前目录生成一份**新**密钥文件，然后因解不开已有密文而失败——即使侥幸通过，也会留下与 server 不一致的密钥产物。
+- 容器内 cwd 固定为 `/app`、env 由 compose 的 `env_file` 注入（镜像里没有 `.env`），密钥卷挂在 `/app/data`，三点都与 server 一致——所以用 `exec` 即可，不要自己拼环境变量。
+- 在宿主机直接跑二进制时，`dotenvy` 会读**当前工作目录**的 `.env`；务必先 `cd` 到放 env 的目录，否则会静默退回内置默认值（例如默认 DB、默认 `./data/` 密钥路径）。
+- 日志走 stdout，管道消费需 `RUST_LOG=off`：
+
+```bash
+docker compose -f deploy/docker-compose.yml exec -T signet \
+  env RUST_LOG=off signet sync sources --json | jq -r '.[].code'
+```
+
+- 与调度器/手动触发并发时由迁移 `025` 的单运行唯一索引兜底，后来者报 `another sync run for this source is already in progress`。
+- 完整命令、输出、退出码与 `--dry-run` 语义见 [directory-sync.md §9](./directory-sync.md#9-命令行)。
+
+---
+
+## 5. 和日常开发的关系
 
 | 场景 | 推荐方式 |
 |------|----------|
 | 改 Rust / Dashboard 代码 | `cargo run -p signet` + `dashboard/` 下 `pnpm dev` |
 | 需要容器化 Postgres | `build/docker-compose.yml` 的 `db` profile |
 | 验证完整镜像 | `build/docker-compose.yml` 的 `signet` 服务 `--build` |
+| 跑目录同步 CLI | 本机 `cargo run -p signet -- sync …`；线上见 [§4](#4-容器内执行目录同步-cli) |
 | 上线 / gz4 等环境 | `deploy/` + 镜像 tag + 渲染后的 `.env` |

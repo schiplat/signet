@@ -30,6 +30,7 @@ Unified identity authentication (SSO / OIDC IdP) service.
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API** (unified `/api/v1/...`, incl. SSO federation) |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / recovery codes / global & per-user enforcement |
 | [docs/dashboard.md](./docs/dashboard.md) | Dashboard pages & permissions |
+| [docs/directory-sync.md](./docs/directory-sync.md) | **Directory sync** (LDAP / HTTP JSON pull, bind-through login, scheduler, `signet sync` CLI) |
 | [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
 
 ## Local development
@@ -138,5 +139,5 @@ migrations/             Postgres migrations (… audit client_id, identity feder
 build/                  Dockerfiles + local compose (image build, optional Postgres)
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 Production compose + env template (OSS config bundle)
-docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · directory-sync
 ```

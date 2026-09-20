@@ -30,6 +30,8 @@
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API**（统一 `/api/v1/...`，含第三方登录） |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / 恢复码 / 全局与用户强制策略 |
 | [docs/dashboard.md](./docs/dashboard.md) | 管理台页面与权限说明 |
+| [docs/directory-sync.md](./docs/directory-sync.md) | **目录同步**（LDAP / HTTP JSON 拉取、bind 直通、定时调度、`signet sync` CLI） |
+| [docs/directory-mapping-ux.md](./docs/directory-mapping-ux.md) | 目录同步字段映射交互设计（含实现记录） |
 | [docs/deploy.md](./docs/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
 
 ## 本地开发
@@ -136,5 +138,5 @@ migrations/             Postgres 迁移（… audit client_id、身份联邦 …
 build/                  Dockerfile + 本地 compose（镜像构建、可选 Postgres）
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 生产 compose + env 模板（OSS 配置包）
-docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · directory-sync
 ```

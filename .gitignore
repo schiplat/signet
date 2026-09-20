@@ -1,7 +1,10 @@
 /target
 /data
+/dashboard/data
+/crates/signet/data
 .env
 *.pem
+*.key
 .pnpm-store/
 dashboard/node_modules
 dashboard/dist
