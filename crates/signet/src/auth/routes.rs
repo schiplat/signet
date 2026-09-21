@@ -2,7 +2,8 @@ use crate::audit::{record, AuditEvent};
 use crate::auth::password::{set_user_password, verify_password};
 use crate::auth::session::{
     clear_session_cookie, cookie_value, current_user, destroy_session, list_sessions,
-    revoke_all_sessions, revoke_session_by_id, session_id_for_token, SESSION_COOKIE,
+    revoke_all_sessions, revoke_other_sessions, revoke_session_by_id, session_id_for_token,
+    SESSION_COOKIE,
 };
 use crate::directory;
 use crate::error::{AppError, AppResult};
@@ -31,7 +32,7 @@ pub fn router() -> Router<AppState> {
         .route("/me/password", post(change_password))
         .route(
             "/me/sessions",
-            get(list_my_sessions).post(revoke_other_sessions),
+            get(list_my_sessions).post(revoke_my_other_sessions),
         )
         .route("/me/sessions/{id}", delete(revoke_my_session))
         .route("/me/consents", get(list_my_consents))
@@ -314,7 +315,7 @@ async fn revoke_my_session(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn revoke_other_sessions(
+async fn revoke_my_other_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<Value>> {
@@ -322,11 +323,7 @@ async fn revoke_other_sessions(
     match cookie_value(&headers, SESSION_COOKIE) {
         Some(t) => {
             if let Some(current_id) = session_id_for_token(&state.pool, &t).await? {
-                sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
-                    .bind(user.id)
-                    .bind(current_id)
-                    .execute(&state.pool)
-                    .await?;
+                revoke_other_sessions(&state.pool, user.id, current_id).await?;
             }
         }
         None => {

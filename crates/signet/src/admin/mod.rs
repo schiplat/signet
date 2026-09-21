@@ -1060,10 +1060,7 @@ async fn update_user(
     })?;
 
     if status == "disabled" {
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
+        revoke_all_sessions(&state.pool, id).await?;
     }
 
     record(
@@ -1281,10 +1278,7 @@ async fn set_status(
     .ok_or_else(|| AppError::NotFound("user not found".into()))?;
 
     if status == "disabled" {
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
+        revoke_all_sessions(&state.pool, id).await?;
     }
     Ok(user)
 }

@@ -1,4 +1,5 @@
 use crate::auth::password::{hash_password, record_password_history};
+use crate::auth::session::revoke_all_sessions;
 use crate::error::{AppError, AppResult};
 use crate::models::normalize_username;
 use crate::state::AppState;
@@ -625,10 +626,7 @@ async fn delete_user(
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
 
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(existing.id)
-        .execute(&state.pool)
-        .await?;
+    revoke_all_sessions(&state.pool, existing.id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(existing.id)
         .execute(&state.pool)

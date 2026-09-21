@@ -93,6 +93,21 @@ pub async fn revoke_all_sessions(pool: &PgPool, user_id: Uuid) -> AppResult<u64>
     Ok(res.rows_affected())
 }
 
+/// Revokes every session of `user_id` except `keep`.
+///
+/// For "sign out everywhere else": the caller has already proved it holds
+/// `keep`, and deleting that one too would sign the user out of the session
+/// they are using to make the request. The exclusion is the entire point, so it
+/// is a required argument rather than an option — there is no correct default.
+pub async fn revoke_other_sessions(pool: &PgPool, user_id: Uuid, keep: Uuid) -> AppResult<u64> {
+    let res = sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND id <> $2")
+        .bind(user_id)
+        .bind(keep)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 pub async fn destroy_session(pool: &PgPool, token: &str) -> AppResult<()> {
     let token_hash = sha256_hex(token);
     sqlx::query("DELETE FROM sessions WHERE token_hash = $1")

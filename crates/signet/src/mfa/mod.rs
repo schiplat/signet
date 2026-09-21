@@ -2,7 +2,9 @@ mod totp_util;
 
 use crate::audit::{record, AuditEvent};
 use crate::auth::password::set_user_password;
-use crate::auth::session::{cookie_value, create_session, current_user, session_cookie};
+use crate::auth::session::{
+    cookie_value, create_session, current_user, revoke_all_sessions, session_cookie,
+};
 use crate::error::{AppError, AppResult};
 use crate::models::{user_by_id, PublicUser, User};
 use crate::roles::require_admin_role;
@@ -1059,10 +1061,7 @@ async fn admin_reset_mfa(
     let target = user_by_id(&state.pool, id).await?;
     clear_user_mfa(&state.pool, id).await?;
     // Also kill sessions so they re-auth under policy
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+    revoke_all_sessions(&state.pool, id).await?;
     record(
         &state,
         AuditEvent {

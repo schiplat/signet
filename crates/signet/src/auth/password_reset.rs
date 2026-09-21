@@ -1,4 +1,5 @@
 use crate::auth::password::set_user_password;
+use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -144,10 +145,7 @@ async fn confirm_reset(
         .bind(row.0)
         .execute(&state.pool)
         .await?;
-    sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&state.pool)
-        .await?;
+    revoke_all_sessions(&state.pool, user_id).await?;
 
     Ok(Json(json!({ "ok": true })))
 }
