@@ -802,7 +802,8 @@ async fn group_members(state: &AppState, name: &str) -> AppResult<Vec<Value>> {
 async fn list_groups(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
     authorize(&state, &headers).await?;
     let rows = sqlx::query_as::<_, ScimGroupRow>(
-        "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups ORDER BY display_name",
+        "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups \
+         WHERE deleted_at IS NULL ORDER BY display_name",
     )
     .fetch_all(&state.pool)
     .await?;
@@ -856,7 +857,11 @@ async fn create_group(
     .fetch_one(&state.pool)
     .await
     .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.constraint() == Some("scim_groups_display_name_key") => {
+        // The name's uniqueness is now a partial index over the live rows
+        // (migration `028`), so the violation reports the index name.
+        sqlx::Error::Database(db)
+            if db.constraint() == Some("scim_groups_live_display_name_key") =>
+        {
             AppError::bad_request("group already exists")
         }
         other => AppError::from(other),
@@ -879,7 +884,8 @@ async fn get_group(
 async fn find_group(state: &AppState, id: &str) -> AppResult<ScimGroupRow> {
     if let Ok(uuid) = Uuid::parse_str(id) {
         if let Some(r) = sqlx::query_as::<_, ScimGroupRow>(
-            "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups WHERE id = $1",
+            "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups \
+             WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(uuid)
         .fetch_optional(&state.pool)
@@ -889,7 +895,8 @@ async fn find_group(state: &AppState, id: &str) -> AppResult<ScimGroupRow> {
         }
     }
     sqlx::query_as::<_, ScimGroupRow>(
-        "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups WHERE display_name = $1 OR external_id = $1",
+        "SELECT id, display_name, external_id, created_at, updated_at FROM scim_groups \
+         WHERE deleted_at IS NULL AND (display_name = $1 OR external_id = $1)",
     )
     .bind(id)
     .fetch_optional(&state.pool)
@@ -1100,12 +1107,48 @@ async fn delete_group(
     authorize(&state, &headers).await?;
     let group = find_group(&state, &id).await?;
 
+    // Snapshot the membership before releasing it. `users.groups` is what the
+    // `groups` claim is built from, so a deleted group must stop granting — but
+    // the membership has to survive somewhere or a mistaken delete is
+    // unrecoverable, which is the whole point of D3.
+    let members: Vec<Uuid> =
+        sqlx::query_scalar("SELECT id FROM users WHERE $1 = ANY(groups) ORDER BY email")
+            .bind(&group.display_name)
+            .fetch_all(&state.pool)
+            .await?;
+
     clear_group(&state, &group.display_name).await?;
 
-    sqlx::query("DELETE FROM scim_groups WHERE id = $1")
-        .bind(group.id)
-        .execute(&state.pool)
-        .await?;
+    // Marked, not removed. The row is the record that the group existed and who
+    // was in it; the partial unique index on the live rows means a re-created
+    // group of the same name does not collide with this mark.
+    sqlx::query(
+        "UPDATE scim_groups SET deleted_at = NOW(), members_at_delete = $2, updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(group.id)
+    .bind(&members)
+    .execute(&state.pool)
+    .await?;
+
+    crate::audit::record(
+        &state,
+        crate::audit::AuditEvent {
+            actor: None,
+            action: "scim.group.delete",
+            resource_type: "group",
+            resource_id: Some(group.id.to_string()),
+            detail: json!({
+                "display_name": group.display_name,
+                "outcome": "marked_deleted",
+                "released_members": members.len(),
+            }),
+            ip: None,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
 
     // 204 for the same reason as `delete_user`: RFC 7644 §3.6, and a `200` with
     // an Error schema is a contradiction rather than an answer.
