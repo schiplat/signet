@@ -957,15 +957,19 @@ async fn update_user(
         target.role.clone()
     };
 
-    let status_requested = body.status.is_some();
-    let status = if let Some(s) = body.status {
-        match s.as_str() {
-            "active" | "disabled" => s,
-            _ => return Err(AppError::bad_request("invalid status")),
-        }
-    } else {
-        target.status.clone()
+    // One parse feeds both columns, so the `status`/`local_disabled` pairing
+    // cannot drift: an explicit `status` in the body also states the local
+    // intent, and an absent one leaves both as the target already has them.
+    let requested_access = match body.status.as_deref() {
+        None => None,
+        Some("active") => Some(UserAccess::Enabled),
+        Some("disabled") => Some(UserAccess::Disabled),
+        Some(_) => return Err(AppError::bad_request("invalid status")),
     };
+    let status = requested_access
+        .map(|a| a.status().to_string())
+        .unwrap_or_else(|| target.status.clone());
+    let local_disabled = requested_access.map_or(target.local_disabled, UserAccess::local_disabled);
 
     if status == "disabled" && actor.id == id {
         return Err(AppError::bad_request("cannot disable yourself"));
@@ -989,13 +993,7 @@ async fn update_user(
         }
     }
 
-    // An explicit local status change also records the disable *intent*, so the
-    // next directory sync cannot silently re-enable the account (migration 024).
-    let local_disabled = if status_requested {
-        status == "disabled"
-    } else {
-        target.local_disabled
-    };
+    // `local_disabled` was derived above from the same parse as `status`.
 
     // If a new password is provided, validate strength + history before persisting.
     if let Some(pw) = body.password.as_deref() {
@@ -1130,7 +1128,7 @@ async fn disable_user(
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
-    let user = set_status(&state, id, "disabled", true).await?;
+    let user = set_user_access(&state, id, UserAccess::Disabled).await?;
     record(
         &state,
         AuditEvent {
@@ -1158,7 +1156,7 @@ async fn enable_user(
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
-    let user = set_status(&state, id, "active", false).await?;
+    let user = set_user_access(&state, id, UserAccess::Enabled).await?;
     record(
         &state,
         AuditEvent {
@@ -1202,7 +1200,7 @@ async fn batch_disable_users(
         if !actor.can_mutate_user(&target) {
             continue;
         }
-        match set_status(&state, *id, "disabled", true).await {
+        match set_user_access(&state, *id, UserAccess::Disabled).await {
             Ok(_) => disabled += 1,
             Err(AppError::NotFound(_)) => {}
             Err(e) => return Err(e),
@@ -1240,17 +1238,52 @@ async fn revoke_user_sessions(
     Ok(Json(json!({ "revoked": revoked })))
 }
 
-/// Applies a local status change together with the local disable intent.
+/// The two states an admin can put an account in.
 ///
-/// `local_disabled` must be set by every local disable and cleared only by an
-/// explicit enable, otherwise the next directory sync would treat the account as
-/// simply "upstream active" and silently re-enable it (migration 024).
-async fn set_status(
-    state: &AppState,
-    id: Uuid,
-    status: &str,
-    local_disabled: bool,
-) -> AppResult<User> {
+/// A single value rather than a `status` string plus a `local_disabled` bool,
+/// because those two are not independent: an explicit local change must record
+/// the disable intent, or the next directory sync sees the account as simply
+/// "upstream active" and silently re-enables it (migration 024). As two
+/// arguments, nothing stopped a caller passing the combination that breaks
+/// that, and `update_user` re-derived the pairing by hand.
+///
+/// Deliberately not used by SCIM: deactivating a user upstream is not a local
+/// admin's disable intent, so SCIM must not set `local_disabled`. Keeping this
+/// in the admin module rather than a general entity layer is what stops it
+/// being picked up for that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserAccess {
+    Enabled,
+    Disabled,
+}
+
+impl UserAccess {
+    /// The `users.status` value for this state.
+    pub fn status(self) -> &'static str {
+        match self {
+            Self::Enabled => "active",
+            Self::Disabled => "disabled",
+        }
+    }
+
+    /// The `users.local_disabled` value: the local intent that must survive the
+    /// next sync. Always the same side of the pairing as [`Self::status`].
+    pub fn local_disabled(self) -> bool {
+        matches!(self, Self::Disabled)
+    }
+}
+
+/// Puts an account into a local access state and revokes its sessions if that
+/// state is disabled.
+///
+/// One operation instead of a status write plus a paired flag, so the
+/// `status`/`local_disabled` combination cannot be got wrong, and so disabling
+/// cannot leave live sessions behind: a disabled account is already refused by
+/// `user_from_session_token`'s status filter, but the rows should not linger.
+///
+/// `Exposed for tests` — `crates/signet/tests/user_access.rs` pins the pairing
+/// and the revocation, which no HTTP-level test would reach.
+pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> AppResult<User> {
     let user = sqlx::query_as::<_, User>(&format!(
         r#"
         UPDATE users SET status = $2, local_disabled = $3, updated_at = NOW()
@@ -1259,13 +1292,13 @@ async fn set_status(
         "#
     ))
     .bind(id)
-    .bind(status)
-    .bind(local_disabled)
+    .bind(access.status())
+    .bind(access.local_disabled())
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| AppError::NotFound("user not found".into()))?;
+    .ok_or_else(|| AppError::not_found("user not found"))?;
 
-    if status == "disabled" {
+    if access == UserAccess::Disabled {
         revoke_all_sessions(&state.pool, id).await?;
     }
     Ok(user)
