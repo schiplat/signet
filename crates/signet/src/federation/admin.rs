@@ -1,14 +1,18 @@
-//! Admin + user APIs for federated identity management.
+//! Admin APIs for federated identity management.
 //!
-//! Admin surface (`/api/v1/admin/sso/providers*`): CRUD for upstream
-//! providers with the client secret write-only (rotate-only, never
-//! serialized back), enable/disable, and the computed callback URL each
-//! provider must be registered with.
+//! Every route here requires an admin, and the module is the only place
+//! federation's admin surface lives — the visitor-facing and self-service
+//! `/api/v1/auth/sso/*` paths are in [`super::routes`], so "what can be
+//! reached without a token?" is answered by reading one file rather than by
+//! scanning this one for the exceptions.
 //!
-//! User surface (`/api/v1/auth/sso/identities*`): list the signed-in user's
-//! linked third-party accounts and unlink them. Unlinking is refused when it
-//! would remove the user's last usable login method (no password set and
-//! this is the last identity), preventing lockout.
+//! `/api/v1/admin/sso/providers*` is CRUD for upstream providers, with the
+//! client secret write-only (rotate-only, never serialized back), plus
+//! enable/disable and the computed callback URL each provider must be
+//! registered with.
+//!
+//! `/auth/sso/callback-url` sits under the `/auth/` prefix but is read with
+//! admin rights: it is the value an admin pastes into the provider's console.
 
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
@@ -39,13 +43,8 @@ pub fn router() -> Router<AppState> {
             "/admin/settings/sso",
             get(get_sso_settings).patch(patch_sso_settings),
         )
-        // Public: the login page needs the enabled-provider list pre-auth.
-        .route("/auth/sso/providers", get(public_enabled_providers))
-        .route("/auth/sso/identities", get(list_my_identities))
-        .route(
-            "/auth/sso/identities/{provider_code}",
-            axum::routing::delete(unlink_identity),
-        )
+        // Admin-only despite the `/auth/` prefix: it is the value an admin
+        // pastes into the provider's console, so it is read with admin rights.
         .route("/auth/sso/callback-url", get(callback_url))
 }
 
@@ -475,106 +474,6 @@ fn db_conflict(e: sqlx::Error, code: &str) -> AppError {
         }
     }
     AppError::from(e)
-}
-
-// ---------------------------------------------------------------------------
-// User surface
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, sqlx::FromRow, serde::Serialize)]
-struct UserIdentity {
-    provider_code: String,
-    provider_type: String,
-    provider_display_name: String,
-    email: Option<String>,
-    linked_at: chrono::DateTime<chrono::Utc>,
-    last_login_at: Option<chrono::DateTime<chrono::Utc>>,
-}
-
-/// Enabled providers, for the login page buttons. Public (no auth): the login
-/// page itself needs this list before the visitor is authenticated.
-async fn public_enabled_providers(
-    State(state): State<AppState>,
-) -> AppResult<Json<serde_json::Value>> {
-    let rows: Vec<(String, String, String)> = sqlx::query_as(
-        "SELECT code, provider_type, display_name FROM upstream_providers \
-         WHERE enabled = TRUE ORDER BY code",
-    )
-    .fetch_all(&state.pool)
-    .await?;
-    let providers: Vec<serde_json::Value> = rows
-        .into_iter()
-        .map(|(code, provider_type, display_name)| {
-            json!({ "code": code, "type": provider_type, "display_name": display_name })
-        })
-        .collect();
-    Ok(Json(json!({ "providers": providers })))
-}
-
-async fn list_my_identities(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> AppResult<Json<serde_json::Value>> {
-    let user = current_user(&state, &headers).await?;
-    let rows: Vec<UserIdentity> = sqlx::query_as(
-        r#"
-        SELECT ui.provider_code, p.provider_type, p.display_name AS provider_display_name,
-               ui.email, ui.linked_at, ui.last_login_at
-        FROM user_identities ui
-        JOIN upstream_providers p ON p.code = ui.provider_code
-        WHERE ui.user_id = $1
-        ORDER BY ui.linked_at
-        "#,
-    )
-    .bind(user.id)
-    .fetch_all(&state.pool)
-    .await?;
-    Ok(Json(json!({ "identities": rows })))
-}
-
-async fn unlink_identity(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(provider_code): Path<String>,
-) -> AppResult<Json<serde_json::Value>> {
-    let user = current_user(&state, &headers).await?;
-
-    // Lockout guard (pre-check): the user must keep at least one login
-    // method after the unlink — a usable password or another identity.
-    let has_password = !user.password_hash.is_empty();
-    let linked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM user_identities WHERE user_id = $1")
-        .bind(user.id)
-        .fetch_one(&state.pool)
-        .await?;
-    if !has_password && linked <= 1 {
-        return Err(AppError::bad_request("cannot unlink the last login method"));
-    }
-
-    let deleted =
-        sqlx::query("DELETE FROM user_identities WHERE user_id = $1 AND provider_code = $2")
-            .bind(user.id)
-            .bind(&provider_code)
-            .execute(&state.pool)
-            .await?;
-    if deleted.rows_affected() == 0 {
-        return Err(AppError::not_found("identity not linked"));
-    }
-
-    record(
-        &state,
-        AuditEvent {
-            resource_id: Some(user.id.to_string()),
-            actor: Some(user),
-            action: "auth.identity.unlink",
-            resource_type: "user",
-            detail: json!({ "provider": provider_code }),
-            ip: None,
-            user_agent: None,
-            client_id: None,
-        },
-    )
-    .await;
-    Ok(Json(json!({ "ok": true })))
 }
 
 /// The callback URL pattern admins must register with each provider.
