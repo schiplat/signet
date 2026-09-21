@@ -120,46 +120,6 @@ pub async fn enabled_managing_source(pool: &PgPool, user_id: Uuid) -> AppResult<
     Ok(code)
 }
 
-/// Releases sync disable claims that no live source is backing any more.
-///
-/// A `directory_disabled` claim is only meaningful while a live source backs it.
-/// A source that is switched off lists nothing and verifies nothing, the same
-/// reason [`enabled_managing_source`] ignores it — and this is the rule the
-/// existing "a disabled source releases the account" behaviour already follows.
-///
-/// Skipping this is a lockout, not a stale flag: an admin enable cannot override
-/// an upstream claim (migration `026`), so the account would be disabled with no
-/// authority left to release it and no way back.
-///
-/// The condition is "no *enabled* source links this user" and deliberately not
-/// "this source links this user": links can disappear without the flag being
-/// released — `DELETE /directory/sources/{code}` tells the operator to remove
-/// them, and a hand edit can do it too — and a claim whose links are gone has no
-/// owner left to release it. Sweeping by liveness instead of by source is what
-/// makes that self-healing. A user another enabled source still links keeps the
-/// claim: it is that source's business now, whether it currently lists them or
-/// not. Call this after the source is disabled, so it no longer counts as live.
-pub async fn release_orphaned_claims(pool: &PgPool) -> AppResult<u64> {
-    let res = sqlx::query(
-        r#"
-        UPDATE users u
-        SET directory_disabled = FALSE,
-            status = CASE WHEN u.local_disabled OR u.scim_disabled
-                          THEN 'disabled' ELSE 'active' END,
-            updated_at = NOW()
-        WHERE u.directory_disabled
-          AND NOT EXISTS (
-              SELECT 1 FROM directory_entries e
-              JOIN directory_sources s ON s.id = e.source_id
-              WHERE e.user_id = u.id AND s.enabled
-          )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    Ok(res.rows_affected())
-}
-
 /// True when audit events for `action` must not fan out to webhooks.
 ///
 /// `audit::record` dispatches every event to every enabled webhook with no

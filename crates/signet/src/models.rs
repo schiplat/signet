@@ -1,5 +1,7 @@
+use crate::error::AppResult;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
@@ -123,6 +125,89 @@ pub async fn active_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> crate::error::A
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| crate::error::AppError::unauthorized("user inactive"))
+}
+
+/// Releases disable claims that no live authority is backing any more.
+///
+/// A claim is only meaningful while its author is still in charge, and each
+/// authority answers a different liveness question:
+///
+/// * `directory_disabled` — an **enabled** source links this user. A source that
+///   is switched off lists nothing and verifies nothing, the same reason
+///   [`enabled_managing_source`] ignores it.
+/// * `scim_disabled` — a SCIM client is **configured**. `DELETE
+///   /admin/scim/token` retires the IdP's authority; rotating it through `POST`
+///   keeps a token and so keeps the claim (the IdP is still pushing).
+///
+/// Both are reconciled in one place because the failure they prevent is the
+/// same: an admin enable cannot override an upstream claim (migration `026`), so
+/// a claim with no live authority behind it is a lockout with no way back.
+///
+/// Call after any act that retires an authority — disabling or deleting a
+/// source, revoking the SCIM token. Skipping it leaves accounts disabled with
+/// nobody left who may release them.
+///
+/// The directory condition is "no *enabled* source links this user" and
+/// deliberately not "this source links this user": links can disappear without
+/// the flag being released — `DELETE /directory/sources/{code}` tells the
+/// operator to remove them, and a hand edit can do it too — and a claim whose
+/// links are gone has no owner left to release it. Sweeping by liveness instead
+/// of by owner is what makes that self-healing. A user another enabled source
+/// still links keeps the claim: it is that source's business now, whether it
+/// currently lists them or not.
+///
+/// Returns how many claims were released.
+pub async fn release_dead_authority_claims(pool: &PgPool) -> AppResult<u64> {
+    let scim_revoked = sqlx::query_scalar::<_, bool>(
+        "SELECT COALESCE((SELECT token_hash IS NULL FROM scim_config WHERE id = TRUE), TRUE)",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let mut tx = pool.begin().await?;
+
+    let directory = sqlx::query(
+        r#"
+        UPDATE users u
+        SET directory_disabled = FALSE,
+            status = CASE WHEN u.local_disabled OR u.scim_disabled
+                          THEN 'disabled' ELSE 'active' END,
+            updated_at = NOW()
+        WHERE u.directory_disabled
+          AND NOT EXISTS (
+              SELECT 1 FROM directory_entries e
+              JOIN directory_sources s ON s.id = e.source_id
+              WHERE e.user_id = u.id AND s.enabled
+          )
+        "#,
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    // Read outside the transaction on purpose so the two halves cannot deadlock
+    // against each other, and applied inside so a reader never sees a released
+    // directory claim paired with a stale SCIM one.
+    let scim = if scim_revoked {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET scim_disabled = FALSE,
+                status = CASE WHEN local_disabled OR directory_disabled
+                              THEN 'disabled' ELSE 'active' END,
+                updated_at = NOW()
+            WHERE scim_disabled
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+    } else {
+        0
+    };
+
+    tx.commit().await?;
+    Ok(directory + scim)
 }
 
 /// The columns a creation path may set on a new `users` row.

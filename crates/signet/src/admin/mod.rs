@@ -122,6 +122,16 @@ async fn scim_revoke_token(
         .execute(&state.pool)
         .await?;
 
+    // Revoking retires the IdP's authority, so the disable claims it was holding
+    // go with it. Left in place they would outlive their author: an admin enable
+    // cannot override an upstream claim, so those accounts would have no way
+    // back. Rotating the token (`POST` on the same route) keeps a token and
+    // deliberately does *not* come through here — the IdP is still pushing.
+    let released = crate::models::release_dead_authority_claims(&state.pool).await?;
+    if released > 0 {
+        tracing::info!(released, "released disable claims of a revoked authority");
+    }
+
     record(
         &state,
         AuditEvent {

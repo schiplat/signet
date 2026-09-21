@@ -281,6 +281,49 @@ where
 /// is what lets a single binary contain more than one SCIM test.
 static SCIM_TOKEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Serialises operations that reconcile the global authority claims, **across
+/// processes**.
+///
+/// `cargo test` runs each test binary in parallel, so an in-process mutex leaves
+/// two binaries swapping the one `scim_config` token at the same time, failing
+/// each other's `authorize`. A session-scoped advisory lock is process-wide, so
+/// the second binary waits its turn. Arbitrary constants; they only have to
+/// differ from each other.
+const SCIM_TOKEN_LOCK_KEY: i64 = 0x5c17_0001;
+
+/// Takes a cross-process lock for the duration of `body`.
+///
+/// Uses `pg_advisory_xact_lock` inside a transaction rather than a session-level
+/// lock: the lock is then released by the end of the transaction, including
+/// when `body` panics and the transaction is dropped mid-unwind. A session lock
+/// would need an explicit unlock after `body`, which a panic skips — and the
+/// connection would go back to the pool still holding it, blocking every later
+/// test until the suite hung.
+///
+/// The lock serialises only; `body` still does its own reads and writes through
+/// the pool as usual.
+async fn with_db_lock<Fut>(state: &AppState, key: i64, body: Fut)
+where
+    Fut: std::future::Future<Output = ()>,
+{
+    let mut tx = state
+        .pool
+        .begin()
+        .await
+        .expect("begin the lock transaction");
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut *tx)
+        .await
+        .expect("take the advisory lock");
+
+    body.await;
+
+    // Ends the transaction, and with it the lock. Whether this is reached
+    // normally or skipped by an unwind, the lock is gone.
+    tx.rollback().await.expect("release the advisory lock");
+}
+
 /// Runs `body` against the SCIM router with a bearer token the test knows.
 ///
 /// The configured token is stored only as a hash and is seeded from the
@@ -300,47 +343,53 @@ where
 {
     let _serialised = SCIM_TOKEN_LOCK.lock().await;
 
-    // The column is nullable, so the scalar type is `Option<String>` and
-    // `fetch_optional` nests: `None` means no row at all.
-    let previous: Option<Option<String>> =
-        sqlx::query_scalar("SELECT token_hash FROM scim_config WHERE id = TRUE")
-            .fetch_optional(&state.pool)
-            .await
-            .expect("read the configured SCIM token");
-
-    let token = format!("test-scim-{}", Uuid::new_v4().simple());
-    sqlx::query(
-        "INSERT INTO scim_config (id, token_hash) VALUES (TRUE, $1) \
-         ON CONFLICT (id) DO UPDATE SET token_hash = $1",
-    )
-    .bind(signet::crypto::util::sha256_hex(&token))
-    .execute(&state.pool)
-    .await
-    .expect("install a test SCIM token");
-
-    let outcome = tokio::spawn(body(state.clone(), token)).await;
-
-    match previous {
-        Some(hash) => {
-            sqlx::query("UPDATE scim_config SET token_hash = $1 WHERE id = TRUE")
-                .bind(hash)
-                .execute(&state.pool)
+    // And across processes: another test binary installing its own token while
+    // this one is running would fail this test's `authorize` calls.
+    with_db_lock(&state, SCIM_TOKEN_LOCK_KEY, async {
+        // The column is nullable, so the scalar type is `Option<String>` and
+        // `fetch_optional` nests: `None` means no row at all.
+        let previous: Option<Option<String>> =
+            sqlx::query_scalar("SELECT token_hash FROM scim_config WHERE id = TRUE")
+                .fetch_optional(&state.pool)
                 .await
-                .expect("restore the configured SCIM token");
-        }
-        // There was no row: remove the one this helper created rather than
-        // leaving SCIM configured with a token nobody holds.
-        None => {
-            sqlx::query("DELETE FROM scim_config WHERE id = TRUE")
-                .execute(&state.pool)
-                .await
-                .expect("remove the test SCIM token");
-        }
-    }
+                .expect("read the configured SCIM token");
 
-    if let Err(panic) = outcome {
-        std::panic::resume_unwind(panic.into_panic());
-    }
+        let token = format!("test-scim-{}", Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO scim_config (id, token_hash) VALUES (TRUE, $1) \
+             ON CONFLICT (id) DO UPDATE SET token_hash = $1",
+        )
+        .bind(signet::crypto::util::sha256_hex(&token))
+        .execute(&state.pool)
+        .await
+        .expect("install a test SCIM token");
+
+        let outcome = tokio::spawn(body(state.clone(), token)).await;
+
+        match previous {
+            Some(hash) => {
+                sqlx::query("UPDATE scim_config SET token_hash = $1 WHERE id = TRUE")
+                    .bind(hash)
+                    .execute(&state.pool)
+                    .await
+                    .expect("restore the configured SCIM token");
+            }
+            // There was no row: remove the one this helper created rather than
+            // leaving SCIM configured with a token nobody holds.
+            None => {
+                sqlx::query("DELETE FROM scim_config WHERE id = TRUE")
+                    .execute(&state.pool)
+                    .await
+                    .expect("remove the test SCIM token");
+            }
+        }
+
+        // Unwinds out of the lock, which the lock transaction releases.
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic.into_panic());
+        }
+    })
+    .await;
 }
 
 /// The SCIM API router, ready to drive with [`tower::ServiceExt::oneshot`].
@@ -351,6 +400,11 @@ pub fn scim_router(state: &AppState) -> axum::Router {
 /// The directory admin router, ready to drive with [`tower::ServiceExt::oneshot`].
 pub fn directory_router(state: &AppState) -> axum::Router {
     signet::directory::api::router().with_state(state.clone())
+}
+
+/// The admin router, ready to drive with [`tower::ServiceExt::oneshot`].
+pub fn admin_router(state: &AppState) -> axum::Router {
+    signet::admin::router().with_state(state.clone())
 }
 
 /// A session cookie header value for a freshly created admin.

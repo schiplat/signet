@@ -23,7 +23,12 @@ use uuid::Uuid;
 
 /// The liveness sweep is one global statement over `users`, so any test that
 /// triggers it can release a claim another test is midway through asserting on.
-/// These tests all share that global state, so they run one at a time.
+/// Every test here either triggers it or asserts on a claim it can release, so
+/// they run one at a time.
+///
+/// In-process is enough because this is the only test binary that retires an
+/// authority. The SCIM token is a different matter — two binaries install one —
+/// and `common::with_scim_token` serialises that across processes.
 static SWEEP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// `(status, local_disabled, directory_disabled, scim_disabled)` as stored.
@@ -394,5 +399,148 @@ async fn retiring_a_source_sweeps_claims_an_earlier_dead_one_left() {
             let _ = retiring;
         },
     )
+    .await;
+}
+
+/// Drives the SCIM token route, `POST` to rotate and `DELETE` to revoke.
+async fn scim_token_request(router: &axum::Router, cookie: &str, method: &str) -> StatusCode {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri("/admin/scim/token")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .expect("build the request"),
+        )
+        .await
+        .expect("the admin router must answer")
+        .status()
+}
+
+/// Retiring the SCIM authority releases the claims it was holding.
+///
+/// `DELETE /admin/scim/token` is the only way to switch SCIM off. Without this,
+/// every account the IdP had deactivated stays disabled for good: the IdP can no
+/// longer release its own claim, and an admin enable cannot override an upstream
+/// claim (migration `026`). That is a lockout, and it was reachable by the
+/// documented way of turning SCIM off.
+#[tokio::test]
+async fn revoking_the_scim_token_releases_the_claims_it_held() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let _guard = SWEEP_LOCK.lock().await;
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        sqlx::query(
+            "UPDATE users SET scim_disabled = TRUE, status = 'disabled', updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("simulate the IdP deactivating the account");
+
+        let (admin, cookie) = common::admin_cookie(&state).await;
+        let status = scim_token_request(&common::admin_router(&state), &cookie, "DELETE").await;
+        assert_eq!(status, StatusCode::OK, "the token should be revoked");
+
+        let (status, _, _, scim_disabled) = flags(&state.pool, id).await;
+        assert!(!scim_disabled, "the revoked authority's claim must go");
+        assert_eq!(status, "active", "and the account usable again");
+
+        common::delete_user(&state.pool, admin).await;
+    })
+    .await;
+}
+
+/// Rotating the SCIM token keeps the claims: the IdP is still pushing.
+///
+/// The two operations are the same route, and this is the reason they must not
+/// be treated the same. `POST` mints a replacement token, so the IdP still
+/// holds the authority — releasing its claims here would silently re-enable
+/// every account it had deactivated, on a routine credential rotation.
+#[tokio::test]
+async fn rotating_the_scim_token_keeps_the_claims() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let _guard = SWEEP_LOCK.lock().await;
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        sqlx::query(
+            "UPDATE users SET scim_disabled = TRUE, status = 'disabled', updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("simulate the IdP deactivating the account");
+
+        let (admin, cookie) = common::admin_cookie(&state).await;
+        let status = scim_token_request(&common::admin_router(&state), &cookie, "POST").await;
+        assert_eq!(status, StatusCode::OK, "the token should be rotated");
+
+        let (status, _, _, scim_disabled) = flags(&state.pool, id).await;
+        assert!(
+            scim_disabled,
+            "a rotation is not a retirement, so the claim must survive"
+        );
+        assert_eq!(status, "disabled");
+
+        common::delete_user(&state.pool, admin).await;
+    })
+    .await;
+}
+
+/// A sweep must not touch a claim whose authority is still live.
+///
+/// The liveness question for SCIM is "is a token configured", not "did a
+/// revocation just happen". Retiring a *directory* source also sweeps, and if
+/// that sweep released SCIM claims it would quietly re-enable every account the
+/// IdP had deactivated — on an operation about a completely different authority.
+#[tokio::test]
+async fn a_directory_sweep_spares_a_live_scim_claim() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let _guard = SWEEP_LOCK.lock().await;
+    let source = common::create_source(&state.pool).await;
+    let id = common::create_user(&state.pool, "").await;
+
+    // A configured token is what makes the SCIM authority live.
+    common::with_scim_token(state, move |state, _token| async move {
+        let code = source.code.clone();
+        let body = move |state: signet::state::AppState| async move {
+            sqlx::query(
+                "UPDATE users SET scim_disabled = TRUE, status = 'disabled', updated_at = NOW() \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .expect("simulate the IdP deactivating the account");
+
+            let (admin, cookie) = common::admin_cookie(&state).await;
+            let status =
+                set_source_enabled(&common::directory_router(&state), &cookie, &code, false).await;
+            assert_eq!(status, StatusCode::OK, "the sweep should have run");
+
+            let (status, _, _, scim_disabled) = flags(&state.pool, id).await;
+            assert!(
+                scim_disabled,
+                "a configured SCIM client still owns this claim"
+            );
+            assert_eq!(status, "disabled");
+
+            common::delete_user(&state.pool, admin).await;
+        };
+
+        common::run_isolated(state, vec![source], vec![id], body).await;
+    })
     .await;
 }
