@@ -122,22 +122,63 @@ CREATE INDEX directory_entries_user_idx ON directory_entries (user_id);
 ### 4.2 `users` 表变更
 
 ```sql
--- 本地禁用意图：与上游 status 分开，避免下次同步把本地禁用覆盖掉
-ALTER TABLE users ADD COLUMN local_disabled BOOLEAN NOT NULL DEFAULT FALSE;
+-- 三个"停用意图"位：每个权威各持一位，互不覆盖（见下方）
+ALTER TABLE users ADD COLUMN local_disabled     BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
+ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
+-- SCIM 客户端托管该账号的属性（迁移 027）
+ALTER TABLE users ADD COLUMN scim_managed       BOOLEAN NOT NULL DEFAULT FALSE;
 -- 目录来源的组，与本地手工组分离（见 §6.5）
 ALTER TABLE users ADD COLUMN directory_groups TEXT[] NOT NULL DEFAULT '{}';
 ```
 
-有效状态计算：
+有效状态是三位**求或**，并由数据库约束锁死：
 
-```text
-users.status = CASE WHEN local_disabled THEN 'disabled'
-                    ELSE <上游 status> END
+```sql
+status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
+              THEN 'disabled' ELSE 'active' END      -- 约束 users_status_matches_flags
 ```
 
-`local_disabled` **只由管理员显式 enable 清除**，同步过程永不改写。
+**为什么是一位不够**（原设计的 `local_disabled` 单列就是缺这一点）：`status` 只有 active/disabled 两态，而停用可以有**多个互不相同的来源**。若各家都往 `status` 上写，同一列就同时承担"谁停用的"和"是否停用"两个语义，于是必然互相覆盖：
 
-> 同步改造清单：`models.rs` 的 `USER_COLS`、`User` 结构体、`admin` 用户列表/详情返回、以及所有 `SELECT {USER_COLS}` 调用点。
+| 场景 | 单列写法下的结果 |
+|---|---|
+| SCIM 停用 → 下一次目录同步看到用户在目录里 | 同步把 `status` 写回 `active`，**把 SCIM 的停用抹掉** |
+| 目录停用（用户消失）→ SCIM 推一次 `active: true` | SCIM 把 `status` 写回 `active`，**把目录的停用抹掉** |
+| 本地管理员 enable 一个被上游停用的账号 | 管理员以为放开了，下一轮同步又停用回去 |
+
+三位的语义是「**各记各的意图，`status` 是这些意图的结论**」：
+
+- 上游停用 ⇒ 本地停用；本地想启用也无效 —— 这正是"最严格策略"，且现在由**数据库约束**保证，任何写入路径都无法绕过；
+- 每个权威只能释放**自己**那一位（同步只清 `directory_disabled`，SCIM 只清 `scim_disabled`，管理员只清 `local_disabled`）；
+- 因此不再存在"谁的写入会覆盖谁"的问题：覆盖在数据模型层面不可表达。
+
+`directory_disabled` / `scim_disabled` 的清零规则见 §6.3；**权威失效时其意图必须被释放**（否则账号被永远锁死，且没有任何入口能救）见 §4.3。
+
+> 同步改造清单：`models.rs` 的 `USER_COLS`、`User` 结构体、`admin` 用户列表/详情返回、以及所有 `SELECT {USER_COLS}` 调用点。**已按此清单落地** —— `status` 已无任何写入方直接声明，全部改由三位派生（`status_from_flags` / 约束）。
+
+### 4.3 权威的存活与其意图的释放
+
+意图只在**它的持有者还在位**时成立。每个权威各有一个"存活"判据，任一失效都必须调用 `authority::release_dead_authority_claims`：
+
+| 意图 / 归属 | 存活判据 | 释放时机 |
+|---|---|---|
+| `directory_disabled` | 存在**启用中**的源 link 到该用户 | 停用源、删除源 |
+| `scim_disabled` / `scim_managed` | SCIM 配置里有 token（轮换算存活，**吊销才算失效**） | `DELETE /admin/scim/token` |
+
+两条判据都是「按存活扫」而不是「按持有者扫」，这一点是刻意的：link 可以被手工删除（`DELETE /directory/sources/{code}` 正是这么提示的），那时按持有者扫就找不到该释放谁，账号被永久锁死。按存活扫使系统自愈。
+
+> 一个真实的锁死 bug 就出在这里：SCIM token 吊销后没人释放 `scim_disabled`，而被 SCIM 停用的账号又无法被管理员启用（约束不允许），于是**没有任何入口**能恢复。test `tests/disable_flags.rs` 现在钉住轮换/吊销两种语义的差别。
+
+### 4.4 上游托管标记：来源与归属分开
+
+| 列 | 回答的问题 | 何时写 |
+|---|---|---|
+| `provisioned_via` | 这个账号**最初**是怎么来的（`sso_jit` / `scim` / …） | 仅创建时。接管一个既有本地账号**不**改写它 |
+| `directory_entries`（link 存在） | 目录是否托管它的属性 | 同步时 |
+| `scim_managed` | SCIM 客户端是否托管它的属性 | 任何 SCIM 写入（`create` / `put` / `patch`） |
+
+`provisioned_via` 与 `scim_managed` 必须分开：一个 IdP 接管一个既有本地账号时，它**不是**这个账号的创建者，把它写成 `created by scim` 会让运维读错这个字段。两者都由 `authority::managing_authority` 汇成"谁拥有这个账号"，供 §5 的拒写与拒删使用（目录优先于 SCIM：link 带优先级，目录是属性的事实来源）。
 
 ---
 
@@ -158,9 +199,15 @@ users.status = CASE WHEN local_disabled THEN 'disabled'
 | `phone` | 本地 | ❌（v1） | ✅ |
 | `must_change_password` | 本地 | ❌（目录用户恒 `false`） | ✅ |
 
-**判定"目录托管"**：`directory::managing_source(pool, user_id) -> Option<String>` 返回**优先级最高**的源 code（`ORDER BY priority ASC, code ASC`，`code` 用于在同优先级下给出确定结果）。文档原先拟定的 `is_managed(pool, user_id) -> bool` **未单独实现**——`managing_source(..).is_some()` 就是它，而每个强制点都需要 source code 来构造错误信息与审计明细，两个函数只是同一查询的重复。
+**判定"谁托管"**：`authority::managing_authority(pool, user_id) -> Option<Authority>`，`Authority` 是 `Directory(code)` 或 `Scim`。目录取**优先级最高**的源 code（`ORDER BY priority ASC, code ASC`，`code` 用于在同优先级下给出确定结果），目录优先于 SCIM。
 
-被拒时返回 `403`，错误信息由 `directory::managed_write_error(source, field)` / `directory::managed_delete_error(source)` 生成（纯函数，见 §5.1）。**所有权字段清单**是代码里的 `directory::DIRECTORY_OWNED_FIELDS`，测试 `tests/directory_policy.rs` 把它与上表钉在一起。
+**为什么是一项查询而不是两个函数**：文档原先拟定的 `is_managed(pool, user_id) -> bool` 与 `managing_source(..) -> Option<String>` 是同一查询的两种投影，而每个强制点都需要那个 code 来构造错误信息与审计明细（"managed by directory source corp" 与 "managed by SCIM" 是不同的话）；再有一个布尔投影只会多一个会漂移的真相来源。
+
+> `Authority` 是枚举而非 `Option<String>`，因为 SCIM 没有 code —— 目录源的 code 是运维自选的，而 `"scim"` 甚至是一个合法的 **kind** 值，字符串在真正要用它拒写的地方恰好是有歧义的。
+
+被拒时返回 `403`；文案与**所有权字段清单**都是 `Authority` 上的纯函数/常量（`write_error(field)` / `delete_error()` / `managed_fields()`，见 §5.1），测试 `tests/directory_policy.rs` 把它们与上表钉在一起。
+
+`Authority::managed_fields()` 有一个刻意的差异：目录拥有 `directory_groups`，**SCIM 不拥有**。SCIM 的组仍写 `users.groups` 这个本地列，若在此声明所有权，本地改组就会撞上一个 SCIM 会覆盖的值。把 SCIM 组迁到 `directory_groups` 是独立工作（§6.5、§14）。
 
 **已实现（P0）**：
 
@@ -178,7 +225,23 @@ users.status = CASE WHEN local_disabled THEN 'disabled'
 
 ### 5.1 拒写策略的可测试性
 
-`managed_write_error` / `managed_delete_error` / `DIRECTORY_OWNED_FIELDS` 都是纯函数/常量，因此上面那张归属表可以用普通单元测试锁定，不需要数据库。`tests/directory_policy.rs` 覆盖：托管字段被拒、本地字段放行、未知字段**默认放行**（调用方写错字段名时不应把管理员锁在无关属性之外）。
+`Authority::write_error` / `delete_error` / `managed_fields` 都是纯函数/常量（`crates/signet/src/authority.rs`），因此上面那张归属表可以用普通单元测试锁定，不需要数据库。`tests/directory_policy.rs` 覆盖：托管字段被拒、本地字段放行、未知字段**默认放行**（调用方写错字段名时不应把管理员锁在无关属性之外）。
+
+### 5.2 后台如何呈现"停用原因"与"能否启用"
+
+`PublicUser` 暴露三个字段，让 Dashboard 不必自己推断停用语义：
+
+| 字段 | 含义 |
+|---|---|
+| `disabled_by: string[]` | 当前按着这个账号的权威：`local` / `directory` / `scim`（可同时存在多个） |
+| `can_enable: bool` | 管理员点 Unfreeze 是否**真的生效**（服务端计算，见下） |
+| `local_disabled: bool` | 本地那一位本身（编辑对话框需要单独知道它） |
+
+**为什么是数组而不是一个 `reason`**：账号可以同时被两个权威按着，而管理员的 Unfreeze 只能释放**本地**那一位。单值字段必须挑一个赢家，于是就会把另一个仍在按着的权威藏起来 —— 而那恰恰是"为什么点了没反应"的答案。
+
+**为什么 `can_enable` 由服务端算**：这是一条**策略**，不是渲染选择。原先的按钮对任何 disabled 账号都出现，点下去返回 `200`、清掉本地意图、账号**依然冻结** —— 按钮报告成功而什么都没发生。策略放在服务端，避免视图里的副本与写入路径实际执行的规则漂移。
+
+Dashboard 侧（`UsersView.vue`）：状态列按 `disabled_by` 逐项显示"谁按着"；不能生效时不再显示 Unfreeze，改显示 `Held upstream` 并说明需要哪个权威放手；编辑对话框在改 `status` 时提示"选 active 只清掉本地冻结，账号仍会保持冻结"。
 
 ---
 
@@ -221,10 +284,14 @@ users.status = CASE WHEN local_disabled THEN 'disabled'
 ### 6.3 对账收尾（缺失即 disable）
 
 ```text
-UPDATE users SET status='disabled'
+UPDATE users SET directory_disabled = TRUE,
+                 status = CASE WHEN local_disabled OR scim_disabled
+                               THEN 'disabled' ELSE 'disabled' END   -- 见 §4.2
 WHERE id IN (SELECT user_id FROM directory_entries
              WHERE source_id = $1 AND last_seen_at < <本次 run 开始时间>)
 ```
+
+（`status` 由三位求或得出，写的是**自己那一位**；同步永不触碰 `local_disabled` / `scim_disabled`。）
 
 - **不删除**用户、不删除 link、不清除 `local_disabled`；
 - 审计 `directory.user.disabled`，`detail.reason` 有两个取值：
@@ -236,7 +303,8 @@ WHERE id IN (SELECT user_id FROM directory_entries
 
 `apply_disables` 逐条带出 planner 给出的原因，而不是硬编码其中一个 —— 一个凌晨三点读到「账号被禁用」的运维必须能分辨「离职」和「调岗」；
 - 另有两点与作用域相关的边界：作用域只可能禁用**本源自已 link 的用户**（缺席对账遍历的是 link，没 link 的人动不到）；`--limit` 试跑不做对账，因此作用域在试跑里**不会**禁用任何人；
-- 上游重新出现时，`status` 由上游值决定恢复（`local_disabled` 仍生效）；
+- 上游重新出现时，同步**清掉自己那一位** `directory_disabled`（其余权威的位仍生效，见 §4.2），并记一条 `directory.user.enabled` —— 但**仅当账号真的活过来**：若本地或 SCIM 仍然按着，运维看到的状态没有变化，记一条"已启用"只会让人去找一个仍然登录不了的账号；
+- 上面这条"复现即释放"是必需的：计划器在为"属性没变、但 `directory_disabled` 仍为真"的用户产出 `Unchanged` 之外必须产出 `Update`，否则复现的人永远停留在 disabled；
 - link 保留使"消失—复现"不会误建重复账号。
 
 ### 6.4 冲突处理
@@ -571,9 +639,23 @@ GET  /api/v1/admin/directory/sources/{code}/runs/{id}       # 单次详情
 | `directory.source.created` / `.updated` / `.deleted` / `.enabled` / `.disabled` | 每次操作 |
 | `directory.sync.started` / `.finished` / `.failed` | 每次运行（含 trigger、统计、耗时） |
 | `directory.user.created` | **逐条** |
-| `directory.user.disabled` | **逐条**（`detail.reason = absent_upstream`） |
+| `directory.user.disabled` | **逐条**（`detail.reason = absent_upstream` / `out_of_scope`） |
+| `directory.user.enabled` | **逐条**，且**仅在账号真的恢复 active 时**（§6.3） |
 | `directory.user.updated` | **仅汇总**（计数），不逐条 |
 | `directory.conflict` | **逐条** |
+| `directory.managed_write_blocked` | 每次被拒的本地写入（`detail = { source, field }`） |
+
+SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不是每个受影响的行一条 —— IdP 替换一个 500 人的组是**一个**动作，500 条事件只会把它埋掉：
+
+| 事件 | 触发 |
+|---|---|
+| `scim.user.create` | `POST /Users` |
+| `scim.user.update` | `PUT`/`PATCH` **且确实改动了托管属性**（`detail.changed` 列出改了哪些，`detail.via` = `put` / `replace active` / `remove active`） |
+| `scim.user.enabled` / `scim.user.disabled` | `active` 发生**跃迁**时（`detail.via` 说明是哪种拼写） |
+| `scim.user.delete` | `DELETE /Users`（实际是停用，见 §14.1） |
+| `scim.group.create` / `.update` / `.delete` | 组的三类写入（`update` 的 `detail.outcome` 给出成员增删计数） |
+
+> **幂等推送不记账**。合规客户端每次轮询都会重发整个资源，若"有请求就记一条"，运维要找的那几个时间戳会被 IdP 的轮询周期淹没；同样地，一个反复重发 `active: false` 的客户端并没有做出新决定。所以 `update` 只在 `changed` 非空时记，enable/disable 只在**跃迁**时记 —— 与上面 `directory.user.enabled` 的判据是同一个道理。
 
 > ⚠️ **必须处理 webhook 扇出**：`audit.rs:107` 对**每条**审计事件无条件调用 `webhooks::dispatch`，且**不重试**。一次 10 万用户的全量同步若逐条审计，会产生 10 万条审计 + 10 万次 webhook 投递。因此：
 > - `updated` 只汇总不逐条；
@@ -725,12 +807,32 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 | DELETE 返回 200 + Error schema | `scim.rs` `delete_user` / `delete_group` | 改为 `204` | ✅ 已修 |
 | `PATCH /Users` 不支持 `userName` / `emails` 写入 | `scim.rs` `patch_user` | 按 op/path 正确解析，支持 `userName`/`emails`/`active` | ⏳ 待做：`emails`/`username` 是 UNIQUE 列，写入需要先决定唯一冲突对推送客户端意味着什么（409 还是合并），属 P5 功能而非缺陷 |
 | 无 filter 支持 | `scim.rs:100` | 视上游要求决定是否实现 | ⏳ 待做 |
-| 审计缺失（无 `scim.group.*`） | — | 补齐 | ⏳ 待做：`delete_user` 有 `scim.user.delete`，组侧的 create/patch/delete 尚无 |
+| 审计缺失（无 `scim.group.*`） | — | 补齐 | ✅ 已修：见 §14.1 与 §11.1 的事件表 |
 | 组模型 | — | 从 `users.groups` 迁移到 `directory_groups`，与 §6.5 对齐 | ⏳ 待做 |
 
 > **`Operations` 那一项值得单独说明**：它让上面所有 PATCH 缺陷都变得不可观测——真实客户端的请求体在反序列化阶段就变成了空列表，路由于是"成功"地什么都没做。先前的缺陷分析（"完全忽略 op/path 语义"）是在只有小写拼写的请求体下才成立；对上真实 IdP，症状是"PATCH 一律返回 200 且无任何变化"。回归测试因此走**请求体**这一层（`user_attrs_from_body` / `group_member_changes_from_body`），而不是直接调用解释器——否则这个 bug 依然测不到。
 
 推送写入路径应复用同步的映射与冲突逻辑，并写 `directory_sync_runs`（`trigger = 'push'`）以获得统一的运行历史与审计。
+
+### 14.1 上游的删除只停用，不删数据（D3 的落地）
+
+与目录同步同一个原则：上游的删除是**一个意图**，不是一次删除。落点：
+
+| 入口 | 行为 | 为什么这样 |
+|---|---|---|
+| `DELETE /scim/v2/Users/{id}` | 置 `scim_disabled = TRUE`（`status` 由 §4.2 派生），并置 `scim_managed = TRUE`，**不删行** | `directory_entries.user_id` 与 IdP 的 `externalId` 都指向这个 id。删行意味着下一次 push 会为同一个人**新开一个账号**，旧账号的会话、审计与组历史全部失去归属；而一次误删是不可恢复的 |
+| `DELETE /scim/v2/Groups/{id}` | 置 `deleted_at = NOW()`，把成员快照写进 `members_at_delete`（迁移 `028`），并把组名从所有用户的 `groups` 中移除 | 两个方向必须同时成立：成员关系**必须停止授权**（`groups` 是 claim 的来源），又**必须留下可恢复的记录**。只删行会把"这个组存在过、当时有谁"一起销毁 |
+| 管理员删除托管账号 | `403`，提示改用 disable | 托管账号的删除权在上游（§5） |
+
+**同名组重建**：`scim_groups.display_name` 的唯一约束改为**只覆盖未删除行**的部分索引（`scim_groups_live_display_name_key`），否则墓碑会永久占住那个名字，IdP 想重建同名组会被挡死。
+
+### 14.2 混合部署：SCIM 与目录同步不再互相覆盖
+
+同一账号既被目录 link 又被 SCIM 推时（§4.2 的三个意图位就是为此）：
+
+- SCIM 的停用只写 `scim_disabled`，**不写** `local_disabled` —— "上游的意图"与"本地的意图"是两件事，混成一个字段会让运维无法分辨"是 IdP 停的还是我自己停的"；
+- 目录同步只写 `directory_disabled`，所以它看不到 SCIM 的停用，也就无从抹掉；
+- 属性归属上目录优先（§4.4），但**停用意图互不覆盖**：两个权威各自按着就是各自按着，`status` 是二者的或。
 
 ---
 
@@ -767,7 +869,7 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 | **P4.5 共用映射 UI** | §13.1 | 贴一次样例即可点选映射；预览与真实写入（规范化后）一致；样例不落库不写日志 | ✅ 已完成：后端 `directory/{ldif,mapping}.rs` + `POST /admin/directory/sources/preview-mapping`（纯函数，与同步共用 `upstream_from_entry` / `to_upstream` / planner 规范化）；LDAP 侧把 entry→`UpstreamUser` 抽成 `ldap::upstream_from_entry` 供同步与预览共用。前端 `lib/directoryMapping.ts`（共享行定义）+ `components/directory/{MappingPanel,MappingTable,FieldPicker}.vue` + `lib/valueShape.ts`（交互规范见 `docs/directory-mapping-ux.md`）；LDAP 表单把映射键交还给面板（连接/鉴权/分页仍留在表单）。**校验全量、回显分页**：`fields`/`targets` 的计数对全部样例条目计算（`total == entry_count`），`rows` 按 `offset` 每页 25 条返回。测试：`tests/directory_mapping_preview.rs` 52 例（LDIF 折行/`::` base64/二进制 `objectGUID`→GUID/注释与 `version`/畸形行报行号/URL 值拒绝、两种 kind 的逐行判定与规范化行、样例体积上限、请求体契约、分页与完整计数的一致性、作用域行的判定）。**未做**：从上游拉取样例（probe），故 LDAP 组列为最佳推定（§13.1.4） |
 | **P4.6 从上游拉取样例（probe）** | §13.1.2 | 不必手工粘贴；LDAP 组列由近似变为精确 | 待做（可独立交付；需新增 admin-only 的 probe 端点，复用 `outbound::ensure_allowed`） |
 | **P4.7 源作用域：邮箱域 / 部门** | §7.2.1 | 只同步指定域/部门；配置写错（匹配 0 条）时预览直接判失败而不是静默清空；运行历史能区分「离职」与「调岗」 | ✅ 已完成：`plan::ScopeFilter`（纯谓词，域按标签边界比较、无通配符）+ `UpstreamUser.department` + `PlanOptions.scope`；planner 对掉出作用域的已 link 用户产出 `Disable`，`reason = out_of_scope`（与 `absent_upstream` 区分，并一路带到审计 detail）；`apply_disables` 改为逐条沿用 planner 的原因；两个 kind 的配置字段与保存期校验（空条目、通配符、把地址当域、`department_values` 缺 `department_attribute`/`department_path` 一律拒绝）；预览的 `scope` 行改为可判定（匹配 0 条 ⇒ `ok: false`，且对**全量**样例计数）；Dashboard 在 scope 行加入域/部门输入（列表在表单里是单个字符串，出站时才切分成数组）。测试：`tests/directory_scope.rs` 29 例（谓词边界，含 `evilcorp.example` 不得匹配；planner 的两个 reason 与 `--limit` 下不禁用；配置校验）+ `tests/directory_mapping_preview.rs` 新增 11 例。**刻意未做**：单次运行禁用数超过阈值即中止（本次只要求"可区分"，见 §7.2.1 的安全阀讨论） |
-| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 | ⏳ 进行中：§14 的**缺陷**已修（`Operations` 字段名、`op`/`path` 语义、组成员 remove/replace、DELETE `204`），测试 `tests/scim_patch.rs` 23 例；**剩余为功能**——`userName`/`emails` 写入、filter、`scim.group.*` 审计、组模型迁移 |
+| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 | ✅ 已实现（除下列"剩余"）：§14 的缺陷已修（`Operations` 字段名、`op`/`path` 语义、组成员 remove/replace、DELETE `204`）；上游语义已落地（删除只停用、组墓碑、`scim_managed` 归属、§11.1 的完整事件集）。测试：`tests/scim_patch.rs`（含"改 `displayName` 不得被读成清空成员"）、`tests/scim_audit.rs`、`tests/scim_ownership.rs`、`tests/scim_group_retention.rs`、`tests/scim_delete_guard.rs`。**剩余为功能**——`userName`/`emails` 写入、filter、组模型迁移到 `directory_groups` |
 
 > **P1 与 P2 必须紧邻交付**：只做同步不做 bind 直通，目录用户同步进来却登不进去，功能等于没交付。
 
