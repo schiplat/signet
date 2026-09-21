@@ -62,17 +62,21 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
 
 // --- Users ---
 
+/// A user as the SCIM read paths see it: the columns SCIM echoes back, and no
+/// credential material.
+///
+/// Exposed for tests; not part of the crate's intended API. See [`USER_SELECT`].
 #[derive(Debug, sqlx::FromRow)]
-struct ScimUserRow {
-    id: Uuid,
-    email: String,
-    username: Option<String>,
-    display_name: String,
-    status: String,
-    groups: Vec<String>,
-    external_id: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+pub struct ScimUserRow {
+    pub id: Uuid,
+    pub email: String,
+    pub username: Option<String>,
+    pub display_name: String,
+    pub status: String,
+    pub groups: Vec<String>,
+    pub external_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Projects a full [`User`] onto the SCIM read shape.
@@ -118,7 +122,20 @@ fn user_resource(u: &ScimUserRow) -> Value {
     })
 }
 
-const USER_SELECT: &str =
+/// The columns the SCIM read paths select, in the order [`ScimUserRow`] declares
+/// them.
+///
+/// Deliberately narrower than [`User`](crate::models::User)'s `USER_COLS`, and
+/// not a candidate for converging onto it: SCIM lists and gets users, so it has
+/// no business reading `password_hash` or `totp_secret`. Widening this to the
+/// full column list would pull a TOTP secret into every SCIM response path.
+///
+/// The cost of staying separate is that this list and the struct can drift, and
+/// the failure is a runtime `no column found for name` — a 500 on the SCIM
+/// endpoints. `tests/user_row_mapping.rs` pins the two together.
+///
+/// Exposed for tests; not part of the crate's intended API.
+pub const USER_SELECT: &str =
     "id, email, username, display_name, status, groups, external_id, created_at, updated_at";
 
 #[derive(Debug, Deserialize)]

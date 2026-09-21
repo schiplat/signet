@@ -127,6 +127,78 @@ fn the_alias_helper_qualifies_every_column() {
     }
 }
 
+/// The SCIM projection is a *second* list, and this is the test that keeps it
+/// honest.
+///
+/// It cannot be folded into `USER_COLS`: SCIM lists users, so selecting the full
+/// column set would read `password_hash` and `totp_secret` on every call. The
+/// price of the narrower list is that it and `ScimUserRow` can drift, and the
+/// failure mode is a runtime `no column found for name` — a 500 on the SCIM
+/// endpoints, with no other test reaching those queries.
+#[tokio::test]
+async fn a_user_loads_through_the_scim_projection() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+
+    // Scalar columns only: the point is the column list, not the join.
+    let user_id = Uuid::new_v4();
+    let tag = Uuid::new_v4().simple().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO users (id, sub, email, display_name, password_hash, status, role,
+                           groups, external_id)
+        VALUES ($1, $2, $3, 'Projection User', 'not-a-real-hash', 'active', 'member',
+                ARRAY['cn=ops'], 'upstream-7')
+        "#,
+    )
+    .bind(user_id)
+    .bind(format!("sub-{tag}"))
+    .bind(format!("{tag}@scim-projection.test"))
+    .execute(&state.pool)
+    .await
+    .expect("insert the projection-test user");
+
+    common::with_user(state, user_id, |state, user_id| async move {
+        let sql = format!(
+            "SELECT {} FROM users WHERE id = $1",
+            signet::scim::USER_SELECT
+        );
+        let row: signet::scim::ScimUserRow = sqlx::query_as(&sql)
+            .bind(user_id)
+            .fetch_one(&state.pool)
+            .await
+            .expect("the SCIM projection must map into `ScimUserRow`");
+
+        assert_eq!(row.id, user_id);
+        // Non-default values for the two columns SCIM's response depends on, so
+        // a list that silently dropped them would not pass by coincidence.
+        assert_eq!(row.external_id.as_deref(), Some("upstream-7"));
+        assert_eq!(row.groups, vec!["cn=ops".to_string()]);
+    })
+    .await;
+}
+
+/// The projection must stay narrow. If someone later "converges" it onto
+/// `USER_COLS`, this fails before the secret reaches a response.
+#[test]
+fn the_scim_projection_carries_no_credential_material() {
+    for secret in [
+        "password_hash",
+        "totp_secret",
+        "totp_enabled",
+        "mfa_required",
+        "sub",
+    ] {
+        assert!(
+            !signet::scim::USER_SELECT
+                .split(',')
+                .any(|c| c.trim() == secret),
+            "`{secret}` must not be read on the SCIM paths"
+        );
+    }
+}
+
 /// Inserts a user with a session and returns `(user_id, session_token)`.
 ///
 /// The token is stored hashed by `create_session`, so this goes through that
