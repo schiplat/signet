@@ -127,7 +127,7 @@ async fn scim_revoke_token(
     // cannot override an upstream claim, so those accounts would have no way
     // back. Rotating the token (`POST` on the same route) keeps a token and
     // deliberately does *not* come through here — the IdP is still pushing.
-    let released = crate::models::release_dead_authority_claims(&state.pool).await?;
+    let released = crate::authority::release_dead_authority_claims(&state.pool).await?;
     if released > 0 {
         tracing::info!(released, "released disable claims of a revoked authority");
     }
@@ -601,11 +601,13 @@ async fn list_users(
             let has_password = !u.password_hash.is_empty();
             let sso_identities = by_user.remove(&u.id).unwrap_or_default();
             let directory_sources = managed_by_user.remove(&u.id).unwrap_or_default();
+            let scim_managed = u.scim_managed;
             AdminUserListItem {
                 user: PublicUser::from(u),
                 has_password,
                 sso_identities,
                 directory_sources,
+                scim_managed,
             }
         })
         .collect();
@@ -628,6 +630,11 @@ struct AdminUserListItem {
     /// Directory sources owning this user's managed attributes, highest
     /// precedence first. Empty = not directory-managed, i.e. locally editable.
     directory_sources: Vec<String>,
+    /// True when the SCIM client owns this user's managed attributes. A separate
+    /// field from `directory_sources` rather than another entry in it, because a
+    /// source code is operator-chosen and `"scim"` is a valid code — one list
+    /// could not tell them apart.
+    scim_managed: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -874,7 +881,7 @@ async fn update_user(
     // before any side effect such as password history or session revocation —
     // and against the *normalized* incoming value, so re-sending the current
     // value is not treated as a write.
-    if let Some(source) = crate::directory::managing_source(&state.pool, id).await? {
+    if let Some(authority) = crate::authority::managing_authority(&state.pool, id).await? {
         let attempts = [
             (
                 "email",
@@ -901,8 +908,8 @@ async fn update_user(
             if !changed {
                 continue;
             }
-            if let Some(msg) = crate::directory::managed_write_error(&source, field) {
-                audit_managed_write_blocked(&state, &headers, &actor, id, &source, field).await;
+            if let Some(msg) = authority.write_error(field) {
+                audit_managed_write_blocked(&state, &headers, &actor, id, &authority, field).await;
                 return Err(AppError::forbidden(msg));
             }
         }
@@ -1102,11 +1109,9 @@ async fn delete_user(
     let target = user_by_id(&state.pool, id).await?;
     // Upstream deletions only disable (D3) and the same rule holds locally, so a
     // managed user is never hard-deleted — use the local disable intent instead.
-    if let Some(source) = crate::directory::managing_source(&state.pool, id).await? {
-        audit_managed_write_blocked(&state, &headers, &actor, id, &source, "delete").await;
-        return Err(AppError::forbidden(crate::directory::managed_delete_error(
-            &source,
-        )));
+    if let Some(authority) = crate::authority::managing_authority(&state.pool, id).await? {
+        audit_managed_write_blocked(&state, &headers, &actor, id, &authority, "delete").await;
+        return Err(AppError::forbidden(authority.delete_error()));
     }
     let res = sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(id)
@@ -1333,7 +1338,7 @@ async fn audit_managed_write_blocked(
     headers: &HeaderMap,
     actor: &User,
     user_id: Uuid,
-    source: &str,
+    authority: &crate::authority::Authority,
     field: &str,
 ) {
     record(
@@ -1343,7 +1348,7 @@ async fn audit_managed_write_blocked(
             action: crate::directory::AUDIT_MANAGED_WRITE_BLOCKED,
             resource_type: "user",
             resource_id: Some(user_id.to_string()),
-            detail: json!({ "source": source, "field": field }),
+            detail: json!({ "source": authority.code(), "field": field }),
             ip: None,
             user_agent: crate::http::extract::user_agent(headers),
             client_id: None,

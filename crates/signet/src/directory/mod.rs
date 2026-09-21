@@ -43,34 +43,11 @@ pub mod source;
 
 /// Audit action recorded when a local write to a directory-owned attribute is
 /// refused.
+///
+/// Named for the directory path that first needed it; SCIM now refuses the same
+/// writes against the same attributes and records the same action, with
+/// `detail.authority` saying which upstream it was (`crate::authority`).
 pub const AUDIT_MANAGED_WRITE_BLOCKED: &str = "directory.managed_write_blocked";
-
-/// Attributes that directory sync owns (the §5 ownership table). A local admin
-/// cannot edit these for a managed user; they change only via the next sync.
-///
-/// `phone` and `role` are deliberately absent — both stay locally editable in
-/// v1, as do `status` (through the local disable intent) and the MFA settings.
-pub const DIRECTORY_OWNED_FIELDS: &[&str] =
-    &["email", "username", "display_name", "directory_groups"];
-
-/// Error message for a local write to `field` of a user managed by
-/// `managing_source`, or `None` when `field` is not directory-owned.
-///
-/// Pure, so the ownership policy is unit-testable without a database.
-pub fn managed_write_error(managing_source: &str, field: &str) -> Option<String> {
-    DIRECTORY_OWNED_FIELDS
-        .contains(&field)
-        .then(|| format!("{field} is managed by directory source {managing_source}"))
-}
-
-/// Error message for a local delete of a user managed by `managing_source`.
-///
-/// Mirrors D3: an upstream deletion only disables, and the same rule holds
-/// locally — a hard delete is never allowed, so use the local disable intent
-/// (`users.local_disabled`) instead.
-pub fn managed_delete_error(managing_source: &str) -> String {
-    format!("user is managed by directory source {managing_source}; disable it instead of deleting")
-}
 
 /// Code of the highest-precedence source linking this user, if any.
 ///

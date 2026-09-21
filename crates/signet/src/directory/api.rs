@@ -305,7 +305,7 @@ async fn delete_source(
     // is exactly what this endpoint's error message invites the operator to do.
     // Without it those accounts stay disabled with no authority left to release
     // them (migration `026`).
-    let released = crate::models::release_dead_authority_claims(&state.pool).await?;
+    let released = crate::authority::release_dead_authority_claims(&state.pool).await?;
     if released > 0 {
         tracing::info!(
             source = %code,
@@ -348,7 +348,7 @@ async fn set_enabled(
     // enable cannot override an upstream claim, so those accounts would have no
     // way back (migration `026`).
     if !view.enabled {
-        let released = crate::models::release_dead_authority_claims(&state.pool).await?;
+        let released = crate::authority::release_dead_authority_claims(&state.pool).await?;
         if released > 0 {
             tracing::info!(
                 source = %view.code,

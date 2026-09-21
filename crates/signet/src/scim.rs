@@ -264,6 +264,15 @@ async fn create_user(
     // intent rather than a `status`, so the next directory sync does not read it
     // as "upstream is active" and release it.
     new_user.scim_disabled = body.active == Some(false);
+    // SCIM provisioning this account makes it SCIM's: the attributes it manages
+    // become read-only locally and the row cannot be hard-deleted (migration
+    // `027`).
+    new_user.scim_managed = true;
+    // Provenance, distinct from ownership: it records that SCIM *created* this
+    // account, which ownership cannot say (an IdP that takes over a local
+    // account sets that too). Migration `021` documents NULL as "not provisioned
+    // by an upstream", which is now wrong for accounts created from here on.
+    new_user.provisioned_via = Some("scim");
     new_user.username = Some(username.as_str());
     new_user.external_id = body
         .external_id
@@ -404,6 +413,9 @@ async fn put_user(
             username = COALESCE($3, username),
             display_name = COALESCE($4, display_name),
             scim_disabled = COALESCE($5, scim_disabled),
+            -- A write is a claim of ownership: an IdP that starts pushing an
+            -- existing local account takes over the attributes it manages.
+            scim_managed = TRUE,
             -- SCIM records only its own intent; `status` is the answer from all
             -- three flags. The new `scim_disabled` is substituted rather than
             -- referenced, because `SET` expressions read the old row.
@@ -657,6 +669,8 @@ async fn patch_user(
         UPDATE users SET
             display_name = $3,
             scim_disabled = COALESCE($2, scim_disabled),
+            -- See `put_user`: any SCIM write claims ownership.
+            scim_managed = TRUE,
             status = CASE
                 WHEN local_disabled OR directory_disabled OR COALESCE($2, scim_disabled)
                 THEN 'disabled' ELSE 'active' END,
@@ -682,41 +696,42 @@ async fn delete_user(
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
 
-    // D3: an upstream deletion only ever disables, and the admin delete path
-    // refuses a directory-managed user for the same reason. SCIM is an upstream
-    // too, so it must not be the one path that hard-deletes a managed account.
-    // The damage is worse than a lost row: `directory_entries.user_id` cascades,
-    // so the link goes with it, the next sync run no longer recognises the
-    // external id, and it provisions a *new* account for the same person —
-    // losing the old id's history, sessions and local state.
+    // D3: an upstream deletion only ever disables. The row is never removed,
+    // whoever owns it — `directory_entries.user_id` and the IdP's `externalId`
+    // both point at this id, so deleting it means the next push provisions a
+    // *new* account for the same person and the old one's sessions, audit
+    // attribution (`audit_logs.actor_user_id` is `ON DELETE SET NULL`) and local
+    // state do not follow them.
     //
-    // Checked before `revoke_all_sessions` so a refused delete has no effect at
-    // all rather than signing the user out on the way to failing.
-    if let Some(source) = crate::directory::managing_source(&state.pool, existing.id).await? {
-        crate::audit::record(
-            &state,
-            crate::audit::AuditEvent {
-                actor: None,
-                action: crate::directory::AUDIT_MANAGED_WRITE_BLOCKED,
-                resource_type: "user",
-                resource_id: Some(existing.id.to_string()),
-                detail: json!({ "source": source, "field": "delete" }),
-                ip: None,
-                user_agent: crate::http::extract::user_agent(&headers),
-                client_id: None,
-            },
-        )
-        .await;
-        return Err(AppError::forbidden(crate::directory::managed_delete_error(
-            &source,
-        )));
-    }
+    // Recorded as SCIM's own disable intent rather than as a local one, so the
+    // directory sync cannot read it as "upstream is active" and release it, and
+    // so a re-enabled `active: true` is the only thing that clears it.
+    //
+    // Ownership is deliberately *not* claimed here. A delete is the IdP saying it
+    // no longer wants the account; marking it SCIM-managed would take a local
+    // account away from its admin on the way out — making it undeletable and its
+    // attributes uneditable. A user SCIM already owns keeps its existing flag.
+    //
+    // `status` is written as a literal because the flag being set guarantees the
+    // derived answer is 'disabled' (migration `026`'s CHECK). Re-deriving from
+    // `scim_disabled` would read the *old* row and store the wrong value.
+    let changed = sqlx::query(
+        r#"
+        UPDATE users
+        SET scim_disabled = TRUE,
+            status = 'disabled',
+            updated_at = NOW()
+        WHERE id = $1 AND NOT scim_disabled
+        RETURNING id
+        "#,
+    )
+    .bind(existing.id)
+    .fetch_optional(&state.pool)
+    .await?;
 
-    revoke_all_sessions(&state.pool, existing.id).await?;
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(existing.id)
-        .execute(&state.pool)
-        .await?;
+    if changed.is_some() {
+        revoke_all_sessions(&state.pool, existing.id).await?;
+    }
 
     crate::audit::record(
         &state,
@@ -725,7 +740,13 @@ async fn delete_user(
             action: "scim.user.delete",
             resource_type: "user",
             resource_id: Some(existing.id.to_string()),
-            detail: json!({ "email": existing.email }),
+            // Says plainly that the request was a delete and the outcome was a
+            // deactivation, so the log does not read as "the row is gone".
+            detail: json!({
+                "email": existing.email,
+                "outcome": "disabled",
+                "reason": "an upstream delete never removes data",
+            }),
             ip: None,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,

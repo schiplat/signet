@@ -544,3 +544,45 @@ async fn a_directory_sweep_spares_a_live_scim_claim() {
     })
     .await;
 }
+
+/// Retiring the SCIM authority also hands back the accounts it owned.
+///
+/// Ownership is what makes managed attributes read-only and the row undeletable
+/// locally. Leaving it set after the token is revoked would strand those
+/// accounts: the IdP is gone so it will never push again, and the admin cannot
+/// edit or remove them either. The directory equivalent is deleting a source,
+/// which drops its links and with them its ownership.
+#[tokio::test]
+async fn revoking_the_scim_token_releases_the_ownership_it_held() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let _guard = SWEEP_LOCK.lock().await;
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        sqlx::query("UPDATE users SET scim_managed = TRUE WHERE id = $1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .expect("simulate a SCIM-provisioned account");
+
+        // Revoked through the route, so this covers the wiring too: a fix that
+        // released the flag only when called directly would pass a unit test.
+        let (admin, cookie) = common::admin_cookie(&state).await;
+        let status = scim_token_request(&common::admin_router(&state), &cookie, "DELETE").await;
+        assert_eq!(status, StatusCode::OK, "the token should be revoked");
+
+        let user = signet::models::user_by_id(&state.pool, id)
+            .await
+            .expect("read the user");
+        assert!(
+            !user.scim_managed,
+            "a retired authority owns nothing, or the account is stranded"
+        );
+        assert!(!user.scim_disabled);
+
+        common::delete_user(&state.pool, admin).await;
+    })
+    .await;
+}

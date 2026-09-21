@@ -1,6 +1,7 @@
 pub mod admin;
 pub mod audit;
 pub mod auth;
+pub mod authority;
 pub mod bootstrap;
 pub mod config;
 pub mod crypto;

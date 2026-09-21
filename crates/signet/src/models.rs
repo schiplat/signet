@@ -1,13 +1,11 @@
-use crate::error::AppResult;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::PgPool;
 use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
     mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
-    provisioned_via, local_disabled, directory_disabled, scim_disabled, directory_groups, \
-    created_at, updated_at, external_id";
+    provisioned_via, local_disabled, directory_disabled, scim_disabled, scim_managed, \
+    directory_groups, created_at, updated_at, external_id";
 
 /// The rule that turns the three disable flags into `status`, as SQL.
 ///
@@ -127,89 +125,6 @@ pub async fn active_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> crate::error::A
     .ok_or_else(|| crate::error::AppError::unauthorized("user inactive"))
 }
 
-/// Releases disable claims that no live authority is backing any more.
-///
-/// A claim is only meaningful while its author is still in charge, and each
-/// authority answers a different liveness question:
-///
-/// * `directory_disabled` — an **enabled** source links this user. A source that
-///   is switched off lists nothing and verifies nothing, the same reason
-///   [`enabled_managing_source`] ignores it.
-/// * `scim_disabled` — a SCIM client is **configured**. `DELETE
-///   /admin/scim/token` retires the IdP's authority; rotating it through `POST`
-///   keeps a token and so keeps the claim (the IdP is still pushing).
-///
-/// Both are reconciled in one place because the failure they prevent is the
-/// same: an admin enable cannot override an upstream claim (migration `026`), so
-/// a claim with no live authority behind it is a lockout with no way back.
-///
-/// Call after any act that retires an authority — disabling or deleting a
-/// source, revoking the SCIM token. Skipping it leaves accounts disabled with
-/// nobody left who may release them.
-///
-/// The directory condition is "no *enabled* source links this user" and
-/// deliberately not "this source links this user": links can disappear without
-/// the flag being released — `DELETE /directory/sources/{code}` tells the
-/// operator to remove them, and a hand edit can do it too — and a claim whose
-/// links are gone has no owner left to release it. Sweeping by liveness instead
-/// of by owner is what makes that self-healing. A user another enabled source
-/// still links keeps the claim: it is that source's business now, whether it
-/// currently lists them or not.
-///
-/// Returns how many claims were released.
-pub async fn release_dead_authority_claims(pool: &PgPool) -> AppResult<u64> {
-    let scim_revoked = sqlx::query_scalar::<_, bool>(
-        "SELECT COALESCE((SELECT token_hash IS NULL FROM scim_config WHERE id = TRUE), TRUE)",
-    )
-    .fetch_one(pool)
-    .await?;
-
-    let mut tx = pool.begin().await?;
-
-    let directory = sqlx::query(
-        r#"
-        UPDATE users u
-        SET directory_disabled = FALSE,
-            status = CASE WHEN u.local_disabled OR u.scim_disabled
-                          THEN 'disabled' ELSE 'active' END,
-            updated_at = NOW()
-        WHERE u.directory_disabled
-          AND NOT EXISTS (
-              SELECT 1 FROM directory_entries e
-              JOIN directory_sources s ON s.id = e.source_id
-              WHERE e.user_id = u.id AND s.enabled
-          )
-        "#,
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-
-    // Read outside the transaction on purpose so the two halves cannot deadlock
-    // against each other, and applied inside so a reader never sees a released
-    // directory claim paired with a stale SCIM one.
-    let scim = if scim_revoked {
-        sqlx::query(
-            r#"
-            UPDATE users
-            SET scim_disabled = FALSE,
-                status = CASE WHEN local_disabled OR directory_disabled
-                              THEN 'disabled' ELSE 'active' END,
-                updated_at = NOW()
-            WHERE scim_disabled
-            "#,
-        )
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-    } else {
-        0
-    };
-
-    tx.commit().await?;
-    Ok(directory + scim)
-}
-
 /// The columns a creation path may set on a new `users` row.
 ///
 /// The write-side counterpart of [`USER_COLS`]. `INSERT INTO users` was written
@@ -219,10 +134,10 @@ pub async fn release_dead_authority_claims(pool: &PgPool) -> AppResult<u64> {
 /// prevent on the read side.
 ///
 /// The field list is exactly what the local/admin/SCIM paths set, deliberately
-/// not every column. Columns only the directory sync or the SSO JIT path write
-/// (`local_disabled`, `directory_groups`, `mfa_required`, `provisioned_via`)
-/// keep relying on their schema defaults: naming them here would put the
-/// default in two places, and the schema would stop being the source of truth.
+/// not every column. Columns only the directory sync writes
+/// (`directory_groups`, `mfa_required`) keep relying on their schema defaults:
+/// naming them here would put the default in two places, and the schema would
+/// stop being the source of truth.
 pub struct NewUser<'a> {
     /// Required columns: `NOT NULL` with no default, so every caller must say.
     pub id: Uuid,
@@ -249,6 +164,20 @@ pub struct NewUser<'a> {
     /// state their intent as a flag and `insert_user` derives `status` from the
     /// flags, so an insert cannot ask for a combination the schema rejects.
     pub scim_disabled: bool,
+
+    /// The SCIM client is provisioning this account, so it owns the attributes
+    /// it manages (migration `027`). Set by every SCIM write, not just creation:
+    /// an IdP that pushes an existing local account takes it over.
+    pub scim_managed: bool,
+
+    /// How the account was first created, when the creating path wants to record
+    /// it (`'scim'`, `'sso_jit'`). `None` leaves the column NULL, which is what
+    /// the local/admin paths want — and what migration `021` documents as the
+    /// meaning of NULL for accounts that predate it.
+    ///
+    /// A *first-create* fact, so nothing updates it later; an IdP that takes over
+    /// an existing account sets [`Self::scim_managed`] instead.
+    pub provisioned_via: Option<&'a str>,
 }
 
 impl<'a> NewUser<'a> {
@@ -278,6 +207,8 @@ impl<'a> NewUser<'a> {
             external_id: None,
             must_change_password: false,
             scim_disabled: false,
+            scim_managed: false,
+            provisioned_via: None,
         }
     }
 }
@@ -302,8 +233,8 @@ where
         r#"
         INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role,
                            groups, phone, external_id, must_change_password, scim_disabled,
-                           created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
+                           scim_managed, provisioned_via, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
         RETURNING {USER_COLS}
         "#
     ))
@@ -323,8 +254,8 @@ where
     .bind(new.external_id)
     .bind(new.must_change_password)
     .bind(new.scim_disabled)
-    .bind(new.external_id)
-    .bind(new.must_change_password)
+    .bind(new.scim_managed)
+    .bind(new.provisioned_via)
     .fetch_one(executor)
     .await
 }
@@ -359,6 +290,12 @@ pub struct User {
     /// The IdP's `active: false`, held separately so a directory re-sync cannot
     /// release it (migration `026`).
     pub scim_disabled: bool,
+    /// True when the SCIM client owns this user's managed attributes
+    /// (migration `027`). The counterpart of a `directory_entries` link: SCIM has
+    /// no link table, so the flag is what the ownership guards read. Cleared when
+    /// the SCIM authority is retired — see
+    /// [`crate::authority::release_dead_authority_claims`].
+    pub scim_managed: bool,
     /// Groups sourced from the directory, kept apart from the locally-managed
     /// `groups` column so sync replaces only its own membership.
     pub directory_groups: Vec<String>,
