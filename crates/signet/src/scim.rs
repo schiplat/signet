@@ -1,7 +1,7 @@
 use crate::auth::password::{hash_password, record_password_history};
 use crate::auth::session::revoke_all_sessions;
 use crate::error::{AppError, AppResult};
-use crate::models::normalize_username;
+use crate::models::{insert_user, normalize_username, NewUser, User};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -73,6 +73,30 @@ struct ScimUserRow {
     external_id: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+}
+
+/// Projects a full [`User`] onto the SCIM read shape.
+///
+/// `ScimUserRow` stays a projection of its own because SCIM's list and get
+/// paths select it directly; the insert no longer builds one, and this keeps
+/// both feeding `user_resource` the same way. Every field lines up one-to-one,
+/// so the conversion cannot lose a value — it is also why `USER_COLS` had to
+/// carry `external_id`, without which the SCIM response would have no id to
+/// echo back.
+impl From<&User> for ScimUserRow {
+    fn from(u: &User) -> Self {
+        Self {
+            id: u.id,
+            email: u.email.clone(),
+            username: u.username.clone(),
+            display_name: u.display_name.clone(),
+            status: u.status.clone(),
+            groups: u.groups.clone(),
+            external_id: u.external_id.clone(),
+            created_at: u.created_at,
+            updated_at: u.updated_at,
+        }
+    }
 }
 
 fn user_resource(u: &ScimUserRow) -> Value {
@@ -223,35 +247,32 @@ async fn create_user(
         "active"
     };
 
-    let row = sqlx::query_as::<_, ScimUserRow>(&format!(
-        r#"
-        INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role, groups, phone, external_id, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'member', ARRAY[]::text[], NULL, $8, NOW(), NOW())
-        RETURNING {USER_SELECT}
-        "#
-    ))
-    .bind(id)
-    .bind(&sub)
-    .bind(&email)
-    .bind(&username)
-    .bind(&display_name)
-    .bind(&password_hash)
-    .bind(status)
-    .bind(body.external_id.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
-            AppError::bad_request("email already exists")
-        }
-        sqlx::Error::Database(db) if db.constraint() == Some("users_username_key") => {
-            AppError::bad_request("userName already exists")
-        }
-        sqlx::Error::Database(db) if db.constraint() == Some("users_external_id_key") => {
-            AppError::bad_request("externalId already exists")
-        }
-        other => AppError::from(other),
-    })?;
+    let mut new_user = NewUser::new(id, &sub, &email, &display_name, &password_hash);
+    // SCIM `active: false` provisions a disabled account, so this is the one
+    // creation path that sets the status.
+    new_user.status = status;
+    new_user.username = Some(username.as_str());
+    new_user.external_id = body
+        .external_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let user = insert_user(&state.pool, &new_user)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
+                AppError::bad_request("email already exists")
+            }
+            sqlx::Error::Database(db) if db.constraint() == Some("users_username_key") => {
+                AppError::bad_request("userName already exists")
+            }
+            sqlx::Error::Database(db) if db.constraint() == Some("users_external_id_key") => {
+                AppError::bad_request("externalId already exists")
+            }
+            other => AppError::from(other),
+        })?;
+    let row = ScimUserRow::from(&user);
 
     record_password_history(&state.pool, row.id, &password_hash).await?;
 

@@ -15,7 +15,7 @@ use crate::auth::session::{create_session, session_cookie};
 use crate::bootstrap::admin_exists;
 use crate::error::{AppError, AppResult};
 use crate::http::extract::{client_ip, user_agent};
-use crate::models::{PublicUser, User, USER_COLS};
+use crate::models::{insert_user, NewUser, PublicUser};
 use crate::state::AppState;
 
 /// Advisory lock key serializing concurrent first-run setups (hex for "Signet").
@@ -80,26 +80,17 @@ async fn setup_admin(
         return Err(AppError::conflict("already configured"));
     }
 
-    let user = sqlx::query_as::<_, User>(&format!(
-        r#"
-        INSERT INTO users (id, sub, email, display_name, password_hash, status, role, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, 'active', 'admin', NOW(), NOW())
-        RETURNING {USER_COLS}
-        "#
-    ))
-    .bind(id)
-    .bind(&sub)
-    .bind(&email)
-    .bind(&display_name)
-    .bind(password_hash)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
-            AppError::bad_request("email already exists")
-        }
-        other => AppError::from(other),
-    })?;
+    let mut new_user = NewUser::new(id, &sub, &email, &display_name, &password_hash);
+    // The bootstrap admin is the one account created with the admin role.
+    new_user.role = "admin";
+    let user = insert_user(&mut *tx, &new_user)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
+                AppError::bad_request("email already exists")
+            }
+            other => AppError::from(other),
+        })?;
 
     tx.commit().await?;
 

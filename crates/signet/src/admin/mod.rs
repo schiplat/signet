@@ -8,14 +8,15 @@ use crate::auth::password::{
 use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
-use crate::models::{normalize_username, user_by_id, PublicUser, User, USER_COLS};
+use crate::models::{
+    insert_user, normalize_username, user_by_id, NewUser, PublicUser, User, USER_COLS,
+};
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -785,7 +786,6 @@ async fn create_user(
     let id = Uuid::new_v4();
     let sub = id.to_string();
     let password_hash = hash_password(&body.password)?;
-    let now = Utc::now();
     let groups = body.groups.unwrap_or_default();
     let phone = normalize_phone(body.phone)?;
     if let Some(p) = &phone {
@@ -793,37 +793,25 @@ async fn create_user(
             return Err(AppError::bad_request("phone already exists"));
         }
     }
-    let must_change_password = body.must_change_password.unwrap_or(false);
 
-    let user = sqlx::query_as::<_, User>(&format!(
-        r#"
-        INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role, groups, phone, must_change_password, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $9, $10, $11, $11)
-        RETURNING {USER_COLS}
-        "#
-    ))
-    .bind(id)
-    .bind(&sub)
-    .bind(&email)
-    .bind(&username)
-    .bind(&display_name)
-    .bind(password_hash)
-    .bind(role.as_str())
-    .bind(groups)
-    .bind(phone)
-    .bind(must_change_password)
-    .bind(now)
-    .fetch_one(&state.pool)
-    .await
-    .map_err(|e| match e {
-        sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
-            AppError::bad_request("email already exists")
-        }
-        sqlx::Error::Database(db) if db.constraint() == Some("users_phone_key") => {
-            AppError::bad_request("phone already exists")
-        }
-        other => AppError::from(other),
-    })?;
+    let mut new_user = NewUser::new(id, &sub, &email, &display_name, &password_hash);
+    new_user.role = role.as_str();
+    new_user.username = username.as_deref();
+    new_user.groups = &groups;
+    new_user.phone = phone.as_deref();
+    new_user.must_change_password = body.must_change_password.unwrap_or(false);
+
+    let user = insert_user(&state.pool, &new_user)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
+                AppError::bad_request("email already exists")
+            }
+            sqlx::Error::Database(db) if db.constraint() == Some("users_phone_key") => {
+                AppError::bad_request("phone already exists")
+            }
+            other => AppError::from(other),
+        })?;
 
     record_password_history(&state.pool, user.id, &user.password_hash).await?;
 

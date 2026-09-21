@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
     mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
-    provisioned_via, local_disabled, directory_groups, created_at, updated_at";
+    provisioned_via, local_disabled, directory_groups, created_at, updated_at, external_id";
 
 /// [`USER_COLS`] qualified with a table alias, for queries that join `users`
 /// with another table.
@@ -90,6 +90,112 @@ pub async fn active_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> crate::error::A
     .ok_or_else(|| crate::error::AppError::unauthorized("user inactive"))
 }
 
+/// The columns a creation path may set on a new `users` row.
+///
+/// The write-side counterpart of [`USER_COLS`]. `INSERT INTO users` was written
+/// out by hand on every creation path, each with its own column list. Because
+/// the statement is a string, a column added later without a database default
+/// failed at *runtime*, once per path — the same drift `USER_COLS` exists to
+/// prevent on the read side.
+///
+/// The field list is exactly what the local/admin/SCIM paths set, deliberately
+/// not every column. Columns only the directory sync or the SSO JIT path write
+/// (`local_disabled`, `directory_groups`, `mfa_required`, `provisioned_via`)
+/// keep relying on their schema defaults: naming them here would put the
+/// default in two places, and the schema would stop being the source of truth.
+pub struct NewUser<'a> {
+    /// Required columns: `NOT NULL` with no default, so every caller must say.
+    pub id: Uuid,
+    pub sub: &'a str,
+    pub email: &'a str,
+    pub display_name: &'a str,
+    pub password_hash: &'a str,
+
+    /// Defaulted here because the INSERT names the column, so the database
+    /// default is never reached. Values mirror the schema: `status` is
+    /// `'active'` and `role` is `'member'` (migration `002`), `groups` is `'{}'`
+    /// (`006`), `must_change_password` is `FALSE` (`016`).
+    pub status: &'a str,
+    pub role: &'a str,
+    pub username: Option<&'a str>,
+    pub phone: Option<&'a str>,
+    pub groups: &'a [String],
+    pub external_id: Option<&'a str>,
+    pub must_change_password: bool,
+}
+
+impl<'a> NewUser<'a> {
+    /// A new account with the defaults above; callers override what they set.
+    ///
+    /// Borrows the required values rather than taking them, so a caller that
+    /// still needs the email for its audit entry does not have to clone it.
+    /// `password_hash` may be empty: the SSO JIT and sync paths create accounts
+    /// with no local password, and `''` is what they store.
+    pub fn new(
+        id: Uuid,
+        sub: &'a str,
+        email: &'a str,
+        display_name: &'a str,
+        password_hash: &'a str,
+    ) -> Self {
+        Self {
+            id,
+            sub,
+            email,
+            display_name,
+            password_hash,
+            status: "active",
+            role: "member",
+            username: None,
+            phone: None,
+            groups: &[],
+            external_id: None,
+            must_change_password: false,
+        }
+    }
+}
+
+/// Inserts a new user and returns the stored row.
+///
+/// Returns the raw [`sqlx::Error`] rather than an `AppResult` on purpose: a
+/// unique violation has to be described differently per surface, and folding
+/// the mapping in here would force one vocabulary on all of them. SCIM answers
+/// `userName already exists` in SCIM's own spelling, the admin API answers
+/// `username already exists`, and the sync engine answers 409 with re-run
+/// advice. Each caller keeps its `map_err`, and this function owns only what
+/// they genuinely share — the column list and the defaults.
+///
+/// Generic over the executor so the bootstrap path can pass its transaction
+/// (`&mut *tx`) exactly as it passes a pool.
+pub async fn insert_user<'e, E>(executor: E, new: &NewUser<'_>) -> Result<User, sqlx::Error>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    sqlx::query_as::<_, User>(&format!(
+        r#"
+        INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role,
+                           groups, phone, external_id, must_change_password,
+                           created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+        RETURNING {USER_COLS}
+        "#
+    ))
+    .bind(new.id)
+    .bind(new.sub)
+    .bind(new.email)
+    .bind(new.username)
+    .bind(new.display_name)
+    .bind(new.password_hash)
+    .bind(new.status)
+    .bind(new.role)
+    .bind(new.groups)
+    .bind(new.phone)
+    .bind(new.external_id)
+    .bind(new.must_change_password)
+    .fetch_one(executor)
+    .await
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct User {
     pub id: Uuid,
@@ -119,6 +225,14 @@ pub struct User {
     pub directory_groups: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The upstream identifier: SCIM's `externalId`, or the LDAP directory entry
+    /// a sync provisioned this account from. Unique when set, and nullable
+    /// because local, admin and JIT-created accounts have no upstream.
+    ///
+    /// Not public output — `PublicUser` is what reaches clients — so it is
+    /// skipped when a `User` is serialized, alongside the credential fields.
+    #[serde(skip_serializing)]
+    pub external_id: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
