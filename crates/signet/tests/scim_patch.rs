@@ -325,6 +325,43 @@ fn several_group_operations_keep_their_order() {
 }
 
 #[test]
+fn an_operation_on_another_attribute_is_not_a_membership_change() {
+    // The `path` was read only for its filter, so anything that missed it fell
+    // through to `Remove([])` — "remove every member". A client unsetting an
+    // attribute we do not even store emptied the group.
+    let changes = group_member_changes(&group_ops(json!([
+        { "op": "remove", "path": "displayName" }
+    ])))
+    .expect("accepted");
+
+    assert_eq!(
+        changes,
+        Vec::new(),
+        "an attribute that is not the membership must not be read as one"
+    );
+}
+
+#[test]
+fn a_member_filter_still_matches_however_it_is_spelled() {
+    // The filter form, including the composed `path` some clients build, must
+    // keep reaching the membership — the guard above could otherwise swallow the
+    // removal it was meant to protect.
+    let changes = group_member_changes(&group_ops(json!([
+        { "op": "remove", "path": format!("members[value eq \"{}\"]", one_id()) },
+        { "op": "remove", "path": format!("MEMBERS[value eq \"{}\"]", one_id()) }
+    ])))
+    .expect("accepted");
+
+    assert_eq!(
+        changes,
+        vec![
+            GroupMemberChange::Remove(vec![one_id()]),
+            GroupMemberChange::Remove(vec![one_id()]),
+        ]
+    );
+}
+
+#[test]
 fn an_unrecognised_group_op_is_rejected() {
     let err = group_member_changes(&group_ops(json!([
         { "op": "merge", "path": "members", "value": [{ "value": one_id() }] }

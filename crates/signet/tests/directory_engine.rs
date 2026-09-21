@@ -372,6 +372,142 @@ async fn a_limited_run_does_not_disable_the_entries_it_did_not_fetch() {
     .await;
 }
 
+/// An enable is a *transition*, and only the directory's own claim is released.
+///
+/// Both halves matter. Without the first, "when did this account come back"
+/// has no answer; without the second, every routine update of an active user
+/// would claim to have re-enabled them, and the event would say nothing.
+#[tokio::test]
+async fn a_returning_user_is_audited_as_enabled() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+
+    common::scoped(state, source, |state, source| async move {
+        let enabled = |pool: PgPool, code: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'directory.user.enabled' \
+                 AND detail ->> 'source' = $1",
+            )
+            .bind(code)
+            .fetch_one(&pool)
+            .await
+            .expect("count the enable events")
+        };
+
+        let upstream = vec![person(&source, "e-1", "One", &[])];
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &upstream, run_id).await;
+        common::close_run(&state.pool, run_id).await;
+
+        // An ordinary update of a user who was never disabled.
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        let renamed = vec![person(&source, "e-1", "One Renamed", &[])];
+        sync(&state, &source, &renamed, run_id).await;
+        common::close_run(&state.pool, run_id).await;
+        assert_eq!(
+            stored(&state.pool, source.id, "e-1").await.unwrap().status,
+            "active"
+        );
+        assert_eq!(
+            enabled(state.pool.clone(), source.code.clone()).await,
+            0,
+            "updating an active user is not an enable"
+        );
+
+        // Gone upstream: the source disables the account.
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &[], run_id).await;
+        common::close_run(&state.pool, run_id).await;
+        let gone = stored(&state.pool, source.id, "e-1").await.unwrap();
+        assert_eq!(gone.status, "disabled");
+        assert!(gone.directory_disabled, "the claim is the source's");
+
+        // Back upstream: the claim is released and the account returns.
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &upstream, run_id).await;
+        let back = stored(&state.pool, source.id, "e-1").await.unwrap();
+        assert_eq!(back.status, "active");
+        assert!(!back.directory_disabled);
+        assert_eq!(
+            enabled(state.pool.clone(), source.code.clone()).await,
+            1,
+            "the return is recorded exactly once"
+        );
+    })
+    .await;
+}
+
+/// A local claim outlives the directory's, so the source releasing its own is
+/// not an enable.
+///
+/// This is the case that makes "the user is active now" the wrong thing to log
+/// on: the account does not come back, and an audit entry saying it did would
+/// send an operator looking for a user who is still locked out.
+#[tokio::test]
+async fn a_source_enable_under_a_local_claim_is_not_an_enable() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+
+    common::scoped(state, source, |state, source| async move {
+        let upstream = vec![person(&source, "e-1", "One", &[])];
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &upstream, run_id).await;
+        common::close_run(&state.pool, run_id).await;
+
+        // Absent: the directory takes the account down and holds it.
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &[], run_id).await;
+        common::close_run(&state.pool, run_id).await;
+        assert!(
+            stored(&state.pool, source.id, "e-1")
+                .await
+                .unwrap()
+                .directory_disabled
+        );
+
+        // The admin adds a hold of their own on top. Only now are both claims in
+        // play, which is what the next run has to tell apart.
+        let id = stored(&state.pool, source.id, "e-1").await.unwrap().id;
+        sqlx::query("UPDATE users SET local_disabled = TRUE, status = 'disabled' WHERE id = $1")
+            .bind(id)
+            .execute(&state.pool)
+            .await
+            .expect("put a local hold on the account");
+
+        // Back upstream: the directory releases its own claim, the account stays
+        // down, and nothing happened that an operator can see.
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(&state, &source, &upstream, run_id).await;
+        common::close_run(&state.pool, run_id).await;
+
+        let user = stored(&state.pool, source.id, "e-1").await.unwrap();
+        assert!(!user.directory_disabled, "the source let go");
+        assert!(
+            user.local_disabled,
+            "but the admin's hold is not the source's to release"
+        );
+        assert_eq!(user.status, "disabled", "so the account stays disabled");
+
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE action = 'directory.user.enabled' \
+             AND detail ->> 'source' = $1",
+        )
+        .bind(&source.code)
+        .fetch_one(&state.pool)
+        .await
+        .expect("count the enable events");
+        assert_eq!(
+            events, 0,
+            "nothing an operator can see changed, so nothing may be recorded"
+        );
+    })
+    .await;
+}
+
 /// The audit trail an operator relies on: a create is recorded per user (it is
 /// low-volume and security-relevant) and excluded from webhook fan-out, while
 /// the run summary is the event that gets delivered (§11.1).

@@ -24,6 +24,9 @@ pub const AUDIT_SYNC_FINISHED: &str = "directory.sync.finished";
 pub const AUDIT_SYNC_FAILED: &str = "directory.sync.failed";
 pub const AUDIT_USER_CREATED: &str = "directory.user.created";
 pub const AUDIT_USER_DISABLED: &str = "directory.user.disabled";
+/// The counterpart of [`AUDIT_USER_DISABLED`]: a user who was absent upstream
+/// came back. Written per user, for the same reason as the disable.
+pub const AUDIT_USER_ENABLED: &str = "directory.user.enabled";
 pub const AUDIT_CONFLICT: &str = "directory.conflict";
 
 /// Entries per transaction. Small enough that a failure mid-run does not discard
@@ -452,6 +455,10 @@ pub async fn apply_plan(
     for chunk in plan.changes.chunks(CHUNK) {
         let mut tx = state.pool.begin().await?;
         let mut created: Vec<(Uuid, &Change)> = Vec::new();
+        // Collected per chunk so the audit entries are written after the commit,
+        // like the create entries: an event for a write that rolled back would be
+        // a lie, and one written inside the transaction would be lost with it.
+        let mut re_enabled: Vec<Uuid> = Vec::new();
 
         for change in chunk {
             match change.outcome {
@@ -460,7 +467,9 @@ pub async fn apply_plan(
                     created.push((new_id, change));
                 }
                 Outcome::Update => {
-                    update_user(&mut tx, row.id, change).await?;
+                    if update_user(&mut tx, row.id, change).await? {
+                        re_enabled.push(change.user_id.expect("Update has a user"));
+                    }
                 }
                 Outcome::Unchanged => {
                     touch_link(&mut tx, row.id, change).await?;
@@ -486,6 +495,18 @@ pub async fn apply_plan(
                     "external_id": external_id,
                     "email": change.fields.as_ref().map(|f| f.email.clone()),
                 }),
+            )
+            .await;
+        }
+
+        for user_id in re_enabled {
+            audit(
+                state,
+                AUDIT_USER_ENABLED,
+                "user",
+                Some(user_id.to_string()),
+                actor_user_id,
+                json!({ "source": row.code, "run_id": run_id }),
             )
             .await;
         }
@@ -661,11 +682,16 @@ async fn insert_user(
     Ok(id)
 }
 
+/// Returns `true` when this update was the one that gave the account back.
+///
+/// Only an effective return counts: if a local or SCIM claim still holds, the
+/// directory releasing its own claim changed nothing an operator can see, and
+/// logging an enable would be wrong.
 async fn update_user(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_id: Uuid,
     change: &Change,
-) -> AppResult<()> {
+) -> AppResult<bool> {
     let fields = change
         .fields
         .as_ref()
@@ -680,8 +706,15 @@ async fn update_user(
     // The `status` expression spells out the flags rather than using
     // `STATUS_FROM_FLAGS`: `SET` reads the old row, and this statement is the one
     // changing `directory_disabled`, so it substitutes the new value.
-    sqlx::query(
+    //
+    // The `before` CTE carries the pre-update flag out through `RETURNING`, which
+    // is the only way to see it: `RETURNING` reads the new row, so it cannot say
+    // whether this update was the one that re-enabled the account. Without that
+    // there is nothing to audit — an enable would be indistinguishable from the
+    // ordinary case of updating a user who was never disabled.
+    let (was_directory_disabled, status): (bool, String) = sqlx::query_as(
         r#"
+        WITH before AS (SELECT directory_disabled AS was FROM users WHERE id = $1)
         UPDATE users
         SET email = $2,
             username = $3,
@@ -691,6 +724,7 @@ async fn update_user(
             directory_groups = COALESCE($5::text[], directory_groups),
             updated_at = NOW()
         WHERE id = $1
+        RETURNING (SELECT was FROM before), status
         "#,
     )
     .bind(id)
@@ -698,9 +732,12 @@ async fn update_user(
     .bind(&fields.username)
     .bind(&fields.display_name)
     .bind(change.groups.as_deref())
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await
     .map_err(|e| unique_violation(e, &change.external_id, &fields.email))?;
+
+    // An enable, as opposed to any other update, is what the audit is for.
+    let re_enabled = was_directory_disabled && status == "active";
 
     sqlx::query(
         r#"
@@ -715,7 +752,7 @@ async fn update_user(
     .bind(fingerprint_of(change))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    Ok(re_enabled)
 }
 
 /// Refreshes `last_seen_at` for an entry that matched the directory exactly.

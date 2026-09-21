@@ -75,6 +75,10 @@ pub struct ScimUserRow {
     pub status: String,
     pub groups: Vec<String>,
     pub external_id: Option<String>,
+    /// Carried so the handlers can tell a transition from a repeat when they
+    /// record an enable or a disable. Never rendered: `user_resource` has no
+    /// field for it, because `status` is what SCIM reads.
+    pub scim_disabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -97,10 +101,61 @@ impl From<&User> for ScimUserRow {
             status: u.status.clone(),
             groups: u.groups.clone(),
             external_id: u.external_id.clone(),
+            scim_disabled: u.scim_disabled,
             created_at: u.created_at,
             updated_at: u.updated_at,
         }
     }
+}
+
+/// Audit actions for everything the SCIM client does.
+///
+/// Grouped as constants because the vocabulary is the contract an operator
+/// filters on, and a typo in a literal would silently create a third spelling of
+/// the same event. One per *request*, not one per affected row: an IdP replacing
+/// a 500-member group is one act, and 500 entries would bury it.
+///
+/// `create` is the only non-transition. Everything else names the state the
+/// account or group moved *to*, because the question asked of this log is
+/// "when did this account get disabled, and by whom".
+pub const AUDIT_USER_CREATE: &str = "scim.user.create";
+pub const AUDIT_USER_UPDATE: &str = "scim.user.update";
+pub const AUDIT_USER_ENABLED: &str = "scim.user.enabled";
+pub const AUDIT_USER_DISABLED: &str = "scim.user.disabled";
+pub const AUDIT_USER_DELETE: &str = "scim.user.delete";
+pub const AUDIT_GROUP_CREATE: &str = "scim.group.create";
+pub const AUDIT_GROUP_UPDATE: &str = "scim.group.update";
+pub const AUDIT_GROUP_DELETE: &str = "scim.group.delete";
+
+/// Records a SCIM-originated audit event.
+///
+/// Every SCIM event shares its attribution and only differs in what it is about,
+/// so the shape lives here once. `actor` is always `None` and `client_id` always
+/// NULL: the caller is an IdP holding the bearer token, not a session, and there
+/// is one token for the whole deployment — so the user agent is the only thing
+/// that can hint at *which* client acted (docs/directory-sync.md §14).
+async fn record_scim(
+    state: &AppState,
+    headers: &HeaderMap,
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: &str,
+    detail: Value,
+) {
+    crate::audit::record(
+        state,
+        crate::audit::AuditEvent {
+            actor: None,
+            action,
+            resource_type,
+            resource_id: Some(resource_id.to_string()),
+            detail,
+            ip: None,
+            user_agent: crate::http::extract::user_agent(headers),
+            client_id: None,
+        },
+    )
+    .await;
 }
 
 fn user_resource(u: &ScimUserRow) -> Value {
@@ -135,8 +190,8 @@ fn user_resource(u: &ScimUserRow) -> Value {
 /// endpoints. `tests/user_row_mapping.rs` pins the two together.
 ///
 /// Exposed for tests; not part of the crate's intended API.
-pub const USER_SELECT: &str =
-    "id, email, username, display_name, status, groups, external_id, created_at, updated_at";
+pub const USER_SELECT: &str = "id, email, username, display_name, status, groups, external_id, \
+    scim_disabled, created_at, updated_at";
 
 #[derive(Debug, Deserialize)]
 struct ListQuery {
@@ -298,18 +353,13 @@ async fn create_user(
 
     record_password_history(&state.pool, row.id, &password_hash).await?;
 
-    crate::audit::record(
+    record_scim(
         &state,
-        crate::audit::AuditEvent {
-            actor: None,
-            action: "scim.user.create",
-            resource_type: "user",
-            resource_id: Some(row.id.to_string()),
-            detail: json!({ "email": row.email }),
-            ip: None,
-            user_agent: crate::http::extract::user_agent(&headers),
-            client_id: None,
-        },
+        &headers,
+        AUDIT_USER_CREATE,
+        "user",
+        &row.id.to_string(),
+        json!({ "email": row.email, "username": row.username }),
     )
     .await;
 
@@ -454,7 +504,94 @@ async fn put_user(
         other => AppError::from(other),
     })?;
 
+    record_user_write(&state, &headers, "put", &existing, &row).await;
+
     Ok(Json(user_resource(&row)))
+}
+
+/// Names the managed attributes a write actually moved.
+///
+/// Empty means the write was a no-op on those fields, which is worth being able
+/// to tell apart from "the IdP never sent them": every `PUT` from a conforming
+/// client re-sends the whole resource, so most of them change nothing.
+fn changed_attributes(before: &ScimUserRow, after: &ScimUserRow) -> Vec<&'static str> {
+    let mut changed = Vec::new();
+    if before.email != after.email {
+        changed.push("email");
+    }
+    if before.username != after.username {
+        changed.push("username");
+    }
+    if before.display_name != after.display_name {
+        changed.push("display_name");
+    }
+    if before.external_id != after.external_id {
+        changed.push("external_id");
+    }
+    changed
+}
+
+/// Records what one `PUT`/`PATCH` did to a user: what moved, and whether the
+/// account changed hands between enabled and disabled.
+///
+/// Two events, because they answer different questions and are read by
+/// different people. The update is the IdP's own history of the account; the
+/// transition is the one line that says who took the account down and when.
+///
+/// Both are conditional, for the same reason. A conforming `PUT` re-sends the
+/// whole resource, so most pushes change nothing at all; an IdP that re-sends
+/// `active: false` on every push is not making a new decision. Logging either
+/// unconditionally buries the timestamps an operator is looking for under the
+/// IdP's polling interval.
+///
+/// `via` says which request and, for a PATCH, which spelling caused it — `put`,
+/// `replace active` or `remove active`. The distinction is what tells an
+/// operator whose client started deactivating accounts, which is a question that
+/// only comes up when a client's behaviour changed.
+async fn record_user_write(
+    state: &AppState,
+    headers: &HeaderMap,
+    via: &str,
+    before: &ScimUserRow,
+    after: &ScimUserRow,
+) {
+    let changed = changed_attributes(before, after);
+    if !changed.is_empty() {
+        record_scim(
+            state,
+            headers,
+            AUDIT_USER_UPDATE,
+            "user",
+            &after.id.to_string(),
+            json!({ "via": via, "email": after.email, "changed": changed }),
+        )
+        .await;
+    }
+
+    if before.scim_disabled == after.scim_disabled {
+        return;
+    }
+    let action = if after.scim_disabled {
+        AUDIT_USER_DISABLED
+    } else {
+        AUDIT_USER_ENABLED
+    };
+    record_scim(
+        state,
+        headers,
+        action,
+        "user",
+        &after.id.to_string(),
+        json!({
+            "via": via,
+            "email": after.email,
+            // The effective status, which is the thing an operator is looking at
+            // while reading the log. A disable released by another authority
+            // leaves this `active`.
+            "status": after.status,
+        }),
+    )
+    .await;
 }
 
 /// A SCIM PATCH body for users.
@@ -505,6 +642,14 @@ pub struct UserAttrs {
     pub active: Option<bool>,
     /// `None` leaves `display_name` as it is.
     pub display_name: Option<String>,
+    /// How `active` was expressed, as `<op> active` — `replace active`,
+    /// `remove active`, or `add active`.
+    ///
+    /// Carried for the audit log only. Three of the standard ways a client
+    /// deprovisions all arrive as `active: false`, and when one of them starts
+    /// behaving differently the operator's first question is which one the client
+    /// actually sent. Cheap here, unrecoverable afterwards.
+    pub active_via: Option<String>,
 }
 
 /// Interprets RFC 7644 §3.5.2 operations into the attributes to write.
@@ -534,13 +679,17 @@ pub fn user_attrs_from_patch(ops: &[PatchOp]) -> AppResult<UserAttrs> {
         let name = normalize_op(&op.op)?;
         match op.path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
             Some(path) => match attribute_of(path).as_str() {
-                "active" => match name {
-                    // The RFC gives `active` a default of `true`, so unsetting it
-                    // cannot mean "activate" — and deprovisioning by removing
-                    // `active` is common enough that ignoring it is not an option.
-                    "remove" => attrs.active = Some(false),
-                    _ => attrs.active = Some(scalar_bool(&op.value, "active")?),
-                },
+                "active" => {
+                    attrs.active_via = Some(format!("{name} {path}"));
+                    match name {
+                        // The RFC gives `active` a default of `true`, so unsetting
+                        // it cannot mean "activate" — and deprovisioning by
+                        // removing `active` is common enough that ignoring it is
+                        // not an option.
+                        "remove" => attrs.active = Some(false),
+                        _ => attrs.active = Some(scalar_bool(&op.value, "active")?),
+                    }
+                }
                 "displayname" => match name {
                     // `users.display_name` is NOT NULL, so there is nothing to
                     // unassign. Ignoring a `remove` is better than failing an
@@ -685,6 +834,18 @@ async fn patch_user(
     .fetch_one(&state.pool)
     .await?;
 
+    // PATCH only interprets `active` and `displayName`, so `changed` is normally
+    // empty or `["display_name"]` — a `remove active` that only flips the flag
+    // records one event, not two.
+    record_user_write(
+        &state,
+        &headers,
+        attrs.active_via.as_deref().unwrap_or("patch"),
+        &existing,
+        &row,
+    )
+    .await;
+
     Ok(Json(user_resource(&row)))
 }
 
@@ -733,24 +894,19 @@ async fn delete_user(
         revoke_all_sessions(&state.pool, existing.id).await?;
     }
 
-    crate::audit::record(
+    // Says plainly that the request was a delete and the outcome was a
+    // deactivation, so the log does not read as "the row is gone".
+    record_scim(
         &state,
-        crate::audit::AuditEvent {
-            actor: None,
-            action: "scim.user.delete",
-            resource_type: "user",
-            resource_id: Some(existing.id.to_string()),
-            // Says plainly that the request was a delete and the outcome was a
-            // deactivation, so the log does not read as "the row is gone".
-            detail: json!({
-                "email": existing.email,
-                "outcome": "disabled",
-                "reason": "an upstream delete never removes data",
-            }),
-            ip: None,
-            user_agent: crate::http::extract::user_agent(&headers),
-            client_id: None,
-        },
+        &headers,
+        AUDIT_USER_DELETE,
+        "user",
+        &existing.id.to_string(),
+        json!({
+            "email": existing.email,
+            "outcome": "disabled",
+            "reason": "an upstream delete never removes data",
+        }),
     )
     .await;
 
@@ -867,6 +1023,16 @@ async fn create_group(
         other => AppError::from(other),
     })?;
 
+    record_scim(
+        &state,
+        &headers,
+        AUDIT_GROUP_CREATE,
+        "group",
+        &row.id.to_string(),
+        json!({ "display_name": row.display_name, "external_id": row.external_id }),
+    )
+    .await;
+
     Ok(Json(group_resource(&row, vec![])))
 }
 
@@ -963,6 +1129,16 @@ pub fn group_member_changes(ops: &[GroupPatchOp]) -> AppResult<Vec<GroupMemberCh
     let mut changes = Vec::new();
 
     for op in ops {
+        // An operation naming something other than the membership is not a
+        // membership change. The `path` was read only for its filter, so
+        // `{"op":"replace","path":"displayName","value":"new"}` arrived here as
+        // `Replace([])` — a rename wiped the group's members. Ignoring it mirrors
+        // the user route, where an attribute we do not own (`name.givenName`) is
+        // skipped rather than refused, so an IdP syncing more than we store does
+        // not fail its whole run over it.
+        if !names_members(op.path.as_deref()) {
+            continue;
+        }
         let ids = member_ids(op);
         match normalize_op(&op.op)? {
             "add" => changes.push(GroupMemberChange::Add(ids)),
@@ -973,6 +1149,23 @@ pub fn group_member_changes(ops: &[GroupPatchOp]) -> AppResult<Vec<GroupMemberCh
     }
 
     Ok(changes)
+}
+
+/// Whether an operation's `path` addresses the membership.
+///
+/// The exact spelling varies: `members`, `members[value eq "…"]`, and — from
+/// clients that put the filter on the composed form — `members[value eq
+/// "…"].display`. A missing `path` is the Okta shape, where the value object
+/// carries the attribute and only membership is ever sent here.
+fn names_members(path: Option<&str>) -> bool {
+    match path.map(str::trim).filter(|p| !p.is_empty()) {
+        None => true,
+        Some(path) => path
+            .split_once('[')
+            .map_or(path, |(head, _)| head)
+            .trim()
+            .eq_ignore_ascii_case("members"),
+    }
 }
 
 /// The membership changes a group PATCH body asks for.
@@ -1034,22 +1227,40 @@ async fn patch_group(
     authorize(&state, &headers).await?;
     let group = find_group(&state, &id).await?;
 
+    // One event per request rather than per member: replacing a 500-member group
+    // is a single act, and 500 entries would bury it. Counts, not ids — the ids
+    // are recoverable from the group at that instant, and a detail listing them
+    // would be unbounded.
+    let mut member_change = json!({
+        "added": 0,
+        "removed": 0,
+        "replaced": false,
+        "cleared": false,
+    });
+
     for change in group_member_changes_from_body(body)? {
         match change {
             GroupMemberChange::Add(ids) => {
+                member_change["added"] =
+                    json!(member_change["added"].as_u64().unwrap_or(0) + ids.len() as u64);
                 for user_id in ids {
                     add_group_to_user(&state, user_id, &group.display_name).await?;
                 }
             }
             GroupMemberChange::Remove(ids) if ids.is_empty() => {
+                member_change["cleared"] = json!(true);
                 clear_group(&state, &group.display_name).await?;
             }
             GroupMemberChange::Remove(ids) => {
+                member_change["removed"] =
+                    json!(member_change["removed"].as_u64().unwrap_or(0) + ids.len() as u64);
                 for user_id in ids {
                     remove_group_from_user(&state, user_id, &group.display_name).await?;
                 }
             }
             GroupMemberChange::Replace(ids) => {
+                member_change["replaced"] = json!(true);
+                member_change["added"] = json!(ids.len() as u64);
                 clear_group(&state, &group.display_name).await?;
                 for user_id in ids {
                     add_group_to_user(&state, user_id, &group.display_name).await?;
@@ -1059,6 +1270,17 @@ async fn patch_group(
     }
 
     let members = group_members(&state, &group.display_name).await?;
+
+    record_scim(
+        &state,
+        &headers,
+        AUDIT_GROUP_UPDATE,
+        "group",
+        &group.id.to_string(),
+        json!({ "display_name": group.display_name, "outcome": member_change }),
+    )
+    .await;
+
     Ok(Json(group_resource(&group, members)))
 }
 
@@ -1131,22 +1353,17 @@ async fn delete_group(
     .execute(&state.pool)
     .await?;
 
-    crate::audit::record(
+    record_scim(
         &state,
-        crate::audit::AuditEvent {
-            actor: None,
-            action: "scim.group.delete",
-            resource_type: "group",
-            resource_id: Some(group.id.to_string()),
-            detail: json!({
-                "display_name": group.display_name,
-                "outcome": "marked_deleted",
-                "released_members": members.len(),
-            }),
-            ip: None,
-            user_agent: crate::http::extract::user_agent(&headers),
-            client_id: None,
-        },
+        &headers,
+        AUDIT_GROUP_DELETE,
+        "group",
+        &group.id.to_string(),
+        json!({
+            "display_name": group.display_name,
+            "outcome": "marked_deleted",
+            "released_members": members.len(),
+        }),
     )
     .await;
 

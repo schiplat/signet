@@ -202,6 +202,26 @@ pub async fn begin_run(pool: &PgPool, source_id: Uuid) -> Uuid {
         .expect("open a sync run")
 }
 
+/// Closes a run the test opened.
+///
+/// `directory_sync_runs_one_running_idx` allows one running row per source, so a
+/// test that syncs twice has to close the first run — exactly as `run_source`
+/// does in production. Without this the second `begin_run` is refused, which
+/// reads as a puzzling conflict rather than a missing line.
+pub async fn close_run(pool: &PgPool, run_id: Uuid) {
+    signet::directory::model::finish_run(
+        pool,
+        run_id,
+        "succeeded",
+        0,
+        signet::directory::plan::Counts::default(),
+        None,
+        &serde_json::json!({}),
+    )
+    .await
+    .expect("close the sync run");
+}
+
 /// Runs `body` against a fresh source and removes everything it created, even
 /// when an assertion fails.
 ///
