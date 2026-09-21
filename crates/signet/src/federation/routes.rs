@@ -31,9 +31,12 @@ use super::provider::{ProviderConfig, UpstreamProfile, UpstreamProvider};
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        // `/start` stays a literal: the backend only registers it, and the
+        // dashboard is what builds the URL, so there is nothing to keep in sync
+        // on this side. `CALLBACK_PATH` has two consumers and is shared.
         .route("/auth/sso/{provider}/start", axum::routing::get(start))
         .route(
-            "/auth/sso/{provider}/callback",
+            super::CALLBACK_PATH,
             axum::routing::get(callback).post(callback_verify),
         )
 }
