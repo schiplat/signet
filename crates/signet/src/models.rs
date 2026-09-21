@@ -67,6 +67,29 @@ pub async fn user_by_id(pool: &sqlx::PgPool, id: Uuid) -> crate::error::AppResul
         .ok_or_else(|| crate::error::AppError::not_found("user not found"))
 }
 
+/// Loads a user by id, requiring `status = 'active'`.
+///
+/// Deliberately a second function rather than a flag on [`user_by_id`]. The
+/// status filter is a security boundary: a disabled account must not be handed
+/// to anything that mints credentials or accepts one. Keeping it in the name
+/// means a call site cannot pick the wrong behaviour by accident, and a
+/// reviewer can see which guarantee is in force without opening this file.
+///
+/// The 401 vs 404 split is the other half of that boundary. [`user_by_id`]
+/// reports "not found" because its callers are admin paths that must
+/// distinguish a missing row; this one reports "inactive" because its callers
+/// are authentication paths, where the caller already proved it knows the id
+/// and the only useful thing left to say is that the account is not usable.
+pub async fn active_user_by_id(pool: &sqlx::PgPool, id: Uuid) -> crate::error::AppResult<User> {
+    sqlx::query_as::<_, User>(&format!(
+        "SELECT {USER_COLS} FROM users WHERE id = $1 AND status = 'active'"
+    ))
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| crate::error::AppError::unauthorized("user inactive"))
+}
+
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct User {
     pub id: Uuid,

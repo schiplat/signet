@@ -8,7 +8,7 @@ use crate::auth::password::{
 use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
-use crate::models::{normalize_username, PublicUser, User, USER_COLS};
+use crate::models::{normalize_username, user_by_id, PublicUser, User, USER_COLS};
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -866,7 +866,7 @@ async fn update_user(
     Json(body): Json<UpdateUserBody>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
-    let target = load_user(&state, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
@@ -1099,7 +1099,7 @@ async fn delete_user(
     if actor.id == id {
         return Err(AppError::bad_request("cannot delete yourself"));
     }
-    let target = load_user(&state, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     // Upstream deletions only disable (D3) and the same rule holds locally, so a
     // managed user is never hard-deleted — use the local disable intent instead.
     if let Some(source) = crate::directory::managing_source(&state.pool, id).await? {
@@ -1141,7 +1141,7 @@ async fn disable_user(
     if actor.id == id {
         return Err(AppError::bad_request("cannot disable yourself"));
     }
-    let target = load_user(&state, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
@@ -1169,7 +1169,7 @@ async fn enable_user(
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
-    let target = load_user(&state, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
@@ -1211,7 +1211,7 @@ async fn batch_disable_users(
 
     let mut disabled = 0i64;
     for id in &body.ids {
-        let Ok(target) = load_user(&state, *id).await else {
+        let Ok(target) = user_by_id(&state.pool, *id).await else {
             continue;
         };
         if !actor.can_mutate_user(&target) {
@@ -1227,21 +1227,13 @@ async fn batch_disable_users(
     Ok(Json(serde_json::json!({ "disabled": disabled })))
 }
 
-async fn load_user(state: &AppState, id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>(&format!("SELECT {USER_COLS} FROM users WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("user not found".into()))
-}
-
 async fn revoke_user_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_staff_user(&state, &headers).await?;
-    let target = load_user(&state, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }

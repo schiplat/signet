@@ -4,7 +4,7 @@ use crate::audit::{record, AuditEvent};
 use crate::auth::password::set_user_password;
 use crate::auth::session::{cookie_value, create_session, current_user, session_cookie};
 use crate::error::{AppError, AppResult};
-use crate::models::{PublicUser, User, USER_COLS};
+use crate::models::{user_by_id, PublicUser, User};
 use crate::roles::require_admin_role;
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, State};
@@ -198,14 +198,6 @@ async fn delete_challenge(pool: &PgPool, id: Uuid) -> AppResult<()> {
         .execute(pool)
         .await?;
     Ok(())
-}
-
-async fn load_user(pool: &PgPool, id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>(&format!("SELECT {USER_COLS} FROM users WHERE id = $1"))
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        .ok_or_else(|| AppError::NotFound("user not found".into()))
 }
 
 /// Encrypts a TOTP secret before persisting it.
@@ -449,7 +441,7 @@ pub(crate) async fn force_password_change(
     if challenge.purpose != "change_password" {
         return Err(AppError::bad_request("password change challenge required"));
     }
-    let user = load_user(&state.pool, challenge.user_id).await?;
+    let user = user_by_id(&state.pool, challenge.user_id).await?;
     if user.status != "active" {
         return Err(AppError::unauthorized("account disabled"));
     }
@@ -488,7 +480,7 @@ pub(crate) async fn force_password_change(
     )
     .await;
 
-    let user = load_user(&state.pool, user.id).await?;
+    let user = user_by_id(&state.pool, user.id).await?;
     begin_login_mfa_flow(&state, jar, user, ip, user_agent, None).await
 }
 
@@ -521,7 +513,7 @@ async fn verify_mfa(
     if challenge.purpose != "login" {
         return Err(AppError::bad_request("login challenge required"));
     }
-    let user = load_user(&state.pool, challenge.user_id).await?;
+    let user = user_by_id(&state.pool, challenge.user_id).await?;
     if user.status != "active" {
         return Err(AppError::unauthorized("account disabled"));
     }
@@ -626,7 +618,7 @@ async fn enroll_start_challenge(
     if challenge.purpose != "enroll" {
         return Err(AppError::bad_request("enroll challenge required"));
     }
-    let user = load_user(&state.pool, challenge.user_id).await?;
+    let user = user_by_id(&state.pool, challenge.user_id).await?;
     if user.totp_enabled {
         return Err(AppError::bad_request("totp already enabled"));
     }
@@ -694,7 +686,7 @@ async fn enroll_confirm_challenge(
     let codes = replace_recovery_codes(&state.pool, user_id).await?;
     delete_challenge(&state.pool, challenge.id).await?;
 
-    let user = load_user(&state.pool, user_id).await?;
+    let user = user_by_id(&state.pool, user_id).await?;
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
     record(
@@ -848,7 +840,7 @@ async fn enroll_confirm_session(
 
     let codes = replace_recovery_codes(&state.pool, user.id).await?;
     delete_challenge(&state.pool, challenge.id).await?;
-    let user = load_user(&state.pool, user.id).await?;
+    let user = user_by_id(&state.pool, user.id).await?;
 
     record(
         &state,
@@ -944,7 +936,7 @@ async fn disable_mfa(
     }
 
     clear_user_mfa(&state.pool, user.id).await?;
-    let user = load_user(&state.pool, user.id).await?;
+    let user = user_by_id(&state.pool, user.id).await?;
     record(
         &state,
         AuditEvent {
@@ -1030,7 +1022,7 @@ async fn rebind_confirm(
 
     let codes = replace_recovery_codes(&state.pool, user.id).await?;
     delete_challenge(&state.pool, challenge.id).await?;
-    let user = load_user(&state.pool, user.id).await?;
+    let user = user_by_id(&state.pool, user.id).await?;
 
     record(
         &state,
@@ -1064,7 +1056,7 @@ async fn admin_reset_mfa(
 ) -> AppResult<Json<Value>> {
     let actor = current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
-    let target = load_user(&state.pool, id).await?;
+    let target = user_by_id(&state.pool, id).await?;
     clear_user_mfa(&state.pool, id).await?;
     // Also kill sessions so they re-auth under policy
     sqlx::query("DELETE FROM sessions WHERE user_id = $1")

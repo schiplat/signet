@@ -3,7 +3,7 @@ use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::client_ip;
 use crate::http::source_ip::check_client_source_ip;
-use crate::models::{ClientApp, User, USER_COLS};
+use crate::models::{active_user_by_id, ClientApp, User};
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -190,7 +190,7 @@ async fn issue_from_code(
         .execute(&state.pool)
         .await?;
 
-    let user = load_user(state, row.user_id).await?;
+    let user = active_user_by_id(&state.pool, row.user_id).await?;
     build_token_response(state, client, &user, &row.scope, row.nonce).await
 }
 
@@ -230,21 +230,8 @@ async fn issue_from_refresh(
         .execute(&state.pool)
         .await?;
 
-    let user = load_user(state, row.user_id).await?;
+    let user = active_user_by_id(&state.pool, row.user_id).await?;
     build_token_response(state, client, &user, &row.scope, None).await
-}
-
-async fn load_user(state: &AppState, user_id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>(&format!(
-        r#"
-        SELECT {USER_COLS}
-        FROM users WHERE id = $1 AND status = 'active'
-        "#
-    ))
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::unauthorized("user inactive"))
 }
 
 async fn build_token_response(

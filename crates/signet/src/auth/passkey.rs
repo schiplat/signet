@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::auth::session::{create_session, current_user, session_cookie};
 use crate::crypto::util::{b64url_encode, random_token};
 use crate::error::{AppError, AppResult};
-use crate::models::{PublicUser, User, USER_COLS};
+use crate::models::{active_user_by_id, PublicUser};
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
@@ -118,16 +118,6 @@ async fn load_passkeys(state: &AppState, user_id: Uuid) -> AppResult<Vec<Passkey
             serde_json::from_str::<Passkey>(&json).map_err(|e| AppError::Anyhow(e.into()))
         })
         .collect()
-}
-
-async fn load_user(state: &AppState, id: Uuid) -> AppResult<User> {
-    sqlx::query_as::<_, User>(&format!(
-        "SELECT {USER_COLS} FROM users WHERE id = $1 AND status = 'active'"
-    ))
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::unauthorized("user inactive"))
 }
 
 // --- list ---
@@ -395,7 +385,7 @@ async fn login_finish(
         return Err(AppError::unauthorized("passkey not recognized"));
     }
 
-    let user = load_user(&state, user_id).await?;
+    let user = active_user_by_id(&state.pool, user_id).await?;
     if user.must_change_password {
         return crate::mfa::challenge_password_change(&state, jar, user).await;
     }
