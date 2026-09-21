@@ -16,6 +16,21 @@ export type PublicUser = {
   phone: string | null;
   /** First-create source (`sso_jit`, …). null = local/admin/SCIM/legacy. */
   provisioned_via: string | null;
+  /** The local admin's own disable intent. */
+  local_disabled: boolean;
+  /**
+   * Every authority holding the account down: `local`, `directory`, `scim`.
+   * Empty when the account is active. More than one is possible — an admin can
+   * freeze an account a sync has already frozen.
+   */
+  disabled_by: ("local" | "directory" | "scim")[];
+  /**
+   * Whether Unfreeze would take effect. False when an upstream still holds the
+   * account: releasing the local claim returns 200 and changes nothing.
+   */
+  can_enable: boolean;
+  /** Groups sourced from the directory (read-only locally). */
+  directory_groups: string[];
   created_at: string;
 };
 

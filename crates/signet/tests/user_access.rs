@@ -149,6 +149,107 @@ async fn an_unknown_id_reports_not_found() {
     );
 }
 
+/// An Unfreeze that an upstream claim overrides must say so up front.
+///
+/// This is the silent failure the dashboard's button had: releasing the local
+/// claim succeeds (`200`) and the account stays frozen, because the directory
+/// still holds it and only the directory can let go. Nothing in the response
+/// used to distinguish that from an account that came back, and the operator
+/// was left clicking again.
+#[tokio::test]
+async fn an_enable_an_upstream_would_override_reports_the_remaining_claim() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        set_user_access(&state, id, UserAccess::Disabled)
+            .await
+            .expect("the admin holds it down");
+        // A second authority, as a sync that no longer lists the account would
+        // leave it.
+        sqlx::query(
+            "UPDATE users SET directory_disabled = TRUE, status = 'disabled' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("the directory holds it too");
+
+        let user = set_user_access(&state, id, UserAccess::Enabled)
+            .await
+            .expect("releasing the local claim is not an error");
+
+        assert!(
+            !user.local_disabled,
+            "the local claim is the admin's to release"
+        );
+        assert_eq!(
+            user.status, "disabled",
+            "but the account is not back, and the response must not imply it is"
+        );
+        assert_eq!(user.disabled_by(), vec!["directory"]);
+        assert!(
+            !user.can_be_enabled_locally(),
+            "so the dashboard must not offer an enable that cannot work"
+        );
+    })
+    .await;
+}
+
+/// Each authority that holds the account is named, in reading order.
+#[tokio::test]
+async fn every_authority_holding_the_account_is_named() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        sqlx::query(
+            "UPDATE users SET local_disabled = TRUE, directory_disabled = TRUE, \
+             scim_disabled = TRUE, status = 'disabled' WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("all three hold it");
+
+        let user = signet::models::user_by_id(&state.pool, id)
+            .await
+            .expect("read the user");
+        assert_eq!(
+            user.disabled_by(),
+            vec!["local", "directory", "scim"],
+            "one reason would have to pick a winner and hide the other two"
+        );
+        assert!(!user.can_be_enabled_locally(), "three claims, none local");
+    })
+    .await;
+}
+
+/// An active account reports no reason and nothing to enable.
+#[tokio::test]
+async fn an_active_account_reports_no_reason() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let id = common::create_user(&state.pool, "").await;
+
+    common::with_user(state, id, |state, id| async move {
+        let user = signet::models::user_by_id(&state.pool, id)
+            .await
+            .expect("read the user");
+        assert!(user.disabled_by().is_empty());
+        assert!(
+            !user.can_be_enabled_locally(),
+            "there is nothing to enable, so the button has no meaning either"
+        );
+    })
+    .await;
+}
+
 /// The local intent itself, asserted without a database.
 ///
 /// `UserAccess` carries one thing now — the admin's own intent. The name is the

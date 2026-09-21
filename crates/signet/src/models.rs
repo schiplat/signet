@@ -344,17 +344,62 @@ pub struct PublicUser {
     pub phone: Option<String>,
     /// First-create source (`sso_jit`, …). `None` for local/admin/SCIM/legacy.
     pub provisioned_via: Option<String>,
-    /// True when a directory source owns this user's directory-managed
-    /// attributes, i.e. the values cannot be edited locally.
+    /// The local admin's disable intent. One of the three authorities that can
+    /// hold an account down; see [`PublicUser::disabled_by`].
     pub local_disabled: bool,
+    /// Every authority currently holding this account down, as `local`,
+    /// `directory` or `scim`. Empty when the account is active.
+    ///
+    /// A list rather than one reason, because there is often not one reason: two
+    /// authorities can hold the same account at once, and the admin's Unfreeze
+    /// releases only the local one. A single field would have to pick a winner
+    /// and would then hide the claim that is still holding.
+    pub disabled_by: Vec<&'static str>,
+    /// Whether a local Unfreeze would take effect.
+    ///
+    /// Computed here because the rule is a policy, not a rendering choice: an
+    /// enable that an upstream claim overrides returns `200` and changes nothing
+    /// an operator can see, so the dashboard has to know before offering the
+    /// button. Server-side so the two cannot drift apart.
+    pub can_enable: bool,
     /// Groups sourced from the directory (read-only locally).
     pub directory_groups: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
+impl User {
+    /// The authorities holding this account down, in the order an operator reads
+    /// them: the local admin first, then the upstreams.
+    pub fn disabled_by(&self) -> Vec<&'static str> {
+        let mut by = Vec::new();
+        if self.local_disabled {
+            by.push("local");
+        }
+        if self.directory_disabled {
+            by.push("directory");
+        }
+        if self.scim_disabled {
+            by.push("scim");
+        }
+        by
+    }
+
+    /// Whether releasing the local claim would actually bring the account back.
+    ///
+    /// An upstream claim outranks it ([migration `026`]), and only the upstream
+    /// can release its own — so a disabled account with a live upstream claim is
+    /// not the admin's to enable.
+    pub fn can_be_enabled_locally(&self) -> bool {
+        self.local_disabled && !self.directory_disabled && !self.scim_disabled
+    }
+}
+
 impl From<User> for PublicUser {
     fn from(u: User) -> Self {
         let is_admin = u.role == "admin";
+        // Derived before the fields are moved out of `u`.
+        let disabled_by = u.disabled_by();
+        let can_enable = u.can_be_enabled_locally();
         Self {
             id: u.id,
             sub: u.sub,
@@ -370,6 +415,8 @@ impl From<User> for PublicUser {
             groups: u.groups,
             phone: u.phone,
             provisioned_via: u.provisioned_via,
+            disabled_by,
+            can_enable,
             local_disabled: u.local_disabled,
             directory_groups: u.directory_groups,
             created_at: u.created_at,

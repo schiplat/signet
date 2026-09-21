@@ -358,6 +358,34 @@ async function onSaveEdit() {
   }
 }
 
+/**
+ * How an authority that froze an account is shown.
+ *
+ * The label answers "who did this to my user", which is the first question at
+ * the list level; the title adds what it would take to release it, which is the
+ * second. `directory` is deliberately generic — which source it is belongs on
+ * the directory page, and a per-row lookup would be a query per user.
+ */
+function heldBy(u: PublicUser, by: PublicUser["disabled_by"][number]) {
+  switch (by) {
+    case "local":
+      return { label: "admin", title: "Frozen by an administrator — Unfreeze clears this" };
+    case "directory":
+      return {
+        label: "directory",
+        title:
+          "Disabled by directory sync because the account was missing upstream. " +
+          "It comes back when the source lists it again" +
+          (u.local_disabled ? ", and after the local freeze is cleared" : ""),
+      };
+    default:
+      return {
+        label: "scim",
+        title: "Disabled by the SCIM client. Only that client can re-activate it",
+      };
+  }
+}
+
 async function onDisable(u: PublicUser) {
   error.value = "";
   try {
@@ -627,15 +655,24 @@ async function onBatchDisable() {
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
                   <td class="px-5 py-3 text-xs">
-                    <span
-                      :class="
-                        u.status === 'disabled'
-                          ? 'inline-flex items-center rounded-md bg-destructive/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-destructive'
-                          : 'text-foreground'
-                      "
-                    >
-                      {{ u.status === "disabled" ? "frozen" : u.status }}
-                    </span>
+                    <div v-if="u.status === 'disabled'" class="flex flex-wrap items-center gap-1">
+                      <span
+                        v-for="by in u.disabled_by"
+                        :key="by"
+                        class="inline-flex items-center rounded-md bg-destructive/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-destructive"
+                        :title="heldBy(u, by).title"
+                      >
+                        {{ heldBy(u, by).label }}
+                      </span>
+                      <span
+                        v-if="!u.can_enable"
+                        class="text-[10px] text-muted-foreground"
+                        title="Only the authority that froze the account can release it"
+                      >
+                        upstream
+                      </span>
+                    </div>
+                    <span v-else class="text-foreground">{{ u.status }}</span>
                   </td>
                   <td class="space-x-1 whitespace-nowrap px-5 py-3 text-right">
                     <UiButton
@@ -654,14 +691,24 @@ async function onBatchDisable() {
                     >
                       Freeze
                     </UiButton>
+                    <!-- An Unfreeze that an upstream would override is not
+                         offered: it returns 200, changes nothing, and the only
+                         thing the operator learns is that the button lies. -->
                     <UiButton
-                      v-if="u.status === 'disabled' && canMutate(u)"
+                      v-if="u.status === 'disabled' && canMutate(u) && u.can_enable"
                       variant="ghost"
                       size="sm"
                       @click="onEnable(u)"
                     >
                       Unfreeze
                     </UiButton>
+                    <span
+                      v-else-if="u.status === 'disabled' && canMutate(u)"
+                      class="text-[11px] text-muted-foreground"
+                      :title="`Disabled by ${u.disabled_by.join(', ')} — releasing the local hold would not bring the account back`"
+                    >
+                      Held upstream
+                    </span>
                     <UiButton
                       v-if="u.status === 'active' && canMutate(u)"
                       variant="ghost"
@@ -849,6 +896,16 @@ async function onBatchDisable() {
                 <option value="active">active</option>
                 <option value="disabled">frozen</option>
               </select>
+              <!-- Saving after an upstream freeze is not a no-op — it clears
+                   the local hold — but it does not un-freeze the account, and
+                   saying so here is the difference between that and a bug. -->
+              <p
+                v-if="editing && !editing.can_enable"
+                class="type-meta mt-1 text-amber-700 dark:text-amber-400"
+              >
+                Held by {{ editing.disabled_by.join(" + ") }}: choosing active clears the
+                local freeze only, and the account stays frozen until that authority lets go.
+              </p>
             </div>
             <label class="flex items-start gap-2 text-sm">
               <input v-model="editMfaRequired" type="checkbox" class="mt-0.5 rounded" />
