@@ -44,18 +44,21 @@ async fn revoke_other_sessions_keeps_exactly_the_named_session() {
     let ids = sessions_for(&state, user_id, 3).await;
     let keep = ids[1];
 
-    let revoked = revoke_other_sessions(&state.pool, user_id, keep)
-        .await
-        .expect("revoke the other sessions");
+    common::with_user(state, user_id, move |state, user_id| async move {
+        let revoked = revoke_other_sessions(&state.pool, user_id, keep)
+            .await
+            .expect("revoke the other sessions");
 
-    assert_eq!(revoked, 2, "three sessions minus the kept one");
-    let remaining = list_sessions(&state.pool, user_id)
-        .await
-        .expect("list the remaining sessions");
-    assert_eq!(remaining.len(), 1, "only the kept session may survive");
-    assert_eq!(remaining[0].id, keep);
-
-    common::delete_user(&state.pool, user_id).await;
+        // Asserted on what survives, not on what was reported: an inverted
+        // filter still returns a plausible count.
+        assert_eq!(revoked, 2, "three sessions minus the kept one");
+        let remaining = list_sessions(&state.pool, user_id)
+            .await
+            .expect("list the remaining sessions");
+        assert_eq!(remaining.len(), 1, "only the kept session may survive");
+        assert_eq!(remaining[0].id, keep);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -66,20 +69,21 @@ async fn revoke_all_sessions_keeps_nothing() {
     let user_id = common::create_user(&state.pool, "").await;
     sessions_for(&state, user_id, 3).await;
 
-    let revoked = revoke_all_sessions(&state.pool, user_id)
-        .await
-        .expect("revoke every session");
+    common::with_user(state, user_id, |state, user_id| async move {
+        let revoked = revoke_all_sessions(&state.pool, user_id)
+            .await
+            .expect("revoke every session");
 
-    assert_eq!(revoked, 3);
-    let remaining = list_sessions(&state.pool, user_id)
-        .await
-        .expect("list the remaining sessions");
-    assert!(
-        remaining.is_empty(),
-        "the no-cookie branch of a sign-out must not leave a session behind"
-    );
-
-    common::delete_user(&state.pool, user_id).await;
+        assert_eq!(revoked, 3);
+        let remaining = list_sessions(&state.pool, user_id)
+            .await
+            .expect("list the remaining sessions");
+        assert!(
+            remaining.is_empty(),
+            "the no-cookie branch of a sign-out must not leave a session behind"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -92,21 +96,27 @@ async fn revoking_sessions_leaves_another_users_sessions_alone() {
     let ids = sessions_for(&state, user_id, 2).await;
     let bystander = sessions_for(&state, bystander_id, 1).await;
 
-    revoke_other_sessions(&state.pool, user_id, ids[0])
-        .await
-        .expect("revoke the other sessions");
-    revoke_all_sessions(&state.pool, user_id)
-        .await
-        .expect("revoke every session");
+    common::with_users(
+        state,
+        vec![user_id, bystander_id],
+        move |state, users| async move {
+            let (user_id, bystander_id) = (users[0], users[1]);
 
-    // The `WHERE user_id = $1` filter is load-bearing: without it a sign-out
-    // would evict every other account on the deployment.
-    let remaining = list_sessions(&state.pool, bystander_id)
-        .await
-        .expect("list the bystander's sessions");
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].id, bystander[0]);
+            revoke_other_sessions(&state.pool, user_id, ids[0])
+                .await
+                .expect("revoke the other sessions");
+            revoke_all_sessions(&state.pool, user_id)
+                .await
+                .expect("revoke every session");
 
-    common::delete_user(&state.pool, user_id).await;
-    common::delete_user(&state.pool, bystander_id).await;
+            // The `WHERE user_id = $1` filter is load-bearing: without it a sign-out
+            // would evict every other account on the deployment.
+            let remaining = list_sessions(&state.pool, bystander_id)
+                .await
+                .expect("list the bystander's sessions");
+            assert_eq!(remaining.len(), 1);
+            assert_eq!(remaining[0].id, bystander[0]);
+        },
+    )
+    .await;
 }

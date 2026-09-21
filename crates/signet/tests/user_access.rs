@@ -24,17 +24,18 @@ async fn a_disable_records_both_the_status_and_the_local_intent() {
     };
     let id = common::create_user(&state.pool, "").await;
 
-    let user = set_user_access(&state, id, UserAccess::Disabled)
-        .await
-        .expect("disable the account");
+    common::with_user(state, id, |state, id| async move {
+        let user = set_user_access(&state, id, UserAccess::Disabled)
+            .await
+            .expect("disable the account");
 
-    assert_eq!(user.status, "disabled");
-    assert!(
-        user.local_disabled,
-        "without the local intent the next sync re-enables the account"
-    );
-
-    common::delete_user(&state.pool, id).await;
+        assert_eq!(user.status, "disabled");
+        assert!(
+            user.local_disabled,
+            "without the local intent the next sync re-enables the account"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -43,21 +44,23 @@ async fn an_enable_clears_both_the_status_and_the_local_intent() {
         return;
     };
     let id = common::create_user(&state.pool, "").await;
-    set_user_access(&state, id, UserAccess::Disabled)
-        .await
-        .expect("disable first");
 
-    let user = set_user_access(&state, id, UserAccess::Enabled)
-        .await
-        .expect("enable the account");
+    common::with_user(state, id, |state, id| async move {
+        set_user_access(&state, id, UserAccess::Disabled)
+            .await
+            .expect("disable first");
 
-    assert_eq!(user.status, "active");
-    assert!(
-        !user.local_disabled,
-        "a stale local intent would let the next sync re-disable the account"
-    );
+        let user = set_user_access(&state, id, UserAccess::Enabled)
+            .await
+            .expect("enable the account");
 
-    common::delete_user(&state.pool, id).await;
+        assert_eq!(user.status, "active");
+        assert!(
+            !user.local_disabled,
+            "a stale local intent would let the next sync re-disable the account"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -67,17 +70,18 @@ async fn the_transitions_are_idempotent() {
     };
     let id = common::create_user(&state.pool, "").await;
 
-    // `admin::batch_disable_users` disables users one at a time and does not
-    // pre-filter already-disabled ones, so a repeat must be harmless.
-    for _ in 0..2 {
-        let user = set_user_access(&state, id, UserAccess::Disabled)
-            .await
-            .expect("disable twice");
-        assert_eq!(user.status, "disabled");
-        assert!(user.local_disabled);
-    }
-
-    common::delete_user(&state.pool, id).await;
+    common::with_user(state, id, |state, id| async move {
+        // `admin::batch_disable_users` disables users one at a time and does not
+        // pre-filter already-disabled ones, so a repeat must be harmless.
+        for _ in 0..2 {
+            let user = set_user_access(&state, id, UserAccess::Disabled)
+                .await
+                .expect("disable twice");
+            assert_eq!(user.status, "disabled");
+            assert!(user.local_disabled);
+        }
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -89,20 +93,22 @@ async fn disabling_revokes_the_accounts_sessions() {
     create_session(&state.pool, id, 24, None, None)
         .await
         .expect("create a session");
-    assert_eq!(list_sessions(&state.pool, id).await.unwrap().len(), 1);
 
-    set_user_access(&state, id, UserAccess::Disabled)
-        .await
-        .expect("disable the account");
+    common::with_user(state, id, |state, id| async move {
+        assert_eq!(list_sessions(&state.pool, id).await.unwrap().len(), 1);
 
-    // `user_from_session_token` already refuses a disabled account, so the
-    // sessions are unusable either way; this pins that the rows are cleared too.
-    assert!(
-        list_sessions(&state.pool, id).await.unwrap().is_empty(),
-        "a disable must not leave session rows behind"
-    );
+        set_user_access(&state, id, UserAccess::Disabled)
+            .await
+            .expect("disable the account");
 
-    common::delete_user(&state.pool, id).await;
+        // `user_from_session_token` already refuses a disabled account, so the
+        // sessions are unusable either way; this pins that the rows are cleared.
+        assert!(
+            list_sessions(&state.pool, id).await.unwrap().is_empty(),
+            "a disable must not leave session rows behind"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -115,15 +121,16 @@ async fn enabling_does_not_revoke_sessions() {
         .await
         .expect("create a session");
 
-    set_user_access(&state, id, UserAccess::Enabled)
-        .await
-        .expect("enable the account");
+    common::with_user(state, id, |state, id| async move {
+        set_user_access(&state, id, UserAccess::Enabled)
+            .await
+            .expect("enable the account");
 
-    // The revocation is tied to disabling, not to the update. An unconditional
-    // revoke would sign an admin out of their own session on any status write.
-    assert_eq!(list_sessions(&state.pool, id).await.unwrap().len(), 1);
-
-    common::delete_user(&state.pool, id).await;
+        // The revocation is tied to disabling, not to the update. An
+        // unconditional revoke would sign an admin out on any status write.
+        assert_eq!(list_sessions(&state.pool, id).await.unwrap().len(), 1);
+    })
+    .await;
 }
 
 #[tokio::test]

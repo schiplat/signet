@@ -27,33 +27,34 @@ async fn a_user_loads_through_the_session_token_query() {
     let Some(state) = common::state().await else {
         return;
     };
-    let pool = &state.pool;
 
-    let (user_id, token) = seeded_user_with_session(pool).await;
+    let (user_id, token) = seeded_user_with_session(&state.pool).await;
 
-    // This is the exact query `current_user` runs on every authenticated
-    // request. It joins `sessions`, so it needs aliased columns.
-    let loaded = user_from_session_token(pool, &token)
-        .await
-        .expect("the session-token query must map into `User`")
-        .expect("a live session must resolve to its user");
-    assert_eq!(
-        loaded.id, user_id,
-        "the join must return the session's user"
-    );
-    assert!(
-        !loaded.local_disabled,
-        "the directory columns must be part of the mapped row"
-    );
-    // A non-default value, so a query that silently omitted the column (and let
-    // `FromRow` fill in a default) would not pass by coincidence.
-    assert_eq!(
-        loaded.directory_groups,
-        vec!["cn=ops".to_string()],
-        "directory_groups must be read from the row, not defaulted"
-    );
-
-    cleanup(pool, user_id).await;
+    common::with_user(state, user_id, move |state, user_id| async move {
+        let pool = &state.pool;
+        // This is the exact query `current_user` runs on every authenticated
+        // request. It joins `sessions`, so it needs aliased columns.
+        let loaded = user_from_session_token(pool, &token)
+            .await
+            .expect("the session-token query must map into `User`")
+            .expect("a live session must resolve to its user");
+        assert_eq!(
+            loaded.id, user_id,
+            "the join must return the session's user"
+        );
+        assert!(
+            !loaded.local_disabled,
+            "the directory columns must be part of the mapped row"
+        );
+        // A non-default value, so a query that silently omitted the column (and
+        // let `FromRow` fill in a default) would not pass by coincidence.
+        assert_eq!(
+            loaded.directory_groups,
+            vec!["cn=ops".to_string()],
+            "directory_groups must be read from the row, not defaulted"
+        );
+    })
+    .await;
 }
 
 /// `models::user_by_id` is the second `User` loader, used by the sync engine.
@@ -62,16 +63,16 @@ async fn a_user_loads_through_the_by_id_query() {
     let Some(state) = common::state().await else {
         return;
     };
-    let pool = &state.pool;
 
-    let (user_id, _) = seeded_user_with_session(pool).await;
+    let (user_id, _) = seeded_user_with_session(&state.pool).await;
 
-    let loaded = signet::models::user_by_id(pool, user_id)
-        .await
-        .expect("the by-id query must map into `User`");
-    assert_eq!(loaded.id, user_id);
-
-    cleanup(pool, user_id).await;
+    common::with_user(state, user_id, |state, user_id| async move {
+        let loaded = signet::models::user_by_id(&state.pool, user_id)
+            .await
+            .expect("the by-id query must map into `User`");
+        assert_eq!(loaded.id, user_id);
+    })
+    .await;
 }
 
 /// The list is the single source of truth for the struct's columns; a column
@@ -162,13 +163,4 @@ async fn seeded_user_with_session(pool: &PgPool) -> (Uuid, String) {
     .expect("insert the contract-test session");
 
     (user_id, token)
-}
-
-/// Sessions cascade from the user, so removing the user is enough.
-async fn cleanup(pool: &PgPool, user_id: Uuid) {
-    sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .expect("delete the contract-test user");
 }

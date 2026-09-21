@@ -58,15 +58,16 @@ async fn an_unlinked_user_authenticates_locally() {
     };
     let user_id = common::create_user(&state.pool, "not-a-real-hash").await;
 
-    let path = resolve(&state, user_id)
-        .await
-        .expect("resolve the login path");
-    assert!(
-        matches!(path, LoginPath::Local),
-        "an unlinked user must fall back to the local password"
-    );
-
-    common::delete_user(&state.pool, user_id).await;
+    common::with_user(state, user_id, |state, user_id| async move {
+        let path = resolve(&state, user_id)
+            .await
+            .expect("resolve the login path");
+        assert!(
+            matches!(path, LoginPath::Local),
+            "an unlinked user must fall back to the local password"
+        );
+    })
+    .await;
 }
 
 /// The linked case: the DN stored by the sync is what gets bound, and the
@@ -80,22 +81,25 @@ async fn a_linked_user_binds_against_the_stored_dn() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    match resolve(&state, user_id)
-        .await
-        .expect("resolve the login path")
-    {
-        LoginPath::Ldap(target) => {
-            assert_eq!(target.source_code, source.code);
-            assert_eq!(
-                target.external_dn, DN,
-                "the bind must use the stored DN, not a fresh search"
-            );
-            assert_eq!(target.config.url, "ldaps://ldap.invalid:636");
+    // `cleanup` deletes users through their links, so wrapping the body is all
+    // the teardown this needs — and it survives a failing assertion.
+    common::scoped(state, source, move |state, source| async move {
+        match resolve(&state, user_id)
+            .await
+            .expect("resolve the login path")
+        {
+            LoginPath::Ldap(target) => {
+                assert_eq!(target.source_code, source.code);
+                assert_eq!(
+                    target.external_dn, DN,
+                    "the bind must use the stored DN, not a fresh search"
+                );
+                assert_eq!(target.config.url, "ldaps://ldap.invalid:636");
+            }
+            LoginPath::Local => panic!("a linked ldap user must not be checked locally"),
         }
-        LoginPath::Local => panic!("a linked ldap user must not be checked locally"),
-    }
-
-    common::cleanup(&state.pool, &source).await;
+    })
+    .await;
 }
 
 /// A source an admin switched off must not keep authenticating people: turning it
@@ -109,16 +113,16 @@ async fn a_disabled_source_does_not_own_the_user() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    let path = resolve(&state, user_id)
-        .await
-        .expect("resolve the login path");
-    assert!(
-        matches!(path, LoginPath::Local),
-        "a disabled source must not drive bind-through"
-    );
-
-    common::delete_user(&state.pool, user_id).await;
-    common::cleanup(&state.pool, &source).await;
+    common::scoped(state, source, move |state, _source| async move {
+        let path = resolve(&state, user_id)
+            .await
+            .expect("resolve the login path");
+        assert!(
+            matches!(path, LoginPath::Local),
+            "a disabled source must not drive bind-through"
+        );
+    })
+    .await;
 }
 
 /// §8.3: a link with no DN cannot be bound, so the user is treated as unmanaged.
@@ -133,12 +137,13 @@ async fn a_link_without_a_stored_dn_falls_back_to_local() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, None).await;
 
-    let path = resolve(&state, user_id)
-        .await
-        .expect("resolve the login path");
-    assert!(matches!(path, LoginPath::Local));
-
-    common::cleanup(&state.pool, &source).await;
+    common::scoped(state, source, move |state, _source| async move {
+        let path = resolve(&state, user_id)
+            .await
+            .expect("resolve the login path");
+        assert!(matches!(path, LoginPath::Local));
+    })
+    .await;
 }
 
 /// An empty DN is as unusable as a missing one, and an empty string would be sent
@@ -152,12 +157,13 @@ async fn a_blank_stored_dn_is_not_bindable() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some("   ")).await;
 
-    let path = resolve(&state, user_id)
-        .await
-        .expect("resolve the login path");
-    assert!(matches!(path, LoginPath::Local));
-
-    common::cleanup(&state.pool, &source).await;
+    common::scoped(state, source, move |state, _source| async move {
+        let path = resolve(&state, user_id)
+            .await
+            .expect("resolve the login path");
+        assert!(matches!(path, LoginPath::Local));
+    })
+    .await;
 }
 
 /// `priority` decides which directory verifies the password, matching the
@@ -180,20 +186,21 @@ async fn the_highest_priority_enabled_source_verifies_the_password() {
     )
     .await;
     common::link_entry(&state.pool, high.id, "e-high", user_id, Some(DN)).await;
+    let high_code = high.code.clone();
 
-    match resolve(&state, user_id)
-        .await
-        .expect("resolve the login path")
-    {
-        LoginPath::Ldap(target) => {
-            assert_eq!(target.source_code, high.code);
-            assert_eq!(target.external_dn, DN);
+    common::run_scoped(state, vec![high, low], move |state, _sources| async move {
+        match resolve(&state, user_id)
+            .await
+            .expect("resolve the login path")
+        {
+            LoginPath::Ldap(target) => {
+                assert_eq!(target.source_code, high_code);
+                assert_eq!(target.external_dn, DN);
+            }
+            LoginPath::Local => panic!("expected the higher-priority source to own the user"),
         }
-        LoginPath::Local => panic!("expected the higher-priority source to own the user"),
-    }
-
-    common::cleanup(&state.pool, &high).await;
-    common::cleanup(&state.pool, &low).await;
+    })
+    .await;
 }
 
 /// Only LDAP sources can verify a password by binding. A SCIM/HTTP source links
@@ -208,15 +215,16 @@ async fn a_non_ldap_source_does_not_drive_bind_through() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    let path = resolve(&state, user_id)
-        .await
-        .expect("resolve the login path");
-    assert!(
-        matches!(path, LoginPath::Local),
-        "a scim source must not be asked to verify a password"
-    );
-
-    common::cleanup(&state.pool, &source).await;
+    common::scoped(state, source, move |state, _source| async move {
+        let path = resolve(&state, user_id)
+            .await
+            .expect("resolve the login path");
+        assert!(
+            matches!(path, LoginPath::Local),
+            "a scim source must not be asked to verify a password"
+        );
+    })
+    .await;
 }
 
 /// A source whose stored config cannot be parsed is a broken installation, and
@@ -240,15 +248,13 @@ async fn an_unparseable_source_config_surfaces_an_error() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    assert!(
-        resolve(&state, user_id).await.is_err(),
-        "a broken source config must not silently degrade to the local path"
-    );
-
-    // The user and source are removed with the link still in place, so clean up
-    // the user through the link first.
-    common::cleanup(&state.pool, &source).await;
-    common::delete_user(&state.pool, user_id).await;
+    common::scoped(state, source, move |state, _source| async move {
+        assert!(
+            resolve(&state, user_id).await.is_err(),
+            "a broken source config must not silently degrade to the local path"
+        );
+    })
+    .await;
 }
 
 /// §8.4: a rejection the directory made must not be charged to the local lockout
@@ -301,21 +307,31 @@ async fn removing_the_source_returns_the_user_to_the_local_path() {
         LoginPath::Ldap(_)
     ));
 
-    sqlx::query("DELETE FROM directory_sources WHERE id = $1")
-        .bind(source.id)
-        .execute(&state.pool)
-        .await
-        .expect("delete the source");
+    // The body deletes the source, which cascades the link away. `cleanup`
+    // resolves users through those links, so it could no longer see this one —
+    // hence `run_isolated`, which also deletes the user by id.
+    let cleanup_source = source.clone();
+    common::run_isolated(
+        state,
+        vec![cleanup_source],
+        vec![user_id],
+        move |state| async move {
+            sqlx::query("DELETE FROM directory_sources WHERE id = $1")
+                .bind(source.id)
+                .execute(&state.pool)
+                .await
+                .expect("delete the source");
 
-    assert!(
-        matches!(
-            resolve(&state, user_id).await.expect("resolve"),
-            LoginPath::Local
-        ),
-        "a cascaded link must not leave the user routed to a missing directory"
-    );
-
-    common::delete_user(&state.pool, user_id).await;
+            assert!(
+                matches!(
+                    resolve(&state, user_id).await.expect("resolve"),
+                    LoginPath::Local
+                ),
+                "a cascaded link must not leave the user routed to a missing directory"
+            );
+        },
+    )
+    .await;
 }
 
 /// Keeps the `.invalid`-based outage test honest: if the reserved TLD ever
@@ -340,29 +356,31 @@ async fn a_local_password_cannot_be_set_for_a_managed_user() {
     let source = common::create_source(&state.pool).await;
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
+    let source_code = source.code.clone();
 
-    let err = signet::auth::password::set_user_password(
-        &state.pool,
-        user_id,
-        "CorrectHorse1",
-        state.config.password_min_length,
-        state.config.password_history_size,
-    )
-    .await
-    .expect_err("setting a local password for a managed user must be refused");
-    assert!(
-        err.to_string().contains(&source.code),
-        "the refusal must name the directory that owns the password, got: {err}"
-    );
-
-    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(&state.pool)
+    common::scoped(state, source, move |state, _source| async move {
+        let err = signet::auth::password::set_user_password(
+            &state.pool,
+            user_id,
+            "CorrectHorse1",
+            state.config.password_min_length,
+            state.config.password_history_size,
+        )
         .await
-        .unwrap();
-    assert_eq!(hash, "", "the stored hash must be untouched");
+        .expect_err("setting a local password for a managed user must be refused");
+        assert!(
+            err.to_string().contains(&source_code),
+            "the refusal must name the directory that owns the password, got: {err}"
+        );
 
-    common::cleanup(&state.pool, &source).await;
+        let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(hash, "", "the stored hash must be untouched");
+    })
+    .await;
 }
 
 /// The safety valve: once the source is switched off it no longer verifies
@@ -377,22 +395,22 @@ async fn a_disabled_source_releases_the_account_to_local_administration() {
     let user_id = common::create_user(&state.pool, "").await;
     common::link_entry(&state.pool, source.id, "e-1", user_id, Some(DN)).await;
 
-    sqlx::query("UPDATE directory_sources SET enabled = FALSE WHERE id = $1")
-        .bind(source.id)
-        .execute(&state.pool)
+    common::scoped(state, source, move |state, source| async move {
+        sqlx::query("UPDATE directory_sources SET enabled = FALSE WHERE id = $1")
+            .bind(source.id)
+            .execute(&state.pool)
+            .await
+            .expect("disable the source");
+
+        signet::auth::password::set_user_password(
+            &state.pool,
+            user_id,
+            "CorrectHorse1",
+            state.config.password_min_length,
+            state.config.password_history_size,
+        )
         .await
-        .expect("disable the source");
-
-    signet::auth::password::set_user_password(
-        &state.pool,
-        user_id,
-        "CorrectHorse1",
-        state.config.password_min_length,
-        state.config.password_history_size,
-    )
-    .await
-    .expect("a disabled source must not block local administration");
-
-    common::delete_user(&state.pool, user_id).await;
-    common::cleanup(&state.pool, &source).await;
+        .expect("a disabled source must not block local administration");
+    })
+    .await;
 }

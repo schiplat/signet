@@ -20,8 +20,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Flips `status` directly. The loaders are what is under test, so the fixture
-/// must not go through admin's `set_status`, which writes `local_disabled` too
-/// and would make a failure here ambiguous.
+/// must not go through admin's `set_user_access`, which writes `local_disabled`
+/// too and would make a failure here ambiguous.
 async fn set_status(pool: &PgPool, id: Uuid, status: &str) {
     sqlx::query("UPDATE users SET status = $2, updated_at = NOW() WHERE id = $1")
         .bind(id)
@@ -37,15 +37,17 @@ async fn user_by_id_returns_a_disabled_account() {
         return;
     };
     let id = common::create_user(&state.pool, "").await;
-    set_status(&state.pool, id, "disabled").await;
 
-    let user = user_by_id(&state.pool, id)
-        .await
-        .expect("the admin path must still see a disabled account");
+    common::with_user(state, id, |state, id| async move {
+        set_status(&state.pool, id, "disabled").await;
 
-    assert_eq!(user.status, "disabled");
+        let user = user_by_id(&state.pool, id)
+            .await
+            .expect("the admin path must still see a disabled account");
 
-    common::delete_user(&state.pool, id).await;
+        assert_eq!(user.status, "disabled");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -54,18 +56,20 @@ async fn active_user_by_id_refuses_a_disabled_account() {
         return;
     };
     let id = common::create_user(&state.pool, "").await;
-    set_status(&state.pool, id, "disabled").await;
 
-    let err = active_user_by_id(&state.pool, id)
-        .await
-        .expect_err("a disabled account must not be handed to a credential path");
+    common::with_user(state, id, |state, id| async move {
+        set_status(&state.pool, id, "disabled").await;
 
-    assert!(
-        matches!(err, AppError::Unauthorized(_)),
-        "expected 401, got {err:?}"
-    );
+        let err = active_user_by_id(&state.pool, id)
+            .await
+            .expect_err("a disabled account must not be handed to a credential path");
 
-    common::delete_user(&state.pool, id).await;
+        assert!(
+            matches!(err, AppError::Unauthorized(_)),
+            "expected 401, got {err:?}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -75,12 +79,13 @@ async fn active_user_by_id_returns_an_active_account() {
     };
     let id = common::create_user(&state.pool, "").await;
 
-    let user = active_user_by_id(&state.pool, id)
-        .await
-        .expect("an active account must load");
-    assert_eq!(user.id, id);
-
-    common::delete_user(&state.pool, id).await;
+    common::with_user(state, id, |state, id| async move {
+        let user = active_user_by_id(&state.pool, id)
+            .await
+            .expect("an active account must load");
+        assert_eq!(user.id, id);
+    })
+    .await;
 }
 
 #[tokio::test]

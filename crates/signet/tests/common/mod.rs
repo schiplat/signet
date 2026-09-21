@@ -5,9 +5,14 @@
 //! the exact columns the sync writes. A mock would assert that the code calls
 //! the mock, which is the one thing that cannot break.
 //!
-//! Everything here is built so a failed test leaves no rows behind: each test
-//! creates its own uniquely-named directory source and [`cleanup`] removes the
-//! source, its entries, its runs and the users it provisioned.
+//! Cleanup is opt-in and must be panic-safe. A failed test that leaks rows is
+//! worse than one that fails loudly: users carry unique emails, usernames and
+//! phones, so a row left behind can fail a later run in a way that points at the
+//! wrong test. Write the body inside [`scoped`] / [`run_scoped`] when the rows
+//! hang off a directory source, or [`with_user`] / [`with_users`] when the test
+//! creates them directly. Both run the body in a spawned task and clean up
+//! after it settles, so an assertion failure still cleans up; a bare
+//! [`delete_user`] at the end of a test body does not.
 //!
 //! Test code never lives in `src/` — see `.cursor/rules/test-directory.mdc`.
 
@@ -223,6 +228,78 @@ where
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
     let outcome = tokio::spawn(body(state.clone(), sources.clone())).await;
+    for source in &sources {
+        cleanup(&state.pool, source).await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
+
+/// [`run_scoped`] for users a test creates directly rather than through a
+/// source, so nothing cascades them away.
+///
+/// The body runs in a spawned task and the deletes happen after it settles, so
+/// an assertion failure still cleans up. Cleanup written at the end of a test
+/// body is skipped when the body panics — and users carry unique emails,
+/// usernames and phones, so a row leaked by one run can fail a later one.
+/// That is not hypothetical: it happened twice while the user write path was
+/// being converged, once through a fixed phone number left behind.
+///
+/// Prefer [`scoped`] when the users hang off a source; it deletes them through
+/// the link and needs no ids passed in.
+pub async fn with_users<F, Fut>(state: AppState, users: Vec<Uuid>, body: F)
+where
+    F: FnOnce(AppState, Vec<Uuid>) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = tokio::spawn(body(state.clone(), users.clone())).await;
+    for user in &users {
+        delete_user(&state.pool, *user).await;
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
+
+/// [`with_users`] for the single-user case.
+pub async fn with_user<F, Fut>(state: AppState, user: Uuid, body: F)
+where
+    F: FnOnce(AppState, Uuid) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    with_users(state, vec![user], move |state, mut users| async move {
+        body(state, users.remove(0)).await
+    })
+    .await;
+}
+
+/// Runs `body`, then removes the `sources` and the `users`, even if the body
+/// panics.
+///
+/// For tests that need a source *and* a user the source does not own, or that
+/// change the links themselves part-way through. Those are the cases
+/// [`scoped`] cannot cover: it deletes the users it finds hanging off the
+/// source's links, so a body that removes a link — or deletes the source — has
+/// already hidden the user from it by the time cleanup runs.
+///
+/// Pass the source clones to be cleaned up as `sources`; the body receives only
+/// the state, and captures whatever handles it needs.
+pub async fn run_isolated<F, Fut>(
+    state: AppState,
+    sources: Vec<SourceRow>,
+    users: Vec<Uuid>,
+    body: F,
+) where
+    F: FnOnce(AppState) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let outcome = tokio::spawn(body(state.clone())).await;
+    // Users first: `cleanup` resolves them through the links, which the body may
+    // already have changed, so deleting by id is the reliable half.
+    for user in &users {
+        delete_user(&state.pool, *user).await;
+    }
     for source in &sources {
         cleanup(&state.pool, source).await;
     }
