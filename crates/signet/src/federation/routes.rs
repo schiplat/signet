@@ -540,7 +540,60 @@ async fn callback(
 
             // Already signed in (e.g. linking from the profile page): bind to
             // the current session user without requiring an email match.
-            if let Ok(session_user) = crate::auth::session::current_user(&state, &headers).await {
+            let session_user = crate::auth::session::current_user(&state, &headers)
+                .await
+                .ok();
+
+            // Admission, checked here because this is the first point where the
+            // provider's asserted identity is known, and before anything is
+            // created or linked: a refused identity must not leave a JIT account
+            // or a pending link behind.
+            //
+            // Skipped for the already-signed-in link below, which admits nobody —
+            // the person is already in — and which every later sign-in through
+            // this identity goes through this check again.
+            //
+            // Both lists here are read against the *upstream* address, which is
+            // what the provider is asserting. The local account's own address is
+            // checked again at session creation, so a linked account cannot be
+            // admitted through a provider whose identity is out of scope while its
+            // own address is too.
+            if session_user.is_none() {
+                let upstream_email = profile.email.as_deref().filter(|e| !e.trim().is_empty());
+                if !super::provider_allows(&state.pool, &provider_code, upstream_email).await? {
+                    return Ok(sso_fail_redirect(
+                        &state,
+                        jar,
+                        &provider_code,
+                        "domain_not_allowed",
+                        ip,
+                        user_agent,
+                    )
+                    .await);
+                }
+                // A list that is configured and an identity with no readable email
+                // is a refusal: the address cannot be shown to belong, and passing
+                // it would turn the restriction into a no-op for exactly the
+                // provider that cannot be checked.
+                let domains = crate::admission::allowed_domains(
+                    &state.pool,
+                    &state.config.allowed_email_domains,
+                )
+                .await?;
+                if !crate::admission::allows(&domains, upstream_email.unwrap_or("")) {
+                    return Ok(sso_fail_redirect(
+                        &state,
+                        jar,
+                        &provider_code,
+                        "domain_not_allowed",
+                        ip,
+                        user_agent,
+                    )
+                    .await);
+                }
+            }
+
+            if let Some(session_user) = session_user {
                 sqlx::query(
                     "INSERT INTO user_identities \
                          (id, user_id, provider_code, subject, email, raw, last_login_at) \
@@ -689,14 +742,35 @@ async fn finish_sign_in(
     .await
     .map_err(AppError::from)?;
 
-    let token = crate::auth::session::create_session(
-        &state.pool,
-        user.id,
-        state.config.session_ttl_hours,
+    // The last check before the session exists, and the one the other sign-in
+    // paths also go through. Both lists were checked in the callback before
+    // anything was created, so a failure here means an administrator saved a
+    // narrower list while this sign-in was in flight.
+    let token = match crate::auth::session::create_sign_in_session(
+        &state,
+        &user,
+        crate::admission::via::SSO,
         ip.as_deref(),
         user_agent.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(token) => token,
+        Err(AppError::Unauthorized(_)) => {
+            // The browser must not land on a JSON body, so the refusal leaves
+            // through the same door as every other SSO failure.
+            return Ok(sso_fail_redirect(
+                &state,
+                jar,
+                &provider_code,
+                "domain_not_allowed",
+                ip,
+                user_agent,
+            )
+            .await);
+        }
+        Err(e) => return Err(e),
+    };
     let session = crate::auth::session::session_cookie(
         &token,
         state.config.cookie_secure,

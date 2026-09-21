@@ -420,6 +420,10 @@ async fn fetch_and_plan(
     };
 
     let local = model::load_local_state(&state.pool, row.id, &row.code).await?;
+    // Read once per run rather than per entry: it cannot change under a run's
+    // feet in a way that matters, and the plan is a snapshot by construction.
+    let allowed_email_domains =
+        crate::admission::allowed_domains(&state.pool, &state.config.allowed_email_domains).await?;
     Ok(plan::plan(
         &upstream,
         &local,
@@ -434,6 +438,10 @@ async fn fetch_and_plan(
             // the distinct `out_of_scope` reason (a limited run reconciles
             // nothing, so it disables nobody).
             scope: cfg.scope(),
+            // The deployment's admission allowlist: an entry outside it is held
+            // back, never disabled (§7.2.2). `scope` above is the source's own,
+            // narrower question of ownership.
+            allowed_email_domains,
         },
     ))
 }

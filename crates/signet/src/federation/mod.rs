@@ -41,6 +41,44 @@ pub fn callback_path(code: &str) -> String {
     CALLBACK_PATH.replace("{provider}", code)
 }
 
+/// Whether a provider's own domain list admits an identity.
+///
+/// The per-provider half of [`crate::admission`], and the reason it exists as
+/// well as the global list: an administrator may want one IdP restricted to the
+/// corporate tenant without restricting the deployment, where a partner domain
+/// signs in through a different provider.
+///
+/// `email` is the address the *upstream* asserted, not the local account's: the
+/// restriction is on who the provider may admit. A missing or unreadable address
+/// with a list configured is a refusal rather than a pass — the address cannot be
+/// shown to belong, and silently admitting it would turn a restriction into a
+/// no-op for exactly the providers that cannot be checked. Providers without an
+/// email at all (WeChat) are covered by the global list at session creation.
+pub async fn provider_allows(
+    pool: &sqlx::PgPool,
+    provider_code: &str,
+    email: Option<&str>,
+) -> crate::error::AppResult<bool> {
+    let domains: Option<Vec<String>> =
+        sqlx::query_scalar("SELECT allowed_email_domains FROM upstream_providers WHERE code = $1")
+            .bind(provider_code)
+            .fetch_optional(pool)
+            .await?;
+    // No row: the provider was deleted between the callback and here. Let the
+    // caller carry on — the next query fails on the same missing row, and this
+    // function is not where that is best reported.
+    let Some(domains) = domains else {
+        return Ok(true);
+    };
+    if domains.is_empty() {
+        return Ok(true);
+    }
+    let Some(email) = email else {
+        return Ok(false);
+    };
+    Ok(crate::admission::allows(&domains, email))
+}
+
 /// The absolute callback URL for `code`, as handed to the provider and shown
 /// to admins.
 ///

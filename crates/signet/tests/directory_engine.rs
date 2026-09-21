@@ -64,6 +64,7 @@ async fn sync(
         upstream,
         &local,
         PlanOptions {
+            allowed_email_domains: Vec::new(),
             sync_groups: source.sync_groups,
             reconcile: true,
             scope: ScopeFilter::default(),
@@ -353,6 +354,7 @@ async fn a_limited_run_does_not_disable_the_entries_it_did_not_fetch() {
             &upstream[..1],
             &local,
             PlanOptions {
+                allowed_email_domains: Vec::new(),
                 sync_groups: true,
                 reconcile: false,
                 scope: ScopeFilter::default(),
@@ -669,6 +671,7 @@ async fn a_dry_run_writes_nothing() {
             &[person(&source, "e-1", "One", &[])],
             &local,
             PlanOptions {
+                allowed_email_domains: Vec::new(),
                 sync_groups: true,
                 reconcile: true,
                 scope: ScopeFilter::default(),

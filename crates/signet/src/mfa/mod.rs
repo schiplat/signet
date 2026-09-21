@@ -3,7 +3,7 @@ mod totp_util;
 use crate::audit::{record, AuditEvent};
 use crate::auth::password::set_user_password;
 use crate::auth::session::{
-    cookie_value, create_session, current_user, revoke_all_sessions, session_cookie,
+    cookie_value, create_sign_in_session, current_user, revoke_all_sessions, session_cookie,
 };
 use crate::error::{AppError, AppResult};
 use crate::models::{user_by_id, PublicUser, User};
@@ -224,10 +224,13 @@ async fn issue_session(
     user_agent: Option<String>,
     client_id: Option<String>,
 ) -> AppResult<impl IntoResponse> {
-    let token = create_session(
-        &state.pool,
-        user.id,
-        state.config.session_ttl_hours,
+    // The allowlist is applied here rather than where the password was checked,
+    // because MFA and forced enrollment are continuations of the same sign-in and
+    // this is the point at which it is admitted.
+    let token = create_sign_in_session(
+        state,
+        &user,
+        crate::admission::via::PASSWORD,
         ip.as_deref(),
         user_agent.as_deref(),
     )
@@ -379,10 +382,10 @@ pub async fn begin_login_mfa_flow(
         ));
     }
 
-    let token = create_session(
-        &state.pool,
-        user.id,
-        state.config.session_ttl_hours,
+    let token = create_sign_in_session(
+        state,
+        &user,
+        crate::admission::via::PASSWORD,
         ip.as_deref(),
         user_agent.as_deref(),
     )
@@ -706,10 +709,10 @@ async fn enroll_confirm_challenge(
     )
     .await;
 
-    let token = create_session(
-        &state.pool,
-        user.id,
-        state.config.session_ttl_hours,
+    let token = create_sign_in_session(
+        &state,
+        &user,
+        crate::admission::via::PASSWORD,
         ip.as_deref(),
         crate::http::extract::user_agent(&headers).as_deref(),
     )

@@ -315,6 +315,12 @@ pub struct ScopeFilter {
 /// Reason recorded when an entry was present upstream but outside the source's
 /// scope, as opposed to genuinely missing.
 pub const REASON_OUT_OF_SCOPE: &str = "out_of_scope";
+/// Reason recorded when an entry is present upstream and inside the source's
+/// scope, but its domain is not admitted by the sign-in allowlist.
+///
+/// Distinct from [`REASON_OUT_OF_SCOPE`] on purpose: both hold an entry back, but
+/// only that one means the account was disabled.
+pub const REASON_EMAIL_DOMAIN_NOT_ALLOWED: &str = "email_domain_not_allowed";
 /// Reason recorded when the directory no longer lists an entry at all.
 pub const REASON_ABSENT_UPSTREAM: &str = "absent_upstream";
 
@@ -335,6 +341,14 @@ impl ScopeFilter {
     /// not "unknown": the entry cannot be shown to belong to an allowed domain,
     /// and treating an unparseable address as belonging would quietly admit
     /// entries the admin meant to exclude.
+    ///
+    /// The comparison itself lives in [`crate::admission::domain_matches`], which
+    /// is also what decides sign-in admission: one place where a domain is
+    /// compared, so the scope and the allowlist can never disagree about whether
+    /// `evilcorp.example` belongs to `corp.example` (it does not, in either).
+    /// Note what is *not* shared: this accepts an address with an empty local
+    /// part, because it only reads the domain and leaves "is this a usable
+    /// address" to the email row.
     fn allows_email(&self, email: &str) -> bool {
         if self.email_domains.is_empty() {
             return true;
@@ -345,7 +359,7 @@ impl ScopeFilter {
         };
         self.email_domains
             .iter()
-            .any(|allowed| domain_matches(domain, allowed))
+            .any(|allowed| crate::admission::domain_matches(domain, allowed))
     }
 
     fn allows_department(&self, department: Option<&str>) -> bool {
@@ -377,20 +391,6 @@ impl ScopeFilter {
     }
 }
 
-/// Whether `domain` is `allowed` or a subdomain of it.
-///
-/// A plain suffix test would accept `evilcorp.example` for `corp.example`, which
-/// is the mistake that turns a domain filter into a security hole. Comparing on
-/// label boundaries means a subdomain has to be a real one: `mail.corp.example`
-/// passes, `notcorp.example` does not.
-fn domain_matches(domain: &str, allowed: &str) -> bool {
-    let allowed = allowed.trim().trim_start_matches('.').to_lowercase();
-    if allowed.is_empty() {
-        return false;
-    }
-    domain == allowed || domain.ends_with(&format!(".{allowed}"))
-}
-
 /// Knobs that change what a run is allowed to own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanOptions {
@@ -407,6 +407,20 @@ pub struct PlanOptions {
     /// Empty by default, and an empty filter constrains nothing — a source saved
     /// before scoping existed keeps owning exactly what it owned.
     pub scope: ScopeFilter,
+    /// [`crate::admission`]'s sign-in and provisioning allowlist.
+    ///
+    /// A *different* list from `scope`, and the difference is what the planner
+    /// does with a failure. The scope is ownership: an entry outside it is not
+    /// this source's, and a linked user who leaves is disabled, because the
+    /// source is saying it no longer has them. This one is admission: the
+    /// directory may still be returning them, and the fact that they may not sign
+    /// in is a policy about who is let in — not a statement that they left. So an
+    /// entry outside it is a skip, marked as still present, and nobody is
+    /// disabled.
+    ///
+    /// Empty constrains nothing, which is what every deployment that never
+    /// configures the allowlist keeps.
+    pub allowed_email_domains: Vec<String>,
 }
 
 /// Builds the plan for one full reconciliation pass.
@@ -497,6 +511,28 @@ pub fn plan(upstream: &[UpstreamUser], local: &LocalState, opts: PlanOptions) ->
                 fields: None,
                 groups: None,
                 reason: "the source returned this external id twice".into(),
+            });
+            continue;
+        }
+
+        // ── Not admitted by the sign-in allowlist ───────────────────────
+        // Placed after the duplicate check for a reason that is easy to lose:
+        // that check has already claimed this external id in `seen_external`, so
+        // an entry the allowlist declines is still *seen* and the reconciliation
+        // pass below cannot read its absence from `seen_external` and disable an
+        // account the directory has done nothing to take away. Moving this block
+        // above that check would turn a policy refusal into an offboarding.
+        if !crate::admission::allows(&opts.allowed_email_domains, &fields.email) {
+            changes.push(Change {
+                outcome: Outcome::Skip,
+                external_id: user.external_id.clone(),
+                external_dn: user.external_dn.clone(),
+                user_id: links_by_external
+                    .get(user.external_id.as_str())
+                    .map(|l| l.user_id),
+                fields: None,
+                groups: None,
+                reason: REASON_EMAIL_DOMAIN_NOT_ALLOWED.into(),
             });
             continue;
         }

@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod admission;
 pub mod audit;
 pub mod auth;
 pub mod authority;
@@ -56,6 +57,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(auth::password_reset::router())
         .merge(webhooks::router())
         .merge(directory::api::router())
+        .merge(admission::router())
         .merge(setup::router());
 
     let api = Router::new()
@@ -93,6 +95,11 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     if let Err(e) = audit::prune_audit_logs(&pool, cfg.audit_retention_days).await {
         tracing::warn!(error = %e, "failed to prune old audit logs");
     }
+
+    // An allowlist that excludes every admin cannot be fixed from inside the
+    // product — the dashboard needs a sign-in it refuses — so say so at startup,
+    // where the operator can still reach the environment.
+    admission::warn_if_all_admins_excluded(&pool, &cfg.allowed_email_domains).await;
 
     let keys = crypto::keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
     let encryption_key = crypto::encryption::load_or_generate_key(&cfg.encryption_key_path)?;

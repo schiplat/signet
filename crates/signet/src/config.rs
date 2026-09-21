@@ -37,6 +37,10 @@ pub struct Config {
     /// Dashboard Settings toggle (persisted in DB). When true, SSO with a
     /// verified email that matches no local user creates a `member` (JIT).
     pub sso_jit_provision: bool,
+    /// Default for the sign-in and provisioning allowlist, used when
+    /// `app_settings.auth.allowed_email_domains` is absent. Empty means no
+    /// restriction; see [`crate::admission`].
+    pub allowed_email_domains: Vec<String>,
 }
 
 impl Config {
@@ -138,6 +142,20 @@ impl Config {
             sso_jit_provision: env::var("SIGNET_SSO_JIT_PROVISION")
                 .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no"))
                 .unwrap_or(true),
+            allowed_email_domains: match env::var("SIGNET_ALLOWED_EMAIL_DOMAINS") {
+                Err(_) => Vec::new(),
+                // Comma or whitespace separated, since an address list is as
+                // likely to arrive wrapped as it is on one line.
+                Ok(raw) => {
+                    let entries: Vec<String> = raw
+                        .split(|c: char| c == ',' || c.is_whitespace())
+                        .map(str::to_string)
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    crate::admission::validate_domains(&entries, "SIGNET_ALLOWED_EMAIL_DOMAINS")
+                        .map_err(|e| anyhow::anyhow!(e))?
+                }
+            },
         })
     }
 }

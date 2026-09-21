@@ -128,6 +128,9 @@ struct AdminProvider {
     client_id: String,
     issuer_url: Option<String>,
     scopes: Option<String>,
+    /// Per-provider admission list; `[]` means the provider adds no restriction
+    /// of its own (the global list still applies).
+    allowed_email_domains: Vec<String>,
     enabled: bool,
     /// Count of user bindings, for the admin list view.
     bindings: i64,
@@ -153,7 +156,7 @@ async fn admin_list(
     let mut providers: Vec<AdminProvider> = sqlx::query_as(
         r#"
         SELECT p.code, p.provider_type, p.display_name, p.client_id, p.issuer_url,
-               p.scopes, p.enabled,
+               p.scopes, p.allowed_email_domains, p.enabled,
                (SELECT COUNT(*) FROM user_identities ui WHERE ui.provider_code = p.code) AS bindings,
                p.created_at, p.updated_at
         FROM upstream_providers p
@@ -181,11 +184,27 @@ struct ProviderBody {
     issuer_url: Option<String>,
     #[serde(default)]
     scopes: Option<String>,
+    /// Domains this provider may admit, on top of the global allowlist. Absent
+    /// or empty clears the provider-level restriction, which is what every
+    /// provider had before this existed.
+    #[serde(default)]
+    allowed_email_domains: Option<Vec<String>>,
     #[serde(default)]
     enabled: Option<bool>,
 }
 
 const VALID_TYPES: &[&str] = &["github", "google", "feishu", "wechat", "oidc"];
+
+/// The provider's domain list, checked and normalized.
+///
+/// The same checks the global list applies, under a name that says which field
+/// is wrong — an administrator who mistypes `@corp.example` here has to be told
+/// this is about a domain, not that "email_domains" is malformed.
+fn provider_domains(body: &ProviderBody) -> AppResult<Vec<String>> {
+    let domains = body.allowed_email_domains.clone().unwrap_or_default();
+    crate::admission::validate_domains(&domains, "allowed_email_domains")
+        .map_err(AppError::bad_request)
+}
 
 fn validate_body(body: &ProviderBody, allow_private: bool) -> AppResult<()> {
     let code_ok = !body.code.is_empty()
@@ -228,6 +247,7 @@ async fn admin_create(
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
     validate_body(&body, state.config.outbound_allow_private)?;
+    let allowed_email_domains = provider_domains(&body)?;
     let secret = body
         .client_secret
         .as_deref()
@@ -254,8 +274,8 @@ async fn admin_create(
         r#"
         INSERT INTO upstream_providers
             (code, provider_type, display_name, client_id, client_secret_enc,
-             issuer_url, scopes, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             issuer_url, scopes, allowed_email_domains, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(&body.code)
@@ -270,6 +290,7 @@ async fn admin_create(
             .filter(|s| !s.is_empty()),
     )
     .bind(&scopes_value)
+    .bind(&allowed_email_domains)
     .bind(body.enabled.unwrap_or(true))
     .execute(&state.pool)
     .await
@@ -301,6 +322,7 @@ async fn admin_update(
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
     validate_body(&body, state.config.outbound_allow_private)?;
+    let allowed_email_domains = provider_domains(&body)?;
 
     // NOT NULL columns: empty form values become "" / code, never SQL NULL.
     let scopes_value = body
@@ -330,7 +352,7 @@ async fn admin_update(
             UPDATE upstream_providers SET
                 provider_type = $2, display_name = $3, client_id = $4,
                 client_secret_enc = $5, issuer_url = $6, scopes = $7,
-                enabled = $8, updated_at = NOW()
+                allowed_email_domains = $8, enabled = $9, updated_at = NOW()
             WHERE code = $1
             "#,
         )
@@ -346,6 +368,7 @@ async fn admin_update(
                 .filter(|s| !s.is_empty()),
         )
         .bind(&scopes_value)
+        .bind(&allowed_email_domains)
         .bind(body.enabled.unwrap_or(true))
         .execute(&state.pool)
         .await
@@ -354,7 +377,8 @@ async fn admin_update(
             r#"
             UPDATE upstream_providers SET
                 provider_type = $2, display_name = $3, client_id = $4,
-                issuer_url = $5, scopes = $6, enabled = $7, updated_at = NOW()
+                issuer_url = $5, scopes = $6, allowed_email_domains = $7,
+                enabled = $8, updated_at = NOW()
             WHERE code = $1
             "#,
         )
@@ -369,6 +393,7 @@ async fn admin_update(
                 .filter(|s| !s.is_empty()),
         )
         .bind(&scopes_value)
+        .bind(&allowed_email_domains)
         .bind(body.enabled.unwrap_or(true))
         .execute(&state.pool)
         .await
@@ -384,7 +409,10 @@ async fn admin_update(
             action: "admin.sso_provider.update",
             resource_type: "sso_provider",
             resource_id: Some(code.clone()),
-            detail: json!({ "secret_rotated": body.client_secret.is_some() }),
+            detail: json!({
+                "secret_rotated": body.client_secret.is_some(),
+                "allowed_email_domains": allowed_email_domains,
+            }),
             ip: None,
             user_agent: None,
             client_id: None,

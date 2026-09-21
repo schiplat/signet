@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::auth::session::{create_session, current_user, session_cookie};
+use crate::auth::session::{create_sign_in_session, current_user, session_cookie};
 use crate::crypto::util::{b64url_encode, random_token};
 use crate::error::{AppError, AppResult};
 use crate::models::{active_user_by_id, PublicUser};
@@ -389,10 +389,10 @@ async fn login_finish(
     if user.must_change_password {
         return crate::mfa::challenge_password_change(&state, jar, user).await;
     }
-    let token = create_session(
-        &state.pool,
-        user.id,
-        state.config.session_ttl_hours,
+    let token = create_sign_in_session(
+        &state,
+        &user,
+        crate::admission::via::PASSKEY,
         ip.as_deref(),
         crate::http::extract::user_agent(&headers).as_deref(),
     )

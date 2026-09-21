@@ -16,6 +16,7 @@ const SOURCE: &str = "corp-ldap";
 
 fn opts() -> PlanOptions {
     PlanOptions {
+        allowed_email_domains: Vec::new(),
         sync_groups: true,
         reconcile: true,
         scope: ScopeFilter::default(),
@@ -313,6 +314,7 @@ fn limited_runs_do_not_disable_anything() {
         &[entry],
         &local,
         PlanOptions {
+            allowed_email_domains: Vec::new(),
             sync_groups: true,
             reconcile: false,
             scope: ScopeFilter::default(),
@@ -462,6 +464,7 @@ fn opting_out_of_group_sync_leaves_groups_alone() {
             ..Default::default()
         },
         PlanOptions {
+            allowed_email_domains: Vec::new(),
             sync_groups: false,
             reconcile: true,
             scope: ScopeFilter::default(),

@@ -19,7 +19,8 @@
 use serde_json::json;
 use signet::directory::plan::{
     plan, Change, LinkSnapshot, LocalState, Outcome, PlanOptions, ScopeFilter, SyncPlan,
-    UpstreamUser, UserIndexEntry, UserSnapshot, REASON_ABSENT_UPSTREAM, REASON_OUT_OF_SCOPE,
+    UpstreamUser, UserIndexEntry, UserSnapshot, REASON_ABSENT_UPSTREAM,
+    REASON_EMAIL_DOMAIN_NOT_ALLOWED, REASON_OUT_OF_SCOPE,
 };
 use signet::directory::source::{HttpJsonConfig, LdapConfig, SourceConfig};
 use std::collections::HashMap;
@@ -192,6 +193,7 @@ fn the_scope_describes_itself_for_operator_messages() {
 
 fn opts_with(scope: ScopeFilter) -> PlanOptions {
     PlanOptions {
+        allowed_email_domains: Vec::new(),
         sync_groups: true,
         reconcile: true,
         scope,
@@ -412,6 +414,7 @@ fn a_limited_run_disables_nobody_when_the_scope_moves() {
         &upstream,
         &local,
         PlanOptions {
+            allowed_email_domains: Vec::new(),
             sync_groups: true,
             reconcile: false,
             scope: scope(&[], &["Engineering"]),
@@ -459,6 +462,93 @@ fn an_entry_with_no_email_keeps_its_own_reason_over_the_scope_one() {
         "reason was `{}`",
         planned.reason
     );
+}
+
+// ─── The admission rule: a skip that is not a departure ───────────────────
+
+/// Options with the global sign-in allowlist set, on top of a source scope.
+fn opts_admitting(scope: ScopeFilter, domains: &[&str]) -> PlanOptions {
+    PlanOptions {
+        allowed_email_domains: domains.iter().map(|s| s.to_string()).collect(),
+        ..opts_with(scope)
+    }
+}
+
+#[test]
+fn an_entry_outside_the_global_allowlist_is_never_created() {
+    // Admission is a second, independent gate: passing the source's scope is not
+    // enough to be provisioned.
+    let upstream = vec![
+        user("in", "in@corp.example", None),
+        user("out", "out@other.example", None),
+    ];
+    let result = plan(
+        &upstream,
+        &empty_local(),
+        opts_admitting(scope(&[], &[]), &["corp.example"]),
+    );
+
+    assert_eq!(change(&result, "in").outcome, Outcome::Create);
+    assert_eq!(change(&result, "out").outcome, Outcome::Skip);
+    assert_eq!(
+        change(&result, "out").reason,
+        REASON_EMAIL_DOMAIN_NOT_ALLOWED
+    );
+    assert_eq!(result.counts().created, 1);
+    assert_eq!(result.counts().disabled, 0);
+}
+
+#[test]
+fn the_global_allowlist_never_disables_an_account() {
+    // The whole point of keeping admission apart from ownership: the directory
+    // is still listing `u-keep`, it is only our policy that holds them back. So
+    // they stay enabled and merely cannot sign in — unlike `u-away`, whom the
+    // directory has genuinely stopped listing.
+    let kept = Uuid::new_v4();
+    let away = Uuid::new_v4();
+    let mut local = linked_local("u-keep", kept, "keep@other.example");
+    let mut other = linked_local("u-away", away, "away@corp.example");
+    local.links.append(&mut other.links);
+    local.linked_users.append(&mut other.linked_users);
+    local.index.append(&mut other.index);
+    local.managing.extend(other.managing);
+
+    let upstream = vec![user("u-keep", "keep@other.example", None)];
+    let result = plan(
+        &upstream,
+        &local,
+        opts_admitting(scope(&[], &[]), &["corp.example"]),
+    );
+
+    assert_eq!(change(&result, "u-keep").outcome, Outcome::Skip);
+    assert_eq!(
+        change(&result, "u-keep").reason,
+        REASON_EMAIL_DOMAIN_NOT_ALLOWED
+    );
+    assert!(
+        disable(&result, "u-keep").is_none(),
+        "a domain the allowlist declines must not be read as a departure"
+    );
+
+    let gone = disable(&result, "u-away").expect("an unlisted entry is still a departure");
+    assert_eq!(gone.reason, REASON_ABSENT_UPSTREAM);
+    assert_eq!(result.counts().disabled, 1);
+}
+
+#[test]
+fn an_admitted_entry_is_not_held_back_by_the_allowlist() {
+    // Nor may the check be so eager that an ordinary update stops happening.
+    let id = Uuid::new_v4();
+    let local = linked_local("u-1", id, "one@corp.example");
+    let mut entry = user("u-1", "one@corp.example", None);
+    entry.display_name = Some("New Name".into());
+
+    let result = plan(
+        &[entry],
+        &local,
+        opts_admitting(scope(&[], &[]), &["corp.example"]),
+    );
+    assert_eq!(change(&result, "u-1").outcome, Outcome::Update);
 }
 
 // ─── Config: the scope fields are validated at save time ──────────────────

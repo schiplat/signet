@@ -198,6 +198,14 @@ pub(crate) async fn jit_create_user(
         return Err(AppError::bad_request("jit requires verified email"));
     }
 
+    // A backstop, not the refusal a person sees: the callback checks the
+    // allowlist before anything is created and turns a failure into a redirect
+    // with a reason. This one is here so that a future caller of this function
+    // cannot create an account the allowlist excludes by simply not knowing about
+    // it — the check belongs to the act of creating the account.
+    crate::admission::ensure_provision_allowed(state, &email, crate::admission::via::SSO_JIT, None)
+        .await?;
+
     let id = Uuid::new_v4();
     let sub = id.to_string();
     let display_name = profile

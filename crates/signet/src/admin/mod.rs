@@ -769,6 +769,16 @@ async fn create_user(
     if email.is_empty() || !email.contains('@') {
         return Err(AppError::bad_request("invalid email"));
     }
+    // Before the uniqueness checks: an address outside the allowlist is not a
+    // duplicate problem, and reporting it as one would send the caller looking
+    // for an account that does not exist.
+    crate::admission::ensure_provision_allowed(
+        &state,
+        &email,
+        crate::admission::via::ADMIN,
+        crate::http::extract::user_agent(&headers),
+    )
+    .await?;
     let email_exists: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1 OR username = $1")
             .bind(&email)
@@ -926,6 +936,17 @@ async fn update_user(
     };
 
     if email != target.email {
+        // Moving an account onto a domain the allowlist excludes is the same act
+        // as creating one there, and has to be refused the same way — otherwise
+        // the list could be walked around with one `PUT` on an existing account,
+        // which is the shape of a hole rather than of a policy.
+        crate::admission::ensure_provision_allowed(
+            &state,
+            &email,
+            crate::admission::via::ADMIN,
+            crate::http::extract::user_agent(&headers),
+        )
+        .await?;
         let email_exists: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM users WHERE (email = $1 OR username = $1) AND id <> $2",
         )

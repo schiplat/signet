@@ -279,6 +279,18 @@ async fn create_user(
     }
     let email = primary_email(&body.emails).unwrap_or_else(|| username.clone());
 
+    // An error rather than a silent skip: unlike a sync run, this is a push
+    // someone is waiting on, and a client told "201 Created" while nothing was
+    // created keeps believing the account is provisioned. The divergence would
+    // surface weeks later as a user who cannot sign in.
+    crate::admission::ensure_provision_allowed(
+        &state,
+        &email,
+        crate::admission::via::SCIM,
+        crate::http::extract::user_agent(&headers),
+    )
+    .await?;
+
     // Enforce uniqueness across both identifier namespaces so login stays
     // unambiguous (a username must not equal any email and vice versa).
     let username_exists: i64 =
@@ -419,6 +431,20 @@ async fn put_user(
 ) -> AppResult<Json<Value>> {
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
+
+    // The address this push would write, when it carries one. A `PUT` that does
+    // not mention `emails` is not moving the account anywhere, so it is not this
+    // gate's business — and checking the *stored* address instead would refuse
+    // every unrelated update to an account that predates a narrower list.
+    if let Some(email) = primary_email(&body.emails) {
+        crate::admission::ensure_provision_allowed(
+            &state,
+            &email,
+            crate::admission::via::SCIM,
+            crate::http::extract::user_agent(&headers),
+        )
+        .await?;
+    }
 
     let username = normalize_username(body.user_name.as_deref());
     let email = primary_email(&body.emails);

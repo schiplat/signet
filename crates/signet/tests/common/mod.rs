@@ -412,6 +412,78 @@ where
     .await;
 }
 
+/// In-process serialisation for tests that replace the allowlist, for the same
+/// reason [`SCIM_TOKEN_LOCK`] exists: two of them in one binary would swap it
+/// under each other.
+static ALLOWLIST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Advisory-lock key for the same, across processes. Arbitrary; only has to
+/// differ from the other keys.
+const ALLOWLIST_LOCK_KEY: i64 = 0x5c17_0002;
+
+/// Runs `body` with the sign-in/provisioning allowlist set to `domains`, and puts
+/// the previous value back afterwards.
+///
+/// **Any domain a test user might have must be in `domains`**, which in practice
+/// means always including `login.test` ([`create_user`] mails every user there).
+/// The setting is global and `cargo test` runs binaries in parallel, so a
+/// restrictive list installed by one test is in force for every other test that
+/// happens to be signing in at that moment — and the advisory lock below only
+/// serialises the tests that take it.
+///
+/// The body runs in a spawned task so the restore happens even when an assertion
+/// fails inside it: the row is global, and a test that panicked while holding a
+/// restrictive list would break sign-in for everything that ran after it.
+///
+/// `None` clears the row, which is how "no restriction" and "fall back to the
+/// environment" are both expressed.
+pub async fn with_allowed_domains<F, Fut>(state: AppState, domains: Option<Vec<&str>>, body: F)
+where
+    F: FnOnce(AppState) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let _serialised = ALLOWLIST_LOCK.lock().await;
+
+    with_db_lock(&state, ALLOWLIST_LOCK_KEY, async {
+        let previous: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT value FROM app_settings WHERE key = $1")
+                .bind(signet::admission::SETTING_KEY)
+                .fetch_optional(&state.pool)
+                .await
+                .expect("read the configured allowlist");
+
+        let installed: Option<Vec<String>> =
+            domains.map(|d| d.iter().map(|s| s.to_string()).collect::<Vec<String>>());
+        signet::admission::set_allowed_domains(&state.pool, installed.as_deref())
+            .await
+            .expect("install the test allowlist");
+
+        let outcome = tokio::spawn(body(state.clone())).await;
+
+        match previous {
+            Some(value) => {
+                sqlx::query("UPDATE app_settings SET value = $2 WHERE key = $1")
+                    .bind(signet::admission::SETTING_KEY)
+                    .bind(value)
+                    .execute(&state.pool)
+                    .await
+                    .expect("restore the configured allowlist");
+            }
+            None => {
+                signet::admission::set_allowed_domains(&state.pool, None)
+                    .await
+                    .expect("remove the test allowlist");
+            }
+        }
+
+        // Unwinds out of the lock, which the lock transaction releases.
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic.into_panic());
+        }
+    })
+    .await;
+}
+
 /// The SCIM API router, ready to drive with [`tower::ServiceExt::oneshot`].
 pub fn scim_router(state: &AppState) -> axum::Router {
     signet::scim::router().with_state(state.clone())
@@ -420,6 +492,12 @@ pub fn scim_router(state: &AppState) -> axum::Router {
 /// The directory admin router, ready to drive with [`tower::ServiceExt::oneshot`].
 pub fn directory_router(state: &AppState) -> axum::Router {
     signet::directory::api::router().with_state(state.clone())
+}
+
+/// The sign-in allowlist admin router, ready to drive with
+/// [`tower::ServiceExt::oneshot`].
+pub fn admission_router(state: &AppState) -> axum::Router {
+    signet::admission::router().with_state(state.clone())
 }
 
 /// The admin router, ready to drive with [`tower::ServiceExt::oneshot`].

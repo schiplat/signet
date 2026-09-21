@@ -12,6 +12,42 @@ use uuid::Uuid;
 
 pub const SESSION_COOKIE: &str = "signet_session";
 
+/// Issues a session for a **sign-in**, refusing an address the allowlist excludes.
+///
+/// Every path that admits somebody into the product goes through here: password
+/// (including the MFA and forced-enrollment continuations), passkey, and SSO.
+/// Keeping the check at this choke point rather than at each route is what makes
+/// a new sign-in path safe by default — a route that forgets to call it also
+/// forgets to create a session, which is the bug that shows up immediately.
+///
+/// The check runs *after* the credentials were accepted, and that is deliberate:
+/// an unknown address still fails at the credential step with the generic
+/// "invalid email/username" message, so this cannot be used to find out whether
+/// an account exists.
+///
+/// [`create_session`] itself stays policy-free because one caller must bypass
+/// this: setup, which creates the first admin before any admin exists to widen a
+/// list that would otherwise lock the instance at birth.
+pub async fn create_sign_in_session(
+    state: &AppState,
+    user: &User,
+    via: &str,
+    ip: Option<&str>,
+    user_agent: Option<&str>,
+) -> AppResult<String> {
+    crate::admission::ensure_sign_in_allowed(state, user, via, user_agent.map(str::to_string))
+        .await?;
+
+    create_session(
+        &state.pool,
+        user.id,
+        state.config.session_ttl_hours,
+        ip,
+        user_agent,
+    )
+    .await
+}
+
 pub async fn create_session(
     pool: &PgPool,
     user_id: Uuid,

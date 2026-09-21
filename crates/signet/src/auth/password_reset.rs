@@ -32,6 +32,20 @@ async fn request_reset(
     let email = body.email.trim().to_lowercase();
 
     if let Some(user) = find_user_by_email(&state, &email).await? {
+        // An address outside the sign-in allowlist cannot sign in even with a new
+        // password, so the link would be a dead end dressed up as help. Silent for
+        // the same reason as the directory case below: the endpoint answers 200
+        // for everything, so silence here leaks nothing.
+        let domains =
+            crate::admission::allowed_domains(&state.pool, &state.config.allowed_email_domains)
+                .await?;
+        if !crate::admission::allows(&domains, &user.1) {
+            tracing::info!(
+                "password reset requested for an account outside the email domain allowlist;                  nothing to reset"
+            );
+            return Ok(Json(json!({ "ok": true })));
+        }
+
         // A directory-managed account has no local password to reset (§8.1), so
         // creating a token would send someone a link that cannot work. Staying
         // silent about it preserves the always-200 anti-enumeration behaviour

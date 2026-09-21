@@ -282,23 +282,11 @@ fn validate_scope(
     department_source: Option<&str>,
     department_source_field: &str,
 ) -> Result<(), String> {
-    for domain in email_domains {
-        let domain = domain.trim();
-        if domain.is_empty() {
-            return Err("email_domains must not contain an empty entry".into());
-        }
-        if domain.contains('@') {
-            return Err(format!(
-                "email_domains holds domains, not addresses; got `{domain}`"
-            ));
-        }
-        if domain.contains('*') {
-            return Err(format!(
-                "email_domains has no wildcards — list each domain (subdomains are \
-                 matched automatically); got `{domain}`"
-            ));
-        }
-    }
+    // The same checks the sign-in allowlist applies to its own list, so a domain
+    // is described the same way wherever it is typed. The normalized result is
+    // discarded: the scope stores what the operator wrote and normalizes at
+    // compare time, and changing that would rewrite saved configs.
+    crate::admission::validate_domains(email_domains, "email_domains")?;
     for value in department_values {
         if value.trim().is_empty() {
             return Err("department_values must not contain an empty entry".into());
