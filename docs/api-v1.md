@@ -81,6 +81,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/me/mfa/disable` | 用户自主禁用 MFA（需当前 TOTP，body `{ code }`；全局或用户级强制时返回 400） |
 | `GET/PATCH` | `/api/v1/admin/settings/mfa` | **admin**：全局强制开关 |
 | `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**：SSO JIT 开户开关 `{ "jit_provision": bool }` |
+| `GET/PATCH` | `/api/v1/admin/settings/sign-in` | **admin**：登录白名单（邮箱域名），见 §14 |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
 
 ---
@@ -317,3 +318,37 @@ GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体
 链路追踪：所有响应回显 `x-request-id`（透传请求头或生成 UUID），并写入 tracing span，访问日志按 `request_id` 关联。
 
 旧路径 `/api/...`（无 `v1`）已废弃，不再提供 JSON API。
+
+## 14. 登录白名单（邮箱域名）
+
+限制「谁能进来」：只允许指定邮箱域名下的地址登录、被开通、被同步。配置是**全域名列表**（不是邮箱前缀），匹配按标签边界比较（`corp.example` 匹配 `corp.example` 与 `mail.corp.example`，不匹配 `evilcorp.example`），大小写不敏感，无通配符。空列表 = 不限制。
+
+### 配置与来源
+
+| 来源 | 位置 | 优先级 |
+|------|------|--------|
+| `app_settings.auth.allowed_email_domains` | Dashboard → Settings → **Email domain allowlist**，或 `GET/PATCH /api/v1/admin/settings/sign-in` | 高于环境变量 |
+| `SIGNET_ALLOWED_EMAIL_DOMAINS` | 环境变量（逗号或空白分隔） | 仅在该配置行缺失时作为默认值 |
+
+`GET` 返回 `{ "allowed_email_domains": [...], "origin": "setting" | "environment" | "unrestricted" }`；`PATCH` 的 body 为 `{ "allowed_email_domains": [...] }`。传 `null`（或省略该字段）表示**删除该配置行**、回退到环境变量；传空数组则是显式写入「不限制」（`origin` 仍为 `setting`）—— 两者都放行所有人，但只有前者能被「取消环境变量」撤销。域列表保存前会规范化（去空白、小写、去重）并校验：空条目、含有 `@`（把地址当域名填）、通配符一律 400 拒绝。
+
+服务端拒绝保存「会把当前操作者自己排除在外」的列表（400，提示把自己的域加回去），避免一次配置改动就把所有人锁在门外；如果保存的名单排除了**其他** admin，会在审计 detail 的 `excluded_admins` 里点名，因为被排除的账号没法告诉任何人自己为什么进不来了。环境变量路径没有这个保护，因此在启动时如果名单排除了全部 admin，会打一条 `warn` 日志。
+
+### 语义：拒绝，而不是禁用
+
+名单外的地址**登不进去、开不了户、同步不落地**，但账号本身**不会被禁用**，数据与历史都保留 —— 缩窄名单是「谁可以进来」的声明，不是「谁已经离开」的声明。这是它与目录同步作用域（`docs/directory-sync.md` §7.2.1）的关键区别，后者掉出范围即 disable。
+
+| 位置 | 名单外的行为 |
+|------|--------------|
+| 登录（密码 / MFA / passkey / SSO 回调） | 统一在会话签发处拒绝：Unauthorized；SSO 回调重定向带 `error=domain_not_allowed` |
+| `POST /api/v1/login` | 凭据先行：口令错误与「口令正确但域名不允许」返回**同一句** `invalid email or password`，被策略挡住的账号不会因为多一句解释而变成枚举 oracle |
+| 管理端建号 / 改邮箱 | 400 拒绝 |
+| SCIM `POST`/`PUT` `/scim/v2/Users` | 400 拒绝（IdP 能直接看到原因） |
+| SSO JIT 开户 | 拒绝开户（与上面的登录拒绝同一条路径） |
+| 目录同步 | 该条目 `skip`，`reason = email_domain_not_allowed`；**不计入 disable**，也不视为上游消失（见 `docs/directory-sync.md` §7.2.1） |
+| 密码重置 | 静默：仍返回 `200 {"ok": true}`，但不发信（不泄露账号是否存在） |
+| 首次部署 `/setup` | **不受限制**：否则全新部署连第一个管理员都建不出来 |
+
+每个 SSO provider 还可以配一份自己的 `allowed_email_domains`（§12 管理端 API / Dashboard → Integrations），它只会**进一步收窄**全局名单，不能放宽：provider 名单为空 = 不额外限制。
+
+审计：拒绝登录记 `auth.sign_in_blocked`，拒绝开户记 `user.provision_blocked`（`detail.via` 区分 `password`（含 MFA 挑战）/ `passkey` / `sso` / `sso_jit` / `admin` / `scim`），改配置记 `settings.sign_in_allowlist_update`。
