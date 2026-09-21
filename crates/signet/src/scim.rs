@@ -1,4 +1,4 @@
-use crate::auth::password::{hash_password, record_password_history};
+use crate::auth::password::{hash_password_offloaded, record_password_history};
 use crate::auth::session::revoke_all_sessions;
 use crate::error::{AppError, AppResult};
 use crate::models::{insert_user, normalize_username, NewUser, User};
@@ -10,6 +10,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 const USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
@@ -324,7 +325,7 @@ async fn create_user(
     let password = body
         .password
         .unwrap_or_else(|| crate::crypto::util::random_token(24));
-    let password_hash = hash_password(&password)?;
+    let password_hash = hash_password_offloaded(&password).await?;
 
     let mut new_user = NewUser::new(id, &sub, &email, &display_name, &password_hash);
     // SCIM `active: false` provisions a disabled account. Stated as SCIM's own
@@ -970,15 +971,45 @@ fn group_resource(g: &ScimGroupRow, members: Vec<Value>) -> Value {
 }
 
 async fn group_members(state: &AppState, name: &str) -> AppResult<Vec<Value>> {
-    let rows: Vec<(Uuid, String)> =
-        sqlx::query_as("SELECT id, email FROM users WHERE $1 = ANY(groups) ORDER BY email")
-            .bind(name)
-            .fetch_all(&state.pool)
-            .await?;
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, email FROM users WHERE groups @> ARRAY[$1::text] ORDER BY email",
+    )
+    .bind(name)
+    .fetch_all(&state.pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|(id, email)| json!({ "value": id.to_string(), "display": email }))
         .collect())
+}
+
+/// Every live group's members, keyed by display name — the whole list in one
+/// query.
+///
+/// [`group_members`] is one query per group, which makes listing a directory's
+/// 200 synced groups a 201-query request. The `LEFT JOIN` is what keeps groups
+/// with no members in the result: an inner join would list them (from `rows`
+/// above) and then report every one of them as having no members anyway, which
+/// happens to be right but only because the caller fills in the gaps.
+async fn members_of_all_groups(state: &AppState) -> AppResult<HashMap<String, Vec<Value>>> {
+    let rows: Vec<(String, Option<Uuid>, Option<String>)> = sqlx::query_as(
+        "SELECT g.display_name, u.id, u.email \
+         FROM scim_groups g \
+         LEFT JOIN users u ON u.groups @> ARRAY[g.display_name] \
+         WHERE g.deleted_at IS NULL \
+         ORDER BY g.display_name, u.email",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut members: HashMap<String, Vec<Value>> = HashMap::new();
+    for (name, id, email) in rows {
+        let entry = members.entry(name).or_default();
+        if let (Some(id), Some(email)) = (id, email) {
+            entry.push(json!({ "value": id.to_string(), "display": email }));
+        }
+    }
+    Ok(members)
 }
 
 async fn list_groups(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -990,10 +1021,13 @@ async fn list_groups(State(state): State<AppState>, headers: HeaderMap) -> AppRe
     .fetch_all(&state.pool)
     .await?;
 
+    let mut members = members_of_all_groups(&state).await?;
     let mut resources = Vec::new();
     for g in &rows {
-        let members = group_members(&state, &g.display_name).await?;
-        resources.push(group_resource(g, members));
+        resources.push(group_resource(
+            g,
+            members.remove(&g.display_name).unwrap_or_default(),
+        ));
     }
 
     Ok(Json(json!({
@@ -1264,36 +1298,36 @@ async fn patch_group(
         "cleared": false,
     });
 
+    // All of a PATCH's membership writes go in one transaction. They used to be
+    // autocommit statements, so a failure halfway through a 500-member replace
+    // left the group half-populated — and it is now cheap to make the request
+    // all-or-nothing.
+    let mut tx = state.pool.begin().await?;
     for change in group_member_changes_from_body(body)? {
         match change {
             GroupMemberChange::Add(ids) => {
                 member_change["added"] =
                     json!(member_change["added"].as_u64().unwrap_or(0) + ids.len() as u64);
-                for user_id in ids {
-                    add_group_to_user(&state, user_id, &group.display_name).await?;
-                }
+                add_group_to_users(&mut *tx, &ids, &group.display_name).await?;
             }
             GroupMemberChange::Remove(ids) if ids.is_empty() => {
                 member_change["cleared"] = json!(true);
-                clear_group(&state, &group.display_name).await?;
+                clear_group(&mut *tx, &group.display_name).await?;
             }
             GroupMemberChange::Remove(ids) => {
                 member_change["removed"] =
                     json!(member_change["removed"].as_u64().unwrap_or(0) + ids.len() as u64);
-                for user_id in ids {
-                    remove_group_from_user(&state, user_id, &group.display_name).await?;
-                }
+                remove_group_from_users(&mut *tx, &ids, &group.display_name).await?;
             }
             GroupMemberChange::Replace(ids) => {
                 member_change["replaced"] = json!(true);
                 member_change["added"] = json!(ids.len() as u64);
-                clear_group(&state, &group.display_name).await?;
-                for user_id in ids {
-                    add_group_to_user(&state, user_id, &group.display_name).await?;
-                }
+                clear_group(&mut *tx, &group.display_name).await?;
+                add_group_to_users(&mut *tx, &ids, &group.display_name).await?;
             }
         }
     }
+    tx.commit().await?;
 
     let members = group_members(&state, &group.display_name).await?;
 
@@ -1310,39 +1344,65 @@ async fn patch_group(
     Ok(Json(group_resource(&group, members)))
 }
 
-async fn add_group_to_user(state: &AppState, user_id: Uuid, group_name: &str) -> AppResult<()> {
+/// Adds `group_name` to each of `user_ids` in a single statement.
+///
+/// One statement per member made a 500-member replace a 500-statement request,
+/// each its own round trip and its own lock on `users`.
+async fn add_group_to_users<'e, E>(
+    executor: E,
+    user_ids: &[Uuid],
+    group_name: &str,
+) -> AppResult<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    if user_ids.is_empty() {
+        return Ok(());
+    }
     sqlx::query(
-        "UPDATE users SET groups = ARRAY(SELECT DISTINCT unnest(array_append(groups, $2))), updated_at = NOW() WHERE id = $1",
+        "UPDATE users SET groups = ARRAY(SELECT DISTINCT unnest(array_append(groups, $2))), \
+         updated_at = NOW() WHERE id = ANY($1::uuid[])",
     )
-    .bind(user_id)
+    .bind(user_ids)
     .bind(group_name)
-    .execute(&state.pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
 
-async fn remove_group_from_user(
-    state: &AppState,
-    user_id: Uuid,
+async fn remove_group_from_users<'e, E>(
+    executor: E,
+    user_ids: &[Uuid],
     group_name: &str,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    if user_ids.is_empty() {
+        return Ok(());
+    }
     sqlx::query(
-        "UPDATE users SET groups = array_remove(groups, $2), updated_at = NOW() WHERE id = $1",
+        "UPDATE users SET groups = array_remove(groups, $2), updated_at = NOW() \
+         WHERE id = ANY($1::uuid[])",
     )
-    .bind(user_id)
+    .bind(user_ids)
     .bind(group_name)
-    .execute(&state.pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
 
 /// Drops `group_name` from every user that carries it.
-async fn clear_group(state: &AppState, group_name: &str) -> AppResult<()> {
+async fn clear_group<'e, E>(executor: E, group_name: &str) -> AppResult<()>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     sqlx::query(
-        "UPDATE users SET groups = array_remove(groups, $1), updated_at = NOW() WHERE $1 = ANY(groups)",
+        "UPDATE users SET groups = array_remove(groups, $1), updated_at = NOW() \
+         WHERE groups @> ARRAY[$1::text]",
     )
     .bind(group_name)
-    .execute(&state.pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -1360,12 +1420,12 @@ async fn delete_group(
     // the membership has to survive somewhere or a mistaken delete is
     // unrecoverable, which is the whole point of D3.
     let members: Vec<Uuid> =
-        sqlx::query_scalar("SELECT id FROM users WHERE $1 = ANY(groups) ORDER BY email")
+        sqlx::query_scalar("SELECT id FROM users WHERE groups @> ARRAY[$1::text] ORDER BY email")
             .bind(&group.display_name)
             .fetch_all(&state.pool)
             .await?;
 
-    clear_group(&state, &group.display_name).await?;
+    clear_group(&state.pool, &group.display_name).await?;
 
     // Marked, not removed. The row is the record that the group existed and who
     // was in it; the partial unique index on the live rows means a re-created

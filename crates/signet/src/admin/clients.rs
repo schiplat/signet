@@ -1,6 +1,5 @@
 use crate::admin::{require_admin_user, require_staff_user};
 use crate::audit::{record, AuditEvent};
-use crate::auth::password::hash_password;
 use crate::crypto::util::random_token;
 use crate::error::{AppError, AppResult};
 use crate::http::source_ip::normalize_cidrs;
@@ -133,7 +132,7 @@ async fn create_client(
         }
         _ => random_token(32),
     };
-    let secret_hash = hash_password(&plaintext)?;
+    let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &plaintext);
     let id = Uuid::new_v4();
 
     let client = sqlx::query_as::<_, AdminClient>(&format!(
@@ -380,7 +379,7 @@ async fn rotate_secret(
 ) -> AppResult<Json<ClientCreated>> {
     let actor = require_staff_user(&state, &headers).await?;
     let plaintext = random_token(32);
-    let secret_hash = hash_password(&plaintext)?;
+    let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &plaintext);
 
     let client = sqlx::query_as::<_, AdminClient>(&format!(
         r#"

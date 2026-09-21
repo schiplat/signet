@@ -1,4 +1,3 @@
-use crate::auth::password::hash_password;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -62,7 +61,7 @@ pub async fn register(
 
     let client_id = format!("cl_{}", random_token(12));
     let secret = random_token(32);
-    let secret_hash = hash_password(&secret)?;
+    let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &secret);
     let id = Uuid::new_v4();
     let issued_at = chrono::Utc::now().timestamp();
 

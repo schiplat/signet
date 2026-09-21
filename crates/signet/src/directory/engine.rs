@@ -213,12 +213,16 @@ async fn execute(
         );
     }
 
+    // Resolved once for the whole run. Every event below is attributed to the
+    // same admin, and this used to be a `SELECT users` per audited entry.
+    let actor = resolve_actor(state, actor_user_id).await;
+
     audit(
         state,
         AUDIT_SYNC_STARTED,
         "directory_source",
         Some(row.code.clone()),
-        actor_user_id,
+        actor.as_ref(),
         json!({
             "source": row.code,
             "trigger": trigger.as_str(),
@@ -256,7 +260,7 @@ async fn execute(
                 AUDIT_SYNC_FAILED,
                 "directory_source",
                 Some(row.code.clone()),
-                actor_user_id,
+                actor.as_ref(),
                 json!({
                     "source": row.code,
                     "trigger": trigger.as_str(),
@@ -293,7 +297,7 @@ async fn execute(
     // than no metric.
     crate::metrics::inc_directory_sync_run();
 
-    let applied = apply_plan(state, row, run_id, &plan, actor_user_id).await;
+    let applied = apply_plan(state, row, run_id, &plan, actor.as_ref()).await;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let (status, error) = match &applied {
@@ -332,7 +336,7 @@ async fn execute(
         },
         "directory_source",
         Some(row.code.clone()),
-        actor_user_id,
+        actor.as_ref(),
         json!({
             "source": row.code,
             "run_id": run_id,
@@ -458,7 +462,7 @@ pub async fn apply_plan(
     row: &SourceRow,
     run_id: Uuid,
     plan: &SyncPlan,
-    actor_user_id: Option<Uuid>,
+    actor: Option<&crate::models::User>,
 ) -> AppResult<()> {
     for chunk in plan.changes.chunks(CHUNK) {
         let mut tx = state.pool.begin().await?;
@@ -489,46 +493,47 @@ pub async fn apply_plan(
         }
         tx.commit().await?;
 
+        // Written after the commit, and in one statement per chunk: an event for
+        // a write that rolled back would be a lie, and one statement per event
+        // made the audit trail the slowest part of a first sync.
+        let mut chunk_events: Vec<AuditEvent> =
+            Vec::with_capacity(created.len() + re_enabled.len());
         for (user_id, change) in created {
-            let external_id = change.external_id.clone();
-            audit(
-                state,
+            chunk_events.push(event(
+                actor,
                 AUDIT_USER_CREATED,
                 "user",
                 Some(user_id.to_string()),
-                actor_user_id,
                 json!({
                     "source": row.code,
                     "run_id": run_id,
-                    "external_id": external_id,
+                    "external_id": change.external_id,
                     "email": change.fields.as_ref().map(|f| f.email.clone()),
                 }),
-            )
-            .await;
+            ));
         }
-
         for user_id in re_enabled {
-            audit(
-                state,
+            chunk_events.push(event(
+                actor,
                 AUDIT_USER_ENABLED,
                 "user",
                 Some(user_id.to_string()),
-                actor_user_id,
                 json!({ "source": row.code, "run_id": run_id }),
-            )
-            .await;
+            ));
         }
+        crate::audit::record_many(state, chunk_events).await;
     }
 
-    apply_disables(state, row, run_id, plan, actor_user_id).await?;
+    apply_disables(state, row, run_id, plan, actor).await?;
 
     // Conflicts and unreadable entries need a human, so they get an audit record
     // each. Bulk outcomes (`updated`) are summarized by the run event instead
     // (§11.1) — the counts are identical, but 100k audit rows are not.
+    let mut trouble: Vec<AuditEvent> = Vec::new();
     for change in &plan.changes {
         if matches!(change.outcome, Outcome::Conflict | Outcome::Error) {
-            audit(
-                state,
+            trouble.push(event(
+                actor,
                 if change.outcome == Outcome::Conflict {
                     AUDIT_CONFLICT
                 } else {
@@ -536,7 +541,6 @@ pub async fn apply_plan(
                 },
                 "directory_entry",
                 Some(change.external_id.clone()),
-                actor_user_id,
                 json!({
                     "source": row.code,
                     "run_id": run_id,
@@ -545,8 +549,7 @@ pub async fn apply_plan(
                     "email": change.fields.as_ref().map(|f| f.email.clone()),
                     "reason": change.reason,
                 }),
-            )
-            .await;
+            ));
         }
         if change.outcome == Outcome::Skip {
             tracing::debug!(
@@ -557,6 +560,7 @@ pub async fn apply_plan(
             );
         }
     }
+    crate::audit::record_many(state, trouble).await;
 
     Ok(())
 }
@@ -574,7 +578,7 @@ async fn apply_disables(
     row: &SourceRow,
     run_id: Uuid,
     plan: &SyncPlan,
-    actor_user_id: Option<Uuid>,
+    actor: Option<&crate::models::User>,
 ) -> AppResult<()> {
     let targets: Vec<Change> = plan
         .changes
@@ -620,22 +624,24 @@ async fn apply_disables(
     }
     tx.commit().await?;
 
-    for user_id in disabled {
-        let reason = reasons
-            .get(&user_id)
-            .copied()
-            .filter(|reason| !reason.is_empty())
-            .unwrap_or(plan::REASON_ABSENT_UPSTREAM);
-        audit(
-            state,
-            AUDIT_USER_DISABLED,
-            "user",
-            Some(user_id.to_string()),
-            actor_user_id,
-            json!({ "source": row.code, "run_id": run_id, "reason": reason }),
-        )
-        .await;
-    }
+    let events: Vec<AuditEvent> = disabled
+        .into_iter()
+        .map(|user_id| {
+            let reason = reasons
+                .get(&user_id)
+                .copied()
+                .filter(|reason| !reason.is_empty())
+                .unwrap_or(plan::REASON_ABSENT_UPSTREAM);
+            event(
+                actor,
+                AUDIT_USER_DISABLED,
+                "user",
+                Some(user_id.to_string()),
+                json!({ "source": row.code, "run_id": run_id, "reason": reason }),
+            )
+        })
+        .collect();
+    crate::audit::record_many(state, events).await;
     Ok(())
 }
 
@@ -824,30 +830,44 @@ async fn audit(
     action: &'static str,
     resource_type: &'static str,
     resource_id: Option<String>,
-    actor_user_id: Option<Uuid>,
+    actor: Option<&crate::models::User>,
     detail: Value,
 ) {
-    let actor = match actor_user_id {
-        Some(id) => load_actor(state, id).await,
-        None => None,
-    };
     crate::audit::record(
         state,
-        AuditEvent {
-            actor,
-            action,
-            resource_type,
-            resource_id,
-            detail,
-            ip: None,
-            user_agent: None,
-            client_id: None,
-        },
+        event(actor, action, resource_type, resource_id, detail),
     )
     .await;
 }
 
-async fn load_actor(state: &AppState, id: Uuid) -> Option<crate::models::User> {
+/// Builds an audit event for `actor`.
+///
+/// A sync's per-entry events all carry the same actor, so the engine resolves it
+/// once and passes a reference down. Cloning it into each event costs an
+/// allocation; re-reading the row from the database for each event cost a round
+/// trip, which is what this replaced.
+fn event(
+    actor: Option<&crate::models::User>,
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: Option<String>,
+    detail: Value,
+) -> AuditEvent {
+    AuditEvent {
+        actor: actor.cloned(),
+        action,
+        resource_type,
+        resource_id,
+        detail,
+        ip: None,
+        user_agent: None,
+        client_id: None,
+    }
+}
+
+/// Loads the admin who triggered the run, or `None` for a scheduled one.
+async fn resolve_actor(state: &AppState, id: Option<Uuid>) -> Option<crate::models::User> {
+    let id = id?;
     match crate::models::user_by_id(&state.pool, id).await {
         Ok(user) => Some(user),
         Err(e) => {

@@ -5,6 +5,7 @@
 //! pieces they share: password credentials, the password-reset flow, WebAuthn
 //! passkeys, and the new-device notification sent after a successful sign-in.
 
+pub mod client_secret;
 pub mod login_alert;
 pub mod passkey;
 pub mod password;

@@ -129,6 +129,21 @@ pub async fn revoke_all_sessions(pool: &PgPool, user_id: Uuid) -> AppResult<u64>
     Ok(res.rows_affected())
 }
 
+/// Revokes every session of each user in `user_ids`, in one statement.
+///
+/// The batch sibling of [`revoke_all_sessions`], for the bulk paths: a delete
+/// per user made disabling a page of accounts a round trip each.
+pub async fn revoke_sessions_for(pool: &PgPool, user_ids: &[Uuid]) -> AppResult<u64> {
+    if user_ids.is_empty() {
+        return Ok(0);
+    }
+    let res = sqlx::query("DELETE FROM sessions WHERE user_id = ANY($1::uuid[])")
+        .bind(user_ids)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 /// Revokes every session of `user_id` except `keep`.
 ///
 /// For "sign out everywhere else": the caller has already proved it holds

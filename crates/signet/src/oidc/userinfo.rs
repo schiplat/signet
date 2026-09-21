@@ -4,10 +4,9 @@ use crate::state::AppState;
 use axum::extract::State;
 use axum::http::{header, HeaderMap};
 use axum::Json;
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, Validation};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::fs;
 
 #[derive(Debug, Deserialize)]
 struct AccessClaims {
@@ -25,15 +24,14 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
         .strip_prefix("Bearer ")
         .ok_or_else(|| AppError::unauthorized("invalid Authorization"))?;
 
-    let pem = fs::read_to_string(&state.config.jwt_private_key_path)
-        .map_err(|e| AppError::Anyhow(e.into()))?;
-    let decoding =
-        DecodingKey::from_rsa_pem(pem.as_bytes()).map_err(|e| AppError::Anyhow(e.into()))?;
+    // The decoding key is parsed once at startup and lives in `AppState`. Doing
+    // it here would put a blocking PEM read and an RSA parse inside an async
+    // handler on the endpoint clients call per API request.
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(std::slice::from_ref(&state.config.issuer));
     validation.validate_aud = false;
 
-    let data = jsonwebtoken::decode::<AccessClaims>(token, &decoding, &validation)
+    let data = jsonwebtoken::decode::<AccessClaims>(token, state.keys.decoding(), &validation)
         .map_err(|_| AppError::unauthorized("invalid access_token"))?;
     if data.claims.token_use.as_deref() != Some("access") {
         return Err(AppError::unauthorized("not an access token"));

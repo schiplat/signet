@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "signet"
-version = "0.4.4"
+version = "0.4.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2451,6 +2451,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "subtle",
  "thiserror 2.0.20",
  "time",
  "tokio",

@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { Plus, Trash2, UserRound } from "@lucide/vue";
+import { Check, Copy, Plus, Trash2, UserRound } from "@lucide/vue";
 import { computed, onMounted, ref, watch } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
-import { useClientPagination } from "@/composables/useClientPagination";
-import { useClientSort } from "@/composables/useClientSort";
+import { useServerList } from "@/composables/useServerList";
+import { confirm } from "@/lib/confirm";
 import {
   batchDisableUsers,
   checkEmail,
@@ -21,15 +21,13 @@ import {
   revokeUserSessions,
   updateUser,
   type AdminUser,
+  type AdminUserSortKey,
   type PublicUser,
   type UserRole,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
-const users = ref<AdminUser[]>([]);
-const loading = ref(true);
-const error = ref("");
 const showCreate = ref(false);
 const editing = ref<PublicUser | null>(null);
 const creating = ref(false);
@@ -63,44 +61,35 @@ const roleOptions = computed(() => {
   return ["manager", "member"] as UserRole[];
 });
 
-const filteredUsers = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase();
-  if (!q) return users.value;
-  return users.value.filter((u) => {
-    const sso = u.sso_identities
-      .flatMap((i) => [i.display_name, i.provider_code, i.provider_type])
-      .join(" ");
-    const origin = u.provisioned_via ?? "";
-    return [u.email, u.username ?? "", u.display_name, u.status, u.role, sso, origin]
-      .join(" ")
-      .toLowerCase()
-      .includes(q);
+const {
+  page,
+  pageSize,
+  pageCount,
+  total,
+  pageItems,
+  rangeLabel,
+  loading,
+  initialLoading,
+  error,
+  toggleSort,
+  sortIndicator,
+  reload,
+} =
+  useServerList<AdminUser>({
+    load: async ({ q, sort, dir, limit, offset }) => {
+      const { users: rows, total: matched } = await listUsers({
+        q,
+        sort: sort as AdminUserSortKey,
+        dir,
+        limit,
+        offset,
+      });
+      return { items: rows, total: matched };
+    },
+    initialSort: "created_at",
+    initialDir: "desc",
+    search: searchQuery,
   });
-});
-
-const { sorted, toggleSort, sortIndicator } = useClientSort(filteredUsers, {
-  initialKey: "created_at",
-  initialDir: "desc",
-  getValue: (row, key) => {
-    switch (key) {
-      case "email":
-        return row.email;
-      case "display_name":
-        return row.display_name;
-      case "role":
-        return row.role;
-      case "status":
-        return row.status;
-      case "created_at":
-        return row.created_at;
-      default:
-        return "";
-    }
-  },
-});
-
-const { page, pageSize, pageCount, total, pageItems, rangeLabel } =
-  useClientPagination(sorted);
 
 const selectableOnPage = computed(() =>
   pageItems.value.filter(
@@ -231,22 +220,20 @@ watch(editUsername, (val) => {
 });
 
 async function refresh() {
-  users.value = await listUsers();
-  selected.value = new Set(
-    [...selected.value].filter((id) =>
-      users.value.some((u) => u.id === id && u.status === "active"),
-    ),
-  );
+  await reload();
+  // Only the page that just came back can be checked: an id it shows as no
+  // longer selectable is dropped, and selections made on other pages are left
+  // alone rather than guessed about. The old version filtered against the whole
+  // table, which is exactly what this list no longer holds.
+  const visible = new Map(pageItems.value.map((u) => [u.id, u.status === "active"]));
+  selected.value = new Set([...selected.value].filter((id) => visible.get(id) !== false));
 }
 
 onMounted(async () => {
   try {
     if (!auth.user) await auth.fetchMe();
-    await refresh();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load users";
-  } finally {
-    loading.value = false;
   }
 });
 
@@ -291,6 +278,37 @@ function openEdit(u: PublicUser) {
   editPhone.value = u.phone ?? "";
   editPhoneCheckState.value = "idle";
   editUsernameCheckState.value = "idle";
+}
+
+/** Which row's email was copied last, and the timer that clears the tick. */
+const copiedId = ref<string | null>(null);
+let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+
+async function copyEmail(u: PublicUser) {
+  try {
+    await navigator.clipboard.writeText(u.email);
+    copiedId.value = u.id;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      copiedId.value = null;
+    }, 1500);
+  } catch {
+    /* clipboard unavailable — nothing to tell the operator that matters */
+  }
+}
+
+/** The uid line under the email copies the id, the same tick feedback. */
+async function copyUid(u: PublicUser) {
+  try {
+    await navigator.clipboard.writeText(u.id);
+    copiedId.value = u.id;
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      copiedId.value = null;
+    }, 1500);
+  } catch {
+    /* clipboard unavailable */
+  }
 }
 
 function toggleOne(id: string, checked: boolean) {
@@ -407,7 +425,16 @@ async function onEnable(u: PublicUser) {
 }
 
 async function onRevokeSessions(u: PublicUser) {
-  if (!confirm(`Sign out all active sessions for "${u.email}"?`)) return;
+  if (
+    !(await confirm({
+      title: "Revoke all sessions?",
+      message: `Every active sign-in for "${u.email}" will be signed out.`,
+      confirmText: "Revoke",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
   error.value = "";
   try {
     const res = await revokeUserSessions(u.id);
@@ -420,9 +447,12 @@ async function onRevokeSessions(u: PublicUser) {
 
 async function onResetMfa(u: PublicUser) {
   if (
-    !confirm(
-      `Reset MFA for "${u.email}"? Their authenticator and recovery codes will be cleared.`,
-    )
+    !(await confirm({
+      title: "Reset MFA?",
+      message: `The authenticator and recovery codes for "${u.email}" will be cleared. They will have to set up 2FA again on next sign-in.`,
+      confirmText: "Reset MFA",
+      danger: true,
+    }))
   ) {
     return;
   }
@@ -436,7 +466,16 @@ async function onResetMfa(u: PublicUser) {
 }
 
 async function onDelete(u: PublicUser) {
-  if (!confirm(`Delete user "${u.email}"? This cannot be undone.`)) return;
+  if (
+    !(await confirm({
+      title: "Delete user?",
+      message: `"${u.email}" will be permanently removed. This cannot be undone.`,
+      confirmText: "Delete",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
   error.value = "";
   try {
     await deleteUser(u.id);
@@ -448,7 +487,16 @@ async function onDelete(u: PublicUser) {
 
 async function onBatchDisable() {
   if (selectedCount.value === 0) return;
-  if (!confirm(`Freeze ${selectedCount.value} selected user(s)?`)) return;
+  if (
+    !(await confirm({
+      title: "Freeze selected users?",
+      message: `${selectedCount.value} account(s) will be frozen and signed out.`,
+      confirmText: "Freeze",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
   error.value = "";
   batching.value = true;
   try {
@@ -488,10 +536,19 @@ async function onBatchDisable() {
 
     <p v-if="error" class="field-error">{{ error }}</p>
 
-    <div v-if="loading" class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
-    <div v-else class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
+    <div
+      v-if="initialLoading"
+      class="py-12 text-center text-sm text-muted-foreground"
+    >
+      Loading…
+    </div>
+    <div
+      v-else
+      class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm transition-opacity"
+      :class="loading ? 'opacity-60' : ''"
+    >
       <div
-        v-if="users.length === 0"
+        v-if="total === 0 && !searchQuery.trim()"
         class="flex flex-col items-center justify-center py-16 text-muted-foreground"
       >
         <UserRound class="mb-3 h-10 w-10 text-muted-foreground/20" />
@@ -508,7 +565,7 @@ async function onBatchDisable() {
         </div>
 
         <div
-          v-if="filteredUsers.length === 0"
+          v-if="pageItems.length === 0"
           class="px-5 py-12 text-center text-sm text-muted-foreground"
         >
           No users match “{{ searchQuery }}”
@@ -590,12 +647,41 @@ async function onBatchDisable() {
                     class="px-5 py-3 font-semibold"
                     :class="u.status === 'disabled' && 'line-through decoration-destructive/40'"
                   >
-                    {{ u.email }}
+                    <span class="inline-flex items-center gap-1.5">
+                      {{ u.email }}
+                      <button
+                        type="button"
+                        class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground"
+                        :title="copiedId === u.id ? 'Copied' : 'Copy email'"
+                        :aria-label="copiedId === u.id ? 'Copied' : 'Copy email'"
+                        @click="copyEmail(u)"
+                      >
+                        <Check v-if="copiedId === u.id" class="h-3.5 w-3.5 text-primary" />
+                        <Copy v-else class="h-3.5 w-3.5" />
+                      </button>
+                    </span>
+                    <!-- The login alias (second way to sign in, next to the
+                         email). Only shown when it actually says something
+                         the email does not. -->
                     <div
-                      v-if="u.username"
-                      class="text-[11px] font-normal text-muted-foreground"
+                      v-if="u.username && u.username !== u.email.split('@')[0]"
+                      class="truncate text-[11px] font-normal text-muted-foreground"
+                      :title="`username: ${u.username}`"
                     >
-                      @{{ u.username }}
+                      username: {{ u.username }}
+                    </div>
+                    <!-- The immutable id (used by SCIM, OIDC `sub`, audit
+                         lookups). monospace + truncated so a full UUID does
+                         not stretch the column; full value on hover. -->
+                    <div
+                      class="cursor-pointer truncate font-mono text-[10px] text-muted-foreground/70 hover:text-foreground"
+                      :title="`id: ${u.id}${copiedId === u.id ? ' (copied)' : ''} — click to copy`"
+                      role="button"
+                      tabindex="0"
+                      @click.stop="copyUid(u)"
+                      @keydown.enter.stop="copyUid(u)"
+                    >
+                      id: {{ u.id }}
                     </div>
                     <span
                       v-if="u.status === 'disabled'"

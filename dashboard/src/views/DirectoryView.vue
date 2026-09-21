@@ -34,6 +34,7 @@ import {
   type HttpJsonPagination,
   type LdapSourceConfig,
 } from "@/lib/api";
+import { confirm } from "@/lib/confirm";
 
 const loading = ref(true);
 const error = ref("");
@@ -597,9 +598,12 @@ async function onSyncNow(s: DirectorySource) {
 
 async function onDelete(s: DirectorySource) {
   if (
-    !window.confirm(
-      `Delete source "${s.name}"? This is only possible once it manages no users. To stop syncing but keep the accounts, disable it instead.`,
-    )
+    !(await confirm({
+      title: "Delete source?",
+      message: `"${s.name}" can only be deleted once it manages no users. To stop syncing but keep the accounts, disable it instead.`,
+      confirmText: "Delete",
+      danger: true,
+    }))
   ) {
     return;
   }

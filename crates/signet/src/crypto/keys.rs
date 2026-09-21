@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use jsonwebtoken::{EncodingKey, Header};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header};
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, LineEnding};
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::traits::PublicKeyParts;
@@ -14,6 +14,14 @@ use std::sync::Arc;
 pub struct JwtKeys {
     pub kid: String,
     encoding_key: EncodingKey,
+    /// The same key for verification, parsed once at startup.
+    ///
+    /// `jsonwebtoken` says of `DecodingKey` that it "can be re-used so make sure
+    /// you only initialize it once if you can for better performance", and the
+    /// verification endpoints are called once per API request by clients — the
+    /// one place where parsing the RSA key per request would be a real cost, and
+    /// a blocking file read inside an async handler besides.
+    decoding_key: DecodingKey,
     jwks: Arc<Jwks>,
 }
 
@@ -54,6 +62,7 @@ impl JwtKeys {
         let kid = crate::crypto::util::sha256_hex(&n)[..16].to_string();
 
         let encoding_key = EncodingKey::from_rsa_pem(pem.as_bytes()).context("encoding key")?;
+        let decoding_key = DecodingKey::from_rsa_pem(pem.as_bytes()).context("decoding key")?;
         let jwks = Arc::new(Jwks {
             keys: vec![Jwk {
                 kty: "RSA".into(),
@@ -68,12 +77,18 @@ impl JwtKeys {
         Ok(Self {
             kid,
             encoding_key,
+            decoding_key,
             jwks,
         })
     }
 
     pub fn jwks(&self) -> Arc<Jwks> {
         self.jwks.clone()
+    }
+
+    /// The key that verifies tokens this instance signed.
+    pub fn decoding(&self) -> &DecodingKey {
+        &self.decoding_key
     }
 
     pub fn encode<T: Serialize>(&self, claims: &T) -> Result<String> {

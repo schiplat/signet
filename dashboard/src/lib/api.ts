@@ -44,7 +44,26 @@ export type SsoIdentityBrief = {
 export type AdminUser = PublicUser & {
   has_password: boolean;
   sso_identities: SsoIdentityBrief[];
+  directory_sources?: string[];
+  scim_managed?: boolean;
 };
+
+/** One page of the admin users list. */
+export type AdminUserPage = {
+  users: AdminUser[];
+  /** Rows matching the search, not rows in this page. */
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+/** The columns the users list may be sorted by, and what the API accepts. */
+export type AdminUserSortKey =
+  | "created_at"
+  | "email"
+  | "display_name"
+  | "role"
+  | "status";
 
 export type LoginResult =
   | { status: "ok"; user: PublicUser }
@@ -308,9 +327,31 @@ export async function changePassword(body: {
   return parseJson<{ ok: boolean }>(res);
 }
 
-export async function listUsers() {
-  const res = await fetch("/api/v1/admin/users", { credentials: "include" });
-  return parseJson<AdminUser[]>(res);
+/**
+ * One page of users, searched and sorted by the server.
+ *
+ * The search, the sort and the window are all server-side: with a directory
+ * sync in the deployment the table does not fit in a response, and filtering a
+ * single page in the browser would silently search only that page.
+ */
+export async function listUsers(params: {
+  q?: string;
+  sort?: AdminUserSortKey;
+  dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+} = {}) {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set("q", params.q);
+  if (params.sort) qs.set("sort", params.sort);
+  if (params.dir) qs.set("dir", params.dir);
+  if (params.limit != null) qs.set("limit", String(params.limit));
+  if (params.offset != null) qs.set("offset", String(params.offset));
+  const query = qs.toString();
+  const res = await fetch(`/api/v1/admin/users${query ? `?${query}` : ""}`, {
+    credentials: "include",
+  });
+  return parseJson<AdminUserPage>(res);
 }
 
 export async function checkEmail(email: string) {

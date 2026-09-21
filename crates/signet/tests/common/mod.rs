@@ -48,12 +48,28 @@ pub async fn state_with(adjust: impl FnOnce(&mut Config)) -> Option<AppState> {
         }
     };
     adjust(&mut cfg);
+
+    // A machine with no PostgreSQL at all skips: that is a developer's laptop,
+    // not a defect in the code under test. This probe is what tells the two
+    // apart, and it has to be a *separate* connection from `build_state`'s, so
+    // that "the server answered" is known before anything else can fail.
+    if let Err(e) = signet::db::connect(&cfg.database_url).await {
+        eprintln!(
+            "skipping DB-backed tests: no database at {}: {e}",
+            cfg.database_url
+        );
+        return None;
+    }
+
     match signet::build_state(cfg).await {
         Ok(state) => Some(state),
-        Err(e) => {
-            eprintln!("skipping DB-backed tests: cannot reach the database: {e}");
-            None
-        }
+        // The database answered and then refused to work — an unapplied or
+        // edited migration, a bad encryption key, a failed bootstrap. This used
+        // to be skipped along with the unreachable case, which is how a
+        // checksum-mismatched migration turns the entire suite green: every
+        // test returns early and reports `ok`. Nothing under test was exercised,
+        // so passing here would be a lie.
+        Err(e) => panic!("the database is reachable but unusable: {e:?}"),
     }
 }
 

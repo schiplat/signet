@@ -1,4 +1,4 @@
-use crate::auth::password::{hash_password, verify_password};
+use crate::auth::password::{hash_passwords_offloaded, match_password_among};
 use crate::error::{AppError, AppResult};
 use rand::RngCore;
 use totp_rs::{Algorithm, Secret, TOTP};
@@ -65,12 +65,25 @@ pub fn normalize_recovery_code(code: &str) -> String {
         .collect()
 }
 
-pub fn hash_recovery_code(code: &str) -> AppResult<String> {
-    let normalized = normalize_recovery_code(code);
-    hash_password(&normalized).map_err(AppError::from)
+/// Hashes a freshly generated batch of recovery codes.
+///
+/// The batch goes to the blocking pool as a unit: enrolling MFA hashes ten codes
+/// at once, and each one is a full Argon2 hash (19 MiB, tens of milliseconds), so
+/// doing them one hand-off at a time would occupy a worker per code in sequence.
+pub async fn hash_recovery_codes(codes: &[String]) -> AppResult<Vec<String>> {
+    let normalized: Vec<String> = codes.iter().map(|c| normalize_recovery_code(c)).collect();
+    hash_passwords_offloaded(normalized)
+        .await
+        .map_err(AppError::from)
 }
 
-pub fn verify_recovery_code(code: &str, code_hash: &str) -> AppResult<bool> {
+/// The index of the recovery code matching one of `hashes`, if any.
+///
+/// Verification stops at the first match, but a non-match has to try every code
+/// the user was issued, so the list is verified in one blocking task.
+pub async fn match_recovery_code(code: &str, hashes: Vec<String>) -> AppResult<Option<usize>> {
     let normalized = normalize_recovery_code(code);
-    verify_password(&normalized, code_hash).map_err(AppError::from)
+    match_password_among(&normalized, hashes)
+        .await
+        .map_err(AppError::from)
 }

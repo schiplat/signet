@@ -260,21 +260,19 @@ where
     .await
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
     pub sub: String,
     pub email: String,
     pub username: Option<String>,
     pub display_name: String,
-    #[serde(skip_serializing)]
     pub password_hash: String,
     pub status: String,
     pub role: String,
     pub mfa_required: bool,
     pub must_change_password: bool,
     pub totp_enabled: bool,
-    #[serde(skip_serializing)]
     pub totp_secret: Option<String>,
     pub groups: Vec<String>,
     pub phone: Option<String>,
@@ -305,9 +303,6 @@ pub struct User {
     /// a sync provisioned this account from. Unique when set, and nullable
     /// because local, admin and JIT-created accounts have no upstream.
     ///
-    /// Not public output — `PublicUser` is what reaches clients — so it is
-    /// skipped when a `User` is serialized, alongside the credential fields.
-    #[serde(skip_serializing)]
     pub external_id: Option<String>,
 }
 

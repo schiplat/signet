@@ -1,5 +1,5 @@
 use crate::audit::{record, AuditEvent};
-use crate::auth::password::{set_user_password, verify_password};
+use crate::auth::password::{set_user_password, verify_password_offloaded};
 use crate::auth::session::{
     clear_session_cookie, cookie_value, current_user, destroy_session, list_sessions,
     revoke_all_sessions, revoke_other_sessions, revoke_session_by_id, session_id_for_token,
@@ -20,6 +20,7 @@ use axum_extra::extract::cookie::CookieJar;
 use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sqlx::{FromRow, Row};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -60,13 +61,20 @@ async fn login(
     let email = body.email.trim().to_lowercase();
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
-    let user = sqlx::query_as::<_, User>(&format!(
-        "SELECT {USER_COLS} FROM users WHERE email = $1 OR username = $1"
+    // The lockout columns ride along on the same row. They used to be a second
+    // query for the same row, which is one extra round trip on every login — the
+    // busiest write path there is — for two small integers.
+    let row = sqlx::query(&format!(
+        "SELECT {USER_COLS}, failed_login_attempts, locked_until \
+         FROM users WHERE email = $1 OR username = $1"
     ))
     .bind(&email)
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::unauthorized("invalid email/username or password"))?;
+    let user = User::from_row(&row)?;
+    let failed_login_attempts: i32 = row.try_get("failed_login_attempts")?;
+    let locked_until: Option<DateTime<Utc>> = row.try_get("locked_until")?;
 
     if user.status != "active" {
         return Err(AppError::unauthorized("account disabled"));
@@ -74,12 +82,7 @@ async fn login(
 
     let ip = client_ip(&headers, Some(addr));
 
-    let lock: (i32, Option<DateTime<Utc>>) =
-        sqlx::query_as("SELECT failed_login_attempts, locked_until FROM users WHERE id = $1")
-            .bind(user.id)
-            .fetch_one(&state.pool)
-            .await?;
-    if let Some(locked_until) = lock.1 {
+    if let Some(locked_until) = locked_until {
         if locked_until > Utc::now() {
             let secs = (locked_until - Utc::now()).num_seconds().max(1);
             let mins = (secs as f64 / 60.0).ceil() as i64;
@@ -98,7 +101,7 @@ async fn login(
     let credential = match directory::auth::resolve(&state, user.id).await? {
         directory::auth::LoginPath::Local => {
             let ok = !user.password_hash.is_empty()
-                && verify_password(&body.password, &user.password_hash)?;
+                && verify_password_offloaded(&body.password, &user.password_hash).await?;
             if ok {
                 directory::auth::Credential::Valid
             } else {
@@ -163,7 +166,7 @@ async fn login(
             return Err(AppError::unauthorized("invalid email or password"));
         }
 
-        let attempts = lock.0 + 1;
+        let attempts = failed_login_attempts + 1;
         if (attempts as i64) >= state.config.max_login_attempts {
             let until = Utc::now() + Duration::minutes(state.config.lockout_minutes);
             sqlx::query(
@@ -605,7 +608,7 @@ async fn change_password(
     Json(body): Json<ChangePasswordBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let user = current_user(&state, &headers).await?;
-    if !verify_password(&body.current_password, &user.password_hash)? {
+    if !verify_password_offloaded(&body.current_password, &user.password_hash).await? {
         return Err(AppError::unauthorized("current password is incorrect"));
     }
     set_user_password(

@@ -1,0 +1,20 @@
+-- 030: index the SCIM group membership predicate
+--
+-- Membership is stored as a denormalised `TEXT[]` on `users` (migration 012),
+-- so every group read and membership write filters on it. Those queries used
+-- `WHERE $1 = ANY(groups)`, which is a sequential scan of `users`: one scan per
+-- group on `GET /scim/v2/Groups` (which lists each group's members), and one per
+-- membership write in a PATCH.
+--
+-- The predicate spelling had to change with the index. The planner does not
+-- rewrite `value = ANY(column)` into an array containment test, so a GIN index
+-- did nothing for it — verified by `EXPLAIN`, not assumed. The three predicates
+-- in `scim.rs` now read `groups @> ARRAY[$1::text]`, which is the same test and
+-- the form GIN over `array_ops` can serve. `tests/scim_group_index.rs` asserts on
+-- the plan so that a later rewrite back to `= ANY` fails there.
+--
+-- Not partial on `groups <> '{}'` even though most users have no groups: the
+-- prover would have to derive `groups <> '{}'` from `groups @> ARRAY['x']` to
+-- consider the index at all, and an index that is skipped for a subtle
+-- implication reason looks exactly like one that is being used.
+CREATE INDEX users_groups_gin ON users USING GIN (groups);

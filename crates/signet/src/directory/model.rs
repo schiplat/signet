@@ -128,6 +128,16 @@ pub async fn load_user_index(pool: &PgPool) -> AppResult<Vec<UserIndexEntry>> {
 
 /// `user_id` → code of the highest-precedence source linking it, across all
 /// sources (matching [`crate::directory::managing_source`]).
+///
+/// Deliberately **not** scoped to the run's own links, even though that would
+/// make it far cheaper. Two of the three callers ask about a user the source
+/// does not link: `collision_change` asks after finding an account by *email*,
+/// which can be a user any other source provisioned, and answering "nobody
+/// outranks them" there flips a skip into a conflict — the account-takeover
+/// case. The planner is a pure function over this snapshot, so it cannot ask
+/// for one more row when it discovers it needs one; the snapshot has to be
+/// complete. A narrower query here is a silent behaviour change, not an
+/// optimization.
 pub async fn load_managing_sources(pool: &PgPool) -> AppResult<HashMap<Uuid, String>> {
     let rows = sqlx::query_as::<_, (Uuid, String)>(
         r#"
@@ -148,10 +158,14 @@ pub async fn load_local_state(
     source_id: Uuid,
     source_code: &str,
 ) -> AppResult<LocalState> {
-    let links = load_links(pool, source_id).await?;
-    let linked_users = load_linked_users(pool, &links).await?;
-    let index = load_user_index(pool).await?;
-    let managing = load_managing_sources(pool).await?;
+    // Two rounds rather than four sequential queries. The sync is a background
+    // job, but its snapshot is on the critical path of every run, and the
+    // identity read is the largest query in the engine — there is no reason for
+    // it to wait behind the link read, or for the two queries that need the
+    // links to wait for each other.
+    let (links, index) = tokio::try_join!(load_links(pool, source_id), load_user_index(pool))?;
+    let (linked_users, managing) =
+        tokio::try_join!(load_linked_users(pool, &links), load_managing_sources(pool),)?;
     Ok(LocalState {
         source_code: source_code.to_string(),
         links,

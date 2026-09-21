@@ -18,6 +18,7 @@ import {
   type AdminClient,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
+import { confirm } from "@/lib/confirm";
 
 const auth = useAuthStore();
 
@@ -190,7 +191,16 @@ async function onToggle(c: AdminClient) {
 }
 
 async function onRotate(c: AdminClient) {
-  if (!confirm(`Rotate secret for "${c.client_id}"? The old secret will stop working.`)) return;
+  if (
+    !(await confirm({
+      title: "Rotate client secret?",
+      message: `"${c.client_id}" gets a new secret and the current one stops working immediately. Update every service using it.`,
+      confirmText: "Rotate",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
   error.value = "";
   rotatingId.value = c.id;
   try {
@@ -208,7 +218,16 @@ async function onRotate(c: AdminClient) {
 }
 
 async function onDelete(c: AdminClient) {
-  if (!confirm(`Delete client "${c.client_id}"? This cannot be undone.`)) return;
+  if (
+    !(await confirm({
+      title: "Delete client?",
+      message: `"${c.client_id}" will be permanently removed. This cannot be undone.`,
+      confirmText: "Delete",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
   error.value = "";
   try {
     await deleteClient(c.id);

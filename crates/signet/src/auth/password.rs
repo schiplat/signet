@@ -3,6 +3,8 @@ use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, Salt
 use argon2::Argon2;
 use password_hash::rand_core::OsRng;
 use sqlx::PgPool;
+use std::sync::OnceLock;
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
@@ -21,6 +23,80 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
     Ok(Argon2::default()
         .verify_password(password.as_bytes(), &parsed)
         .is_ok())
+}
+
+/// Bounds how many hashes are being computed at any one moment.
+///
+/// Argon2 is memory-hard by design: the defaults below spend 19 MiB and tens of
+/// milliseconds per hash. Moving it to the blocking pool keeps the async workers
+/// free, but the blocking pool is hundreds of threads wide, so a burst of sign-in
+/// attempts would otherwise multiply those 19 MiB by the whole pool. One hash per
+/// core keeps peak memory at cores × 19 MiB and lets the rest queue.
+fn hashing_gate() -> &'static Semaphore {
+    static GATE: OnceLock<Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        Semaphore::new(cores)
+    })
+}
+
+/// Runs a deliberately slow, CPU-bound hash on the blocking pool.
+///
+/// Every `hash_password`/`verify_password` call site reachable from a request
+/// handler must go through here. Called directly from an async handler, one
+/// Argon2 hash parks a whole Tokio worker for tens of milliseconds — and the
+/// default runtime has one worker per core, so a handful of concurrent sign-ins
+/// or token requests stall every unrelated request behind them.
+async fn offload<T, F>(job: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let _permit = hashing_gate()
+        .acquire()
+        .await
+        .expect("the hashing gate is never closed");
+    tokio::task::spawn_blocking(job)
+        .await
+        .map_err(|e| anyhow!("hashing task did not run to completion: {e}"))?
+}
+
+/// [`hash_password`], off the async worker threads.
+pub async fn hash_password_offloaded(password: &str) -> Result<String> {
+    let password = password.to_string();
+    offload(move || hash_password(&password)).await
+}
+
+/// [`hash_password`] for a whole batch, in a single blocking task.
+///
+/// Recovery codes are generated and hashed ten at a time; one hand-off per code
+/// would pay the pool round trip ten times over for the same amount of CPU.
+pub async fn hash_passwords_offloaded(passwords: Vec<String>) -> Result<Vec<String>> {
+    offload(move || passwords.iter().map(|p| hash_password(p)).collect()).await
+}
+
+/// [`verify_password`], off the async worker threads.
+pub async fn verify_password_offloaded(password: &str, password_hash: &str) -> Result<bool> {
+    let (password, password_hash) = (password.to_string(), password_hash.to_string());
+    offload(move || verify_password(&password, &password_hash)).await
+}
+
+/// The index of the first hash `password` matches, or `None`.
+///
+/// A list of candidate hashes is verified in one blocking task: callers that
+/// keep a history of previous passwords, or ten recovery codes, would otherwise
+/// occupy the pool once per entry. A hash that cannot be parsed is treated as a
+/// non-match rather than an error, so one corrupt row cannot lock a user out.
+pub async fn match_password_among(password: &str, hashes: Vec<String>) -> Result<Option<usize>> {
+    let password = password.to_string();
+    offload(move || {
+        Ok(hashes
+            .iter()
+            .position(|h| verify_password(&password, h).unwrap_or(false)))
+    })
+    .await
 }
 
 /// Validates password strength. Returns a human-readable message on failure.
@@ -54,12 +130,12 @@ pub async fn validate_password_history(
     .bind(history_size)
     .fetch_all(pool)
     .await?;
-    for h in &hashes {
-        if verify_password(new_password, h).unwrap_or(false) {
-            return Err(AppError::bad_request(
-                "password was used recently, choose a different one",
-            ));
-        }
+    // One blocking task for the whole history: every entry is an Argon2
+    // verification, and these are all attempted hashes of the same candidate.
+    if match_password_among(new_password, hashes).await?.is_some() {
+        return Err(AppError::bad_request(
+            "password was used recently, choose a different one",
+        ));
     }
     Ok(())
 }
@@ -103,7 +179,7 @@ pub async fn set_user_password(
     validate_password_strength(new_password, min_length)
         .map_err(|e| AppError::bad_request(e.to_string()))?;
     validate_password_history(pool, user_id, new_password, history_size).await?;
-    let hash = hash_password(new_password)?;
+    let hash = hash_password_offloaded(new_password).await?;
     record_password_history(pool, user_id, &hash).await?;
     sqlx::query(
         "UPDATE users SET password_hash = $2, password_changed_at = NOW(), updated_at = NOW() WHERE id = $1",

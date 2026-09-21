@@ -104,6 +104,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     let keys = crypto::keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
     let encryption_key = crypto::encryption::load_or_generate_key(&cfg.encryption_key_path)?;
     let encryptor = crypto::encryption::Encryptor::new(&encryption_key);
+    let client_secret_key = Arc::new(crypto::encryption::client_secret_key(&encryption_key));
     // One-way move of webhook secrets out of the legacy plaintext column.
     // Deliberately fatal: carrying on would leave `secret_enc` NULL and
     // silently downgrade webhook deliveries to unsigned.
@@ -122,6 +123,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         config: Arc::new(cfg),
         keys: Arc::new(keys),
         encryptor: Arc::new(encryptor),
+        client_secret_key,
         rate_limiter: Arc::new(http::ratelimit::RateLimiter::new(rate_limit_per_minute)),
         webauthn: Arc::new(webauthn),
         passkey_challenges: auth::passkey::new_store(),

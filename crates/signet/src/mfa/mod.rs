@@ -22,8 +22,8 @@ use sqlx::PgPool;
 use std::net::SocketAddr;
 use time::Duration as TimeDuration;
 use totp_util::{
-    generate_recovery_codes, generate_totp_secret, hash_recovery_code, otpauth_uri,
-    verify_recovery_code, verify_totp_code,
+    generate_recovery_codes, generate_totp_secret, hash_recovery_codes, match_recovery_code,
+    otpauth_uri, verify_totp_code,
 };
 use uuid::Uuid;
 
@@ -273,25 +273,35 @@ async fn issue_session(
 
 async fn replace_recovery_codes(pool: &PgPool, user_id: Uuid) -> AppResult<Vec<String>> {
     let codes = generate_recovery_codes(RECOVERY_CODE_COUNT);
+    // Hashed before the transaction opens: the hashes are pure computation, and
+    // holding a write transaction across ten Argon2 hashes would keep the delete
+    // and the inserts waiting on the CPU rather than on each other.
+    let hashes = hash_recovery_codes(&codes).await?;
+    let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM totp_recovery_codes WHERE user_id = $1")
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    for code in &codes {
-        let id = Uuid::new_v4();
-        let hash = hash_recovery_code(code)?;
-        sqlx::query(
-            r#"
-            INSERT INTO totp_recovery_codes (id, user_id, code_hash)
-            VALUES ($1, $2, $3)
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(hash)
-        .execute(pool)
-        .await?;
-    }
+    // One statement for the whole batch. Issued one row at a time this was ten
+    // round trips to replace ten rows, and a reader could observe a user with
+    // only some of their recovery codes installed.
+    sqlx::query(
+        r#"
+        INSERT INTO totp_recovery_codes (id, user_id, code_hash)
+        SELECT ids.id, $2, ids.code_hash
+        FROM UNNEST($1::uuid[], $3::text[]) AS ids(id, code_hash)
+        "#,
+    )
+    .bind(
+        (0..hashes.len())
+            .map(|_| Uuid::new_v4())
+            .collect::<Vec<Uuid>>(),
+    )
+    .bind(user_id)
+    .bind(&hashes)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(codes)
 }
 
@@ -564,13 +574,13 @@ async fn verify_mfa(
             .bind(user.id)
             .fetch_all(&state.pool)
             .await?;
-            let mut matched: Option<Uuid> = None;
-            for (id, hash) in rows {
-                if verify_recovery_code(&body.code, &hash)? {
-                    matched = Some(id);
-                    break;
-                }
-            }
+            let ids: Vec<Uuid> = rows.iter().map(|(id, _)| *id).collect();
+            let hashes: Vec<String> = rows.into_iter().map(|(_, hash)| hash).collect();
+            // Every unused code is tried, so a non-match costs ten Argon2
+            // verifications — bounded to one hand-off, and to one gate slot.
+            let matched = match_recovery_code(&body.code, hashes)
+                .await?
+                .map(|idx| ids[idx]);
             let Some(code_id) = matched else {
                 crate::metrics::inc_mfa_verify_failure();
                 return Err(AppError::unauthorized("invalid recovery code"));

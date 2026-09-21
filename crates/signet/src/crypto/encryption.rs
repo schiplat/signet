@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 #[derive(Clone)]
@@ -45,6 +46,18 @@ impl Encryptor {
         let plaintext = self.cipher.decrypt(nonce, ciphertext).ok()?;
         String::from_utf8(plaintext).ok()
     }
+}
+
+/// Derives the client-secret pepper from the application key.
+///
+/// A separate key under its own label rather than the AES key itself, so the two
+/// uses cannot be confused for one another: nothing about the ciphertext of a
+/// TOTP secret should be reusable against a client-secret digest.
+pub fn client_secret_key(app_key: &[u8; 32]) -> [u8; 32] {
+    let digest = Sha256::digest([b"signet/client-secret/v1".as_slice(), app_key].concat());
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&digest);
+    key
 }
 
 /// Loads a 32-byte key from `path` (hex-encoded), generating and persisting a

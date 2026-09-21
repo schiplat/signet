@@ -10,7 +10,9 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::audit::{record, AuditEvent};
-use crate::auth::password::{hash_password, record_password_history, validate_password_strength};
+use crate::auth::password::{
+    hash_password_offloaded, record_password_history, validate_password_strength,
+};
 use crate::auth::session::{create_session, session_cookie};
 use crate::bootstrap::admin_exists;
 use crate::error::{AppError, AppResult};
@@ -66,7 +68,7 @@ async fn setup_admin(
 
     let id = Uuid::new_v4();
     let sub = id.to_string();
-    let password_hash = hash_password(&body.password)?;
+    let password_hash = hash_password_offloaded(&body.password).await?;
 
     // Serialize concurrent setups and re-check inside the lock so only one
     // admin can be created even under a race.

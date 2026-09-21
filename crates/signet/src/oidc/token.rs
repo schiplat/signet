@@ -1,4 +1,3 @@
-use crate::auth::password::verify_password;
 use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::client_ip;
@@ -66,7 +65,14 @@ pub async fn token(
 ) -> AppResult<impl IntoResponse> {
     let (client_id, client_secret) = resolve_client_credentials(&headers, &form)?;
     let client = load_client(&state, &client_id).await?;
-    if !verify_password(&client_secret, &client.client_secret_hash)? {
+    if !crate::auth::client_secret::verify(
+        &state,
+        &client.client_id,
+        &client_secret,
+        &client.client_secret_hash,
+    )
+    .await?
+    {
         return Err(AppError::unauthorized("invalid client credentials"));
     }
     let source = client_ip(&headers, Some(addr));

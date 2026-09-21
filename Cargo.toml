@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/signet"]
 
 [workspace.package]
-version = "0.4.4"
+version = "0.4.5"
 edition = "2021"
 license = "MIT"
 
@@ -32,6 +32,10 @@ rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Constant-time comparison for secret-derived values. Already in the tree via
+# ring/rustls; pinned directly because `auth::client_secret` compares against a
+# value derived from a secret and must not use `==`.
+subtle = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "migrate"] }
 thiserror = "2"
 time = "0.3"

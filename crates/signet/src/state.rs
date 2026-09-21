@@ -13,6 +13,12 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub keys: Arc<JwtKeys>,
     pub encryptor: Arc<Encryptor>,
+    /// The pepper for client-secret digests.
+    ///
+    /// Derived from the same key file as `encryptor`, under its own label, so a
+    /// database dump alone cannot be used to test a guess against a stored
+    /// secret. See [`crate::auth::client_secret`].
+    pub client_secret_key: Arc<[u8; 32]>,
     pub rate_limiter: Arc<RateLimiter>,
     pub webauthn: Arc<Webauthn>,
     pub(crate) passkey_challenges: ChallengeStore,

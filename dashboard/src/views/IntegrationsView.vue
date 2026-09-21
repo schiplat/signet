@@ -26,6 +26,7 @@ import {
   type WebhookDelivery,
   type WebhookKind,
 } from "@/lib/api";
+import { confirm } from "@/lib/confirm";
 
 const loading = ref(true);
 const error = ref("");
@@ -170,7 +171,14 @@ async function onSsoToggle(p: SsoProvider) {
 }
 
 async function onSsoDelete(p: SsoProvider) {
-  if (!window.confirm(`Delete provider "${p.display_name}"? All linked accounts for it will be removed.`)) {
+  if (
+    !(await confirm({
+      title: "Delete provider?",
+      message: `"${p.display_name}" will be removed and every account linked through it will be disconnected.`,
+      confirmText: "Delete",
+      danger: true,
+    }))
+  ) {
     return;
   }
   ssoBusyCode.value = p.code;

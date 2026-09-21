@@ -92,7 +92,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/admin/users` | 列表（含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities`） |
+| `GET` | `/api/v1/admin/users` | 分页列表。返回 `{ users, total, limit, offset }`；行内含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities` / `directory_sources` / `scim_managed` |
 | `GET` | `/api/v1/admin/users/email-check?email=` | 邮箱查重，返回 `{ "exists": bool }` |
 | `GET` | `/api/v1/admin/users/phone-check?phone=&exclude_id=` | 手机查重，返回 `{ "exists": bool }`（`exclude_id` 可选，编辑时排除自身） |
 | `POST` | `/api/v1/admin/users` | 创建（可带 `groups`、`phone`） |
@@ -106,6 +106,16 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 `groups` 为用户组（`TEXT[]`），会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`，供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
 
 列表额外字段：`provisioned_via`（如 `sso_jit` 表示第三方 JIT 开户，否则 `null`）、`has_password`、`sso_identities`（`[{ provider_code, display_name, provider_type }]`，已绑定的第三方）。
+
+**`GET /admin/users` 分页契约**：
+
+- `?q=` 服务端搜索，覆盖 email、username、display_name、status、role、`provisioned_via`、SSO 身份（provider 显示名/code/type）。`_` 与 `%` 按字面字符匹配（已转义），非通配符。
+- `?sort=` 取值白名单：`created_at`（默认）/ `email` / `display_name` / `role` / `status`；`?dir=` 仅接受 `asc`（其余一律 `desc`）。
+- `?limit=` 钳制到 `[1, 200]`（默认 20）；`?offset=` ≥ 0。
+- 排序以 `id ASC` 作次级键：同 `created_at`（如目录批量导入）的行在跨页时不会重复或丢失。
+- `total` 是命中搜索的行数（非本页行数）；翻页用 `offset`，越界返回空 `users` 数组而非错误。
+
+**`POST /admin/users/batch-disable` 语义**：逐行做权限检查（manager 不能冻结 admin，冻结目标排除自己），返回的 `disabled` 计数包含**所有存在的目标 id**——重复冻结已冻结的账号也计入（操作幂等，重复选择不会少报）；仅不存在的 id 不计入。每个目标账号产生一条审计事件；全部成功后一次性吊销其全部会话。
 
 > `phone` 当前仅作**联系信息**，未做短信验证绑定；验证绑定（SMS OTP）为规划项，见 [design.md](./design.md) Phase 4。
 

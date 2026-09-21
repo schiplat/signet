@@ -66,9 +66,17 @@ impl User {
     }
 
     pub fn can_mutate_user(&self, target: &User) -> bool {
+        self.can_mutate_role(&target.role)
+    }
+
+    /// [`Self::can_mutate_user`] for callers that hold only the target's role.
+    ///
+    /// Split out for the bulk paths, which read the roles of a whole batch in
+    /// one query rather than loading a `User` per id.
+    pub fn can_mutate_role(&self, target_role: &str) -> bool {
         match self.role_enum() {
             Role::Admin => true,
-            Role::Manager => !target.is_admin_role(),
+            Role::Manager => Role::parse(target_role).unwrap_or(Role::Member) != Role::Admin,
             Role::Member => false,
         }
     }

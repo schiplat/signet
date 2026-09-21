@@ -42,7 +42,43 @@ pub struct AuditEvent {
 /// Takes the whole [`AppState`] rather than a bare `&PgPool` because the
 /// webhook fan-out needs the application encryptor to decrypt stored secrets.
 pub async fn record(state: &AppState, event: AuditEvent) {
-    let id = Uuid::new_v4();
+    write(state, vec![event]).await;
+}
+
+/// Records a batch of events, then fans each one out to webhooks.
+///
+/// The compliance record is one row per event either way; this changes only how
+/// many times the database is asked. A directory sync produces an event per
+/// created, disabled, conflicted or unreadable entry, and one `INSERT` — on one
+/// pooled connection — per entry is the dominant cost of the run's audit trail
+/// once the actor is no longer re-read for each of them.
+pub async fn record_many(state: &AppState, events: Vec<AuditEvent>) {
+    write(state, events).await;
+}
+
+/// An event with everything derived from it already computed.
+///
+/// Split out because a batch has to be laid out as parallel arrays, and doing
+/// that derivation twice (once for the columns, once for the webhook payload)
+/// is how the two would drift apart.
+struct Prepared {
+    id: Uuid,
+    action: &'static str,
+    resource_type: &'static str,
+    resource_id: Option<String>,
+    detail: Value,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    actor_id: Option<Uuid>,
+    actor_email: Option<String>,
+    actor_role: Option<String>,
+    browser: Option<String>,
+    os: Option<String>,
+    client_id: Option<String>,
+    now: DateTime<Utc>,
+}
+
+fn prepare(event: AuditEvent) -> Prepared {
     let (actor_id, actor_email, actor_role) = match &event.actor {
         Some(u) => (Some(u.id), Some(u.email.clone()), Some(u.role.clone())),
         None => (None, None, None),
@@ -61,64 +97,152 @@ pub async fn record(state: &AppState, event: AuditEvent) {
             None
         }
     });
-    let now = Utc::now();
-    if let Err(e) = sqlx::query(
+    Prepared {
+        id: Uuid::new_v4(),
+        action: event.action,
+        resource_type: event.resource_type,
+        resource_id: event.resource_id,
+        detail: event.detail,
+        ip: event.ip,
+        user_agent: event.user_agent,
+        actor_id,
+        actor_email,
+        actor_role,
+        browser,
+        os,
+        client_id,
+        now: Utc::now(),
+    }
+}
+
+async fn write(state: &AppState, events: Vec<AuditEvent>) {
+    if events.is_empty() {
+        return;
+    }
+    let prepared: Vec<Prepared> = events.into_iter().map(prepare).collect();
+
+    // One statement for the whole batch. The columns are named once, here, so a
+    // new column cannot be added to a single-row path and forgotten in this one.
+    //
+    // `created_at` is left to its `DEFAULT NOW()`: the timestamp of the
+    // compliance record stays the database's clock, as it was before batching.
+    // The webhook payload keeps using the application's clock, also as before.
+    //
+    // `detail` is bound as text and cast in SQL: `jsonb[]` has no encoder for a
+    // `Vec<serde_json::Value>` here, and the cast is exact — the text is
+    // `serde_json`'s own output.
+    let insert = sqlx::query(
         r#"
         INSERT INTO audit_logs (
             id, actor_user_id, actor_email, actor_role,
             action, resource_type, resource_id, detail, ip,
             user_agent, browser, os, client_id
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        SELECT
+            ids.id, ids.actor_user_id, ids.actor_email, ids.actor_role,
+            ids.action, ids.resource_type, ids.resource_id, ids.detail::jsonb,
+            ids.ip, ids.user_agent, ids.browser, ids.os, ids.client_id
+        FROM UNNEST(
+            $1::uuid[], $2::uuid[], $3::text[], $4::text[],
+            $5::text[], $6::text[], $7::text[], $8::text[], $9::text[],
+            $10::text[], $11::text[], $12::text[], $13::text[]
+        ) AS ids(
+            id, actor_user_id, actor_email, actor_role,
+            action, resource_type, resource_id, detail, ip,
+            user_agent, browser, os, client_id
+        )
         "#,
     )
-    .bind(id)
-    .bind(actor_id)
-    .bind(actor_email.as_ref())
-    .bind(actor_role.as_ref())
-    .bind(event.action)
-    .bind(event.resource_type)
-    .bind(event.resource_id.as_ref())
-    .bind(event.detail.clone())
-    .bind(&event.ip)
-    .bind(&event.user_agent)
-    .bind(browser.as_ref())
-    .bind(os.as_ref())
-    .bind(&client_id)
-    .execute(&state.pool)
-    .await
-    {
-        tracing::warn!(error = %e, action = event.action, "failed to write audit log");
+    .bind(prepared.iter().map(|p| p.id).collect::<Vec<Uuid>>())
+    .bind(prepared.iter().map(|p| p.actor_id).collect::<Vec<_>>())
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.actor_email.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.actor_role.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(prepared.iter().map(|p| p.action).collect::<Vec<_>>())
+    .bind(prepared.iter().map(|p| p.resource_type).collect::<Vec<_>>())
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.resource_id.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.detail.to_string())
+            .collect::<Vec<String>>(),
+    )
+    .bind(prepared.iter().map(|p| p.ip.clone()).collect::<Vec<_>>())
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.user_agent.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.browser.clone())
+            .collect::<Vec<_>>(),
+    )
+    .bind(prepared.iter().map(|p| p.os.clone()).collect::<Vec<_>>())
+    .bind(
+        prepared
+            .iter()
+            .map(|p| p.client_id.clone())
+            .collect::<Vec<_>>(),
+    );
+
+    if let Err(e) = insert.execute(&state.pool).await {
+        // Still named, for the same reason as before: the batch is best-effort.
+        tracing::warn!(
+            error = %e,
+            events = prepared.len(),
+            first_action = prepared.first().map(|p| p.action).unwrap_or_default(),
+            "failed to write audit log"
+        );
         return;
     }
 
-    // Best-effort webhook fan-out (fire-and-forget).
-    //
-    // Per-entry directory sync events are recorded but not fanned out: with
-    // 100k users, one sync would otherwise produce 100k webhook deliveries, with
-    // no retry and no aggregation (§11.1). Each run's
-    // `directory.sync.finished` event carries the same totals, which is the
-    // intended delivery. The audit row above is still written for every event —
-    // that is the compliance record, and it is deliberately unaffected.
-    if crate::directory::is_summary_only_action(event.action) {
-        return;
+    for p in prepared {
+        // Best-effort webhook fan-out (fire-and-forget).
+        //
+        // Per-entry directory sync events are recorded but not fanned out: with
+        // 100k users, one sync would otherwise produce 100k webhook deliveries,
+        // with no retry and no aggregation (§11.1). Each run's
+        // `directory.sync.finished` event carries the same totals, which is the
+        // intended delivery. The audit row above is still written for every
+        // event — that is the compliance record, and it is deliberately
+        // unaffected.
+        if crate::directory::is_summary_only_action(p.action) {
+            continue;
+        }
+        let payload = json!({
+            "id": p.id,
+            "action": p.action,
+            "resource_type": p.resource_type,
+            "resource_id": p.resource_id,
+            "client_id": p.client_id,
+            "actor_user_id": p.actor_id,
+            "actor_email": p.actor_email,
+            "actor_role": p.actor_role,
+            "detail": p.detail,
+            "ip": p.ip,
+            "browser": p.browser,
+            "os": p.os,
+            "created_at": p.now.to_rfc3339(),
+        });
+        crate::webhooks::dispatch(state, p.id, payload);
     }
-    let payload = json!({
-        "id": id,
-        "action": event.action,
-        "resource_type": event.resource_type,
-        "resource_id": event.resource_id,
-        "client_id": client_id,
-        "actor_user_id": actor_id,
-        "actor_email": actor_email,
-        "actor_role": actor_role,
-        "detail": event.detail,
-        "ip": event.ip,
-        "browser": browser,
-        "os": os,
-        "created_at": now.to_rfc3339(),
-    });
-    crate::webhooks::dispatch(state, id, payload);
 }
 
 /// Extracts the OAuth `client_id` from a login `return_to` URL of the form

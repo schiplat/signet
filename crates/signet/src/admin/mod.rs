@@ -3,7 +3,7 @@ mod clients;
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
 use crate::auth::password::{
-    hash_password, record_password_history, set_user_password, validate_password_strength,
+    hash_password_offloaded, record_password_history, set_user_password, validate_password_strength,
 };
 use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
@@ -162,6 +162,38 @@ pub(crate) async fn require_admin_user(state: &AppState, headers: &HeaderMap) ->
     Ok(user)
 }
 
+/// The counters the overview page opens with, read in one round trip.
+///
+/// Six separate `COUNT(*)` queries used to be issued for `users` and two more
+/// for `client_apps`. They are near-free to compute but not free to *ask for*:
+/// the dashboard pays the sum of the round trips on every visit, and a remote
+/// database makes that tens of milliseconds of nothing.
+#[derive(Debug, sqlx::FromRow)]
+struct DashboardCounts {
+    users_total: i64,
+    users_active: i64,
+    users_disabled: i64,
+    users_admin: i64,
+    users_manager: i64,
+    clients_total: i64,
+    clients_enabled: i64,
+}
+
+/// The six login counters, from one scan instead of six.
+///
+/// The three `COUNT(DISTINCT actor_user_id)` variants are the reason this is
+/// worth doing as one query rather than a `try_join!`: they are the expensive
+/// part, and six separate queries scan the same 30 days six times over.
+#[derive(Debug, sqlx::FromRow)]
+struct LoginCounts {
+    logins_24h: i64,
+    logins_7d: i64,
+    logins_30d: i64,
+    unique_users_24h: i64,
+    unique_users_7d: i64,
+    unique_users_30d: i64,
+}
+
 #[derive(Debug, sqlx::FromRow, serde::Serialize)]
 struct RecentLogin {
     actor_email: Option<String>,
@@ -264,33 +296,38 @@ async fn stats(
     // "(direct)" filters sign-ins without app attribution.
     let direct_only = q.client_id.as_deref() == Some("(direct)");
 
-    let users_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
-        .fetch_one(&state.pool)
-        .await?;
-    let users_active: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE status = 'active'")
-            .fetch_one(&state.pool)
-            .await?;
-    let users_disabled: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE status = 'disabled'")
-            .fetch_one(&state.pool)
-            .await?;
-    let users_admin: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role = 'admin' AND status = 'active'")
-            .fetch_one(&state.pool)
-            .await?;
-    let users_manager: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE role = 'manager' AND status = 'active'",
+    // One round trip for every count on the overview page. The `users` and
+    // `client_apps` halves are two scans joined by a cross join, which is
+    // cheaper than the eight queries this replaces even before counting the
+    // round trips: each `COUNT(*) FILTER` reads the same rows the other
+    // filters would have read anyway.
+    let counts = sqlx::query_as::<_, DashboardCounts>(
+        r#"
+        SELECT
+            u.total          AS users_total,
+            u.active_count   AS users_active,
+            u.disabled_count AS users_disabled,
+            u.admin_count    AS users_admin,
+            u.manager_count  AS users_manager,
+            c.total          AS clients_total,
+            c.enabled_count  AS clients_enabled
+        FROM (
+            SELECT
+                COUNT(*)                                                  AS total,
+                COUNT(*) FILTER (WHERE status = 'active')                  AS active_count,
+                COUNT(*) FILTER (WHERE status = 'disabled')                AS disabled_count,
+                COUNT(*) FILTER (WHERE role = 'admin' AND status = 'active')   AS admin_count,
+                COUNT(*) FILTER (WHERE role = 'manager' AND status = 'active') AS manager_count
+            FROM users
+        ) u
+        CROSS JOIN (
+            SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE enabled) AS enabled_count
+            FROM client_apps
+        ) c
+        "#,
     )
     .fetch_one(&state.pool)
     .await?;
-    let clients_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM client_apps")
-        .fetch_one(&state.pool)
-        .await?;
-    let clients_enabled: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM client_apps WHERE enabled = TRUE")
-            .fetch_one(&state.pool)
-            .await?;
 
     // Login metrics scoped by the optional app filter: `scope_client` adds a
     // `client_id = $N` predicate, `direct_only` selects NULL-client rows.
@@ -302,216 +339,212 @@ async fn stats(
         }
     };
 
-    let logins_24h: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours' {}",
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_one(&state.pool)
-    .await?;
-    let logins_7d: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days' {}",
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_one(&state.pool)
-    .await?;
-    let logins_30d: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days' {}",
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_one(&state.pool)
-    .await?;
-    let unique_users_24h: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '24 hours' AND actor_user_id IS NOT NULL {}",
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_one(&state.pool)
-    .await?;
-    let unique_users_7d: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '7 days' AND actor_user_id IS NOT NULL {}",
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_one(&state.pool)
-    .await?;
-    let unique_users_30d: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(DISTINCT actor_user_id) FROM audit_logs WHERE action = 'auth.login' AND created_at > NOW() - INTERVAL '30 days' AND actor_user_id IS NOT NULL {}",
+    // The six login counters from one scan of one 30-day window. Every window
+    // is contained in that one, so the counts are identical to what six
+    // separate queries would return; the `FILTER` clauses only decide which
+    // rows of the single scan they count. Bounding the scan by 30 days is what
+    // keeps this off the full history.
+    let logins = sqlx::query_as::<_, LoginCounts>(&format!(
+        r#"
+        SELECT
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::bigint AS logins_24h,
+            COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::bigint   AS logins_7d,
+            COUNT(*)::bigint                                                         AS logins_30d,
+            COUNT(DISTINCT actor_user_id) FILTER (
+                WHERE created_at > NOW() - INTERVAL '24 hours' AND actor_user_id IS NOT NULL
+            )::bigint AS unique_users_24h,
+            COUNT(DISTINCT actor_user_id) FILTER (
+                WHERE created_at > NOW() - INTERVAL '7 days' AND actor_user_id IS NOT NULL
+            )::bigint AS unique_users_7d,
+            COUNT(DISTINCT actor_user_id) FILTER (
+                WHERE actor_user_id IS NOT NULL
+            )::bigint AS unique_users_30d
+        FROM audit_logs
+        WHERE action = 'auth.login'
+          AND created_at > NOW() - INTERVAL '30 days'
+          {}
+        "#,
         client_pred(1)
     ))
     .bind(&scope_client)
     .fetch_one(&state.pool)
     .await?;
 
-    let login_trend = sqlx::query_as::<_, LoginTrendPoint>(
-        &format!(
-            r#"
-            WITH daily AS (
-                SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
-                       COUNT(*)::bigint AS logins
-                FROM audit_logs
-                WHERE action = 'auth.login'
-                  AND created_at >= ((CURRENT_DATE - INTERVAL '59 days')::timestamp AT TIME ZONE 'UTC')
-                  {}
-                GROUP BY 1
-            ),
-            history AS (
-                SELECT
-                    gs::date AS day,
-                    COALESCE(d.logins, 0)::bigint AS logins_1d
-                FROM generate_series(
-                    (CURRENT_DATE - INTERVAL '59 days')::date,
-                    CURRENT_DATE,
-                    '1 day'::interval
-                ) AS gs
-                LEFT JOIN daily d ON d.day = gs::date
-            ),
-            rolled AS (
-                SELECT
-                    day,
-                    logins_1d,
-                    SUM(logins_1d) OVER (
-                        ORDER BY day
-                        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
-                    )::bigint AS logins_7d,
-                    SUM(logins_1d) OVER (
-                        ORDER BY day
-                        ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
-                    )::bigint AS logins_30d
-                FROM history
-            )
-            SELECT day, logins_1d, logins_7d, logins_30d
-            FROM rolled
-            WHERE day >= (CURRENT_DATE - INTERVAL '29 days')::date
-            ORDER BY day
-            "#,
-            client_pred(1)
+    // The remaining reads are independent of one another and of the counters
+    // above, so they go out together: the page's latency is the slowest of them
+    // rather than their sum.
+    // Every statement below is bound to a local first. `try_join!` holds all of
+    // the futures across one await, so a `&format!` temporary would be dropped
+    // while the macro's expansion still borrows it.
+    let sql_trend = format!(
+        r#"
+        WITH daily AS (
+            SELECT (created_at AT TIME ZONE 'UTC')::date AS day,
+                   COUNT(*)::bigint AS logins
+            FROM audit_logs
+            WHERE action = 'auth.login'
+              AND created_at >= ((CURRENT_DATE - INTERVAL '59 days')::timestamp AT TIME ZONE 'UTC')
+              {client}
+            GROUP BY 1
+        ),
+        history AS (
+            SELECT
+                gs::date AS day,
+                COALESCE(d.logins, 0)::bigint AS logins_1d
+            FROM generate_series(
+                (CURRENT_DATE - INTERVAL '59 days')::date,
+                CURRENT_DATE,
+                '1 day'::interval
+            ) AS gs
+            LEFT JOIN daily d ON d.day = gs::date
+        ),
+        rolled AS (
+            SELECT
+                day,
+                logins_1d,
+                SUM(logins_1d) OVER (
+                    ORDER BY day
+                    ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+                )::bigint AS logins_7d,
+                SUM(logins_1d) OVER (
+                    ORDER BY day
+                    ROWS BETWEEN 29 PRECEDING AND CURRENT ROW
+                )::bigint AS logins_30d
+            FROM history
         )
-    )
-    .bind(&scope_client)
-    .fetch_all(&state.pool)
-    .await?;
+        SELECT day, logins_1d, logins_7d, logins_30d
+        FROM rolled
+        WHERE day >= (CURRENT_DATE - INTERVAL '29 days')::date
+        ORDER BY day
+        "#,
+        client = client_pred(1)
+    );
 
     // Hourly grain for the default 24h range: dense hourly buckets so the
     // x-axis is time-of-day, not dates.
-    let login_trend_24h = sqlx::query_as::<_, LoginTrendHourPoint>(&format!(
+    let sql_trend_24h = format!(
         r#"
-            WITH buckets AS (
-                SELECT
-                    date_trunc('hour', gs) AS hour,
-                    0::bigint AS logins
-                FROM generate_series(
-                    date_trunc('hour', NOW() AT TIME ZONE 'UTC') - INTERVAL '23 hours',
-                    date_trunc('hour', NOW() AT TIME ZONE 'UTC'),
-                    '1 hour'::interval
-                ) AS gs
-            ),
-            counts AS (
-                SELECT
-                    date_trunc('hour', created_at AT TIME ZONE 'UTC') AS hour,
-                    COUNT(*)::bigint AS logins
-                FROM audit_logs
-                WHERE action = 'auth.login'
-                  AND created_at >= date_trunc('hour', NOW()) - INTERVAL '23 hours'
-                  {}
-                GROUP BY 1
-            )
-            SELECT b.hour AS hour, COALESCE(c.logins, 0) AS logins
-            FROM buckets b
-            LEFT JOIN counts c ON c.hour = b.hour
-            ORDER BY b.hour
-            "#,
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_all(&state.pool)
-    .await?;
-
-    let recent_logins = sqlx::query_as::<_, RecentLogin>(&format!(
-        r#"
-            SELECT actor_email, ip, browser, os, client_id, created_at
+        WITH buckets AS (
+            SELECT
+                date_trunc('hour', gs) AS hour,
+                0::bigint AS logins
+            FROM generate_series(
+                date_trunc('hour', NOW() AT TIME ZONE 'UTC') - INTERVAL '23 hours',
+                date_trunc('hour', NOW() AT TIME ZONE 'UTC'),
+                '1 hour'::interval
+            ) AS gs
+        ),
+        counts AS (
+            SELECT
+                date_trunc('hour', created_at AT TIME ZONE 'UTC') AS hour,
+                COUNT(*)::bigint AS logins
             FROM audit_logs
             WHERE action = 'auth.login'
-              AND created_at > NOW() - INTERVAL '7 days'
-              {}
-            ORDER BY created_at DESC
-            LIMIT 10
-            "#,
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_all(&state.pool)
-    .await?;
+              AND created_at >= date_trunc('hour', NOW()) - INTERVAL '23 hours'
+              {client}
+            GROUP BY 1
+        )
+        SELECT b.hour AS hour, COALESCE(c.logins, 0) AS logins
+        FROM buckets b
+        LEFT JOIN counts c ON c.hour = b.hour
+        ORDER BY b.hour
+        "#,
+        client = client_pred(1)
+    );
 
-    // Per-app aggregates over the last 30 days (global view only; when
-    // scoped to one app the front end already knows the single row).
-    let by_client: Vec<ClientUsage> = sqlx::query_as::<_, ClientUsage>(
+    let sql_recent = format!(
         r#"
-        SELECT COALESCE(client_id, '(direct)')                AS client_id,
-               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::bigint AS logins_24h,
-               COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::bigint  AS logins_7d,
-               COUNT(*)::bigint                               AS logins_30d,
-               COUNT(DISTINCT actor_user_id)::bigint          AS unique_users_30d
+        SELECT actor_email, ip, browser, os, client_id, created_at
+        FROM audit_logs
+        WHERE action = 'auth.login'
+          AND created_at > NOW() - INTERVAL '7 days'
+          {client}
+        ORDER BY created_at DESC
+        LIMIT 10
+        "#,
+        client = client_pred(1)
+    );
+
+    // Browser / OS distribution over the last 30 days (login events).
+    let sql_browsers = format!(
+        r#"
+        SELECT COALESCE(browser, 'Unknown') AS name, COUNT(*)::bigint AS count
         FROM audit_logs
         WHERE action = 'auth.login'
           AND created_at >= NOW() - INTERVAL '30 days'
+          {client}
         GROUP BY 1
-        ORDER BY logins_30d DESC
-        LIMIT 10
+        ORDER BY count DESC
         "#,
-    )
-    .fetch_all(&state.pool)
-    .await?;
+        client = client_pred(1)
+    );
 
-    // Browser / OS distribution over the last 30 days (login events).
-    let browsers: Vec<NameCount> = sqlx::query_as::<_, NameCount>(&format!(
+    let sql_oses = format!(
         r#"
-            SELECT COALESCE(browser, 'Unknown') AS name, COUNT(*)::bigint AS count
+        SELECT COALESCE(os, 'Unknown') AS name, COUNT(*)::bigint AS count
+        FROM audit_logs
+        WHERE action = 'auth.login'
+          AND created_at >= NOW() - INTERVAL '30 days'
+          {client}
+        GROUP BY 1
+        ORDER BY count DESC
+        "#,
+        client = client_pred(1)
+    );
+
+    // The remaining reads are independent of one another and of the counters
+    // above, so they go out together: the page's latency is the slowest of them
+    // rather than their sum.
+    let (login_trend, login_trend_24h, recent_logins, by_client, browsers, oses) = tokio::try_join!(
+        sqlx::query_as::<_, LoginTrendPoint>(&sql_trend)
+            .bind(&scope_client)
+            .fetch_all(&state.pool),
+        sqlx::query_as::<_, LoginTrendHourPoint>(&sql_trend_24h)
+            .bind(&scope_client)
+            .fetch_all(&state.pool),
+        sqlx::query_as::<_, RecentLogin>(&sql_recent)
+            .bind(&scope_client)
+            .fetch_all(&state.pool),
+        // Per-app aggregates over the last 30 days (global view only; when
+        // scoped to one app the front end already knows the single row).
+        sqlx::query_as::<_, ClientUsage>(
+            r#"
+            SELECT COALESCE(client_id, '(direct)')                AS client_id,
+                   COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours')::bigint AS logins_24h,
+                   COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '7 days')::bigint  AS logins_7d,
+                   COUNT(*)::bigint                               AS logins_30d,
+                   COUNT(DISTINCT actor_user_id)::bigint          AS unique_users_30d
             FROM audit_logs
             WHERE action = 'auth.login'
               AND created_at >= NOW() - INTERVAL '30 days'
-              {}
             GROUP BY 1
-            ORDER BY count DESC
+            ORDER BY logins_30d DESC
+            LIMIT 10
             "#,
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_all(&state.pool)
-    .await?;
-
-    let oses: Vec<NameCount> = sqlx::query_as::<_, NameCount>(&format!(
-        r#"
-            SELECT COALESCE(os, 'Unknown') AS name, COUNT(*)::bigint AS count
-            FROM audit_logs
-            WHERE action = 'auth.login'
-              AND created_at >= NOW() - INTERVAL '30 days'
-              {}
-            GROUP BY 1
-            ORDER BY count DESC
-            "#,
-        client_pred(1)
-    ))
-    .bind(&scope_client)
-    .fetch_all(&state.pool)
-    .await?;
+        )
+        .fetch_all(&state.pool),
+        sqlx::query_as::<_, NameCount>(&sql_browsers)
+            .bind(&scope_client)
+            .fetch_all(&state.pool),
+        sqlx::query_as::<_, NameCount>(&sql_oses)
+            .bind(&scope_client)
+            .fetch_all(&state.pool),
+    )?;
 
     Ok(Json(AdminStats {
-        users_total,
-        users_active,
-        users_disabled,
-        users_admin,
-        users_manager,
-        clients_total,
-        clients_enabled,
-        logins_24h,
-        logins_7d,
-        logins_30d,
-        unique_users_24h,
-        unique_users_7d,
-        unique_users_30d,
+        users_total: counts.users_total,
+        users_active: counts.users_active,
+        users_disabled: counts.users_disabled,
+        users_admin: counts.users_admin,
+        users_manager: counts.users_manager,
+        clients_total: counts.clients_total,
+        clients_enabled: counts.clients_enabled,
+        logins_24h: logins.logins_24h,
+        logins_7d: logins.logins_7d,
+        logins_30d: logins.logins_30d,
+        unique_users_24h: logins.unique_users_24h,
+        unique_users_7d: logins.unique_users_7d,
+        unique_users_30d: logins.unique_users_30d,
         login_trend,
         login_trend_24h,
         recent_logins,
@@ -524,16 +557,140 @@ async fn stats(
     }))
 }
 
+/// Page size for the users list when the client does not ask for one.
+///
+/// The dashboard's own selector offers 10/20/50/100 and starts at 20.
+const USERS_PAGE_DEFAULT: i64 = 20;
+
+/// Ceiling on `limit`.
+///
+/// The point of the paging is that this endpoint cannot be made to read the
+/// whole table, and a client asking for `limit=1000000` would undo that. The
+/// dashboard never asks for more than its largest option.
+const USERS_PAGE_MAX: i64 = 200;
+
+/// The columns the search box matches, as SQL.
+///
+/// The dashboard used to filter this in the browser over the full list, so this
+/// has to cover the same ground or a search would start missing rows it used to
+/// find: the three name fields, the two state columns, the creation source, and
+/// the SSO identities behind the `sso` column.
+///
+/// `$1` is the pattern, or NULL for "no search".
+const USER_SEARCH_SQL: &str = r#"
+    ($1::text IS NULL
+     OR u.email ILIKE $1
+     OR COALESCE(u.username, '') ILIKE $1
+     OR u.display_name ILIKE $1
+     OR u.status ILIKE $1
+     OR u.role ILIKE $1
+     OR COALESCE(u.provisioned_via, '') ILIKE $1
+     OR EXISTS (
+         SELECT 1 FROM user_identities ui
+         JOIN upstream_providers p ON p.code = ui.provider_code
+         WHERE ui.user_id = u.id
+           AND (p.display_name ILIKE $1
+                OR ui.provider_code ILIKE $1
+                OR p.provider_type ILIKE $1)
+     ))
+"#;
+
+/// The sortable columns, as SQL.
+///
+/// A whitelist, not interpolation: the value is concatenated into the statement
+/// text, and the client's choice of column is not something to take on trust.
+/// An unknown key sorts by `created_at`, which is what the dashboard did when
+/// its `getValue` had no case for the key.
+fn user_sort_column(key: &str) -> &'static str {
+    match key {
+        "email" => "u.email",
+        "display_name" => "u.display_name",
+        "role" => "u.role",
+        "status" => "u.status",
+        _ => "u.created_at",
+    }
+}
+
+/// Wraps `needle` in `%` for `ILIKE`, escaping the wildcards it contains.
+///
+/// The browser filtered with `String.prototype.includes`, so a search for `a_b`
+/// matched those three literal characters. Passing it to `ILIKE` unescaped would
+/// read `_` as "any single character" and return rows the operator did not ask
+/// for — the same query meaning two different things before and after the move
+/// to the server.
+fn like_pattern(needle: &str) -> String {
+    let escaped = needle
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+#[derive(Debug, Deserialize)]
+struct ListUsersQuery {
+    q: Option<String>,
+    sort: Option<String>,
+    dir: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    offset: Option<i64>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct AdminUserList {
+    users: Vec<AdminUserListItem>,
+    /// Rows matching the search, not rows in this page.
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
+
 async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> AppResult<Json<Vec<AdminUserListItem>>> {
+    Query(q): Query<ListUsersQuery>,
+) -> AppResult<Json<AdminUserList>> {
     require_staff_user(&state, &headers).await?;
-    let users = sqlx::query_as::<_, User>(&format!(
-        "SELECT {USER_COLS} FROM users ORDER BY created_at DESC"
-    ))
-    .fetch_all(&state.pool)
-    .await?;
+
+    let limit = q
+        .limit
+        .unwrap_or(USERS_PAGE_DEFAULT)
+        .clamp(1, USERS_PAGE_MAX);
+    let offset = q.offset.unwrap_or(0).max(0);
+    let column = user_sort_column(q.sort.as_deref().unwrap_or("created_at"));
+    let direction = if q.dir.as_deref() == Some("asc") {
+        "ASC"
+    } else {
+        "DESC"
+    };
+    let pattern =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|needle| !needle.is_empty())
+            .map(like_pattern);
+
+    // `u.id` breaks ties. Without it the order of rows sharing a sort key is
+    // whatever the plan happens to produce, which differs between the page
+    // queries — a directory import stamps hundreds of users with the same
+    // `created_at`, and those are exactly the rows a page boundary can drop or
+    // repeat.
+    let page_sql = format!(
+        "SELECT {USER_COLS} FROM users u WHERE {USER_SEARCH_SQL} \
+         ORDER BY {column} {direction}, u.id ASC LIMIT $2 OFFSET $3"
+    );
+    let count_sql = format!("SELECT COUNT(*) FROM users u WHERE {USER_SEARCH_SQL}");
+
+    let (users, total) = tokio::try_join!(
+        sqlx::query_as::<_, User>(&page_sql)
+            .bind(&pattern)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&state.pool),
+        sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(&pattern)
+            .fetch_one(&state.pool),
+    )?;
 
     #[derive(sqlx::FromRow)]
     struct IdentRow {
@@ -543,14 +700,21 @@ async fn list_users(
         provider_type: String,
     }
 
+    // Scoped to the page. Both of these used to read every row of their table on
+    // every request — a full scan of `user_identities` and a sort of the whole
+    // `directory_entries` link table — to decorate two dozen users.
+    let ids: Vec<Uuid> = users.iter().map(|u| u.id).collect();
+
     let idents = sqlx::query_as::<_, IdentRow>(
         r#"
         SELECT ui.user_id, ui.provider_code, p.display_name, p.provider_type
         FROM user_identities ui
         JOIN upstream_providers p ON p.code = ui.provider_code
+        WHERE ui.user_id = ANY($1::uuid[])
         ORDER BY ui.linked_at ASC
         "#,
     )
+    .bind(&ids)
     .fetch_all(&state.pool)
     .await?;
 
@@ -561,15 +725,17 @@ async fn list_users(
     }
 
     // Same precedence order as `directory::managing_source`, batched for the
-    // whole list rather than one query per row.
+    // whole page rather than one query per row.
     let managed = sqlx::query_as::<_, ManagedRow>(
         r#"
         SELECT e.user_id, s.code
         FROM directory_entries e
         JOIN directory_sources s ON s.id = e.source_id
+        WHERE e.user_id = ANY($1::uuid[])
         ORDER BY s.priority ASC, s.code ASC
         "#,
     )
+    .bind(&ids)
     .fetch_all(&state.pool)
     .await?;
 
@@ -595,7 +761,7 @@ async fn list_users(
             .push(row.code);
     }
 
-    let out = users
+    let users = users
         .into_iter()
         .map(|u| {
             let has_password = !u.password_hash.is_empty();
@@ -611,7 +777,12 @@ async fn list_users(
             }
         })
         .collect();
-    Ok(Json(out))
+    Ok(Json(AdminUserList {
+        users,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -813,7 +984,7 @@ async fn create_user(
         .unwrap_or_else(|| email.split('@').next().unwrap_or("user").to_string());
     let id = Uuid::new_v4();
     let sub = id.to_string();
-    let password_hash = hash_password(&body.password)?;
+    let password_hash = hash_password_offloaded(&body.password).await?;
     let groups = body.groups.unwrap_or_default();
     let phone = normalize_phone(body.phone)?;
     if let Some(p) = &phone {
@@ -1235,22 +1406,44 @@ async fn batch_disable_users(
         return Err(AppError::bad_request("cannot disable yourself"));
     }
 
-    let mut disabled = 0i64;
-    for id in &body.ids {
-        let Ok(target) = user_by_id(&state.pool, *id).await else {
-            continue;
-        };
-        if !actor.can_mutate_user(&target) {
-            continue;
-        }
-        match set_user_access(&state, *id, UserAccess::Disabled).await {
-            Ok(_) => disabled += 1,
-            Err(AppError::NotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
-    }
+    // Which of the ids exist and which the actor may touch, in one query. The
+    // per-user version was a `user_by_id` each, and a `set_user_access` and a
+    // session delete after that.
+    let targets: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, role FROM users WHERE id = ANY($1::uuid[])")
+            .bind(&body.ids)
+            .fetch_all(&state.pool)
+            .await?;
 
-    Ok(Json(serde_json::json!({ "disabled": disabled })))
+    let allowed: Vec<Uuid> = targets
+        .into_iter()
+        .filter(|(_, role)| actor.can_mutate_role(role))
+        .map(|(id, _)| id)
+        .collect();
+
+    // Read back rather than counted: a user deleted between the two statements
+    // is not disabled, which is what the loop's `NotFound` arm did too.
+    let disabled = disable_users(&state, &allowed).await?;
+
+    // The single-user endpoint records one event per disable; this one recorded
+    // none at all, so a bulk disable left no trace of who was affected.
+    let events: Vec<AuditEvent> = disabled
+        .iter()
+        .map(|(id, email)| AuditEvent {
+            actor: Some(actor.clone()),
+            action: "user.disable",
+            resource_type: "user",
+            resource_id: Some(id.to_string()),
+            detail: json!({ "email": email, "bulk": true }),
+            ip: None,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        })
+        .collect();
+    let count = events.len() as i64;
+    crate::audit::record_many(&state, events).await;
+
+    Ok(Json(serde_json::json!({ "disabled": count })))
 }
 
 async fn revoke_user_sessions(
@@ -1348,6 +1541,38 @@ pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> 
         revoke_all_sessions(&state.pool, id).await?;
     }
     Ok(user)
+}
+
+/// Disables every existing user in `ids` in one statement, returning the
+/// `(id, email)` of the rows that changed.
+///
+/// The batch sibling of [`set_user_access`] for [`UserAccess::Disabled`]. That
+/// path is two statements per user plus a session delete, so the "disable
+/// selected" button on the users list was 3+N round trips for N accounts.
+///
+/// `status = 'disabled'` is written literally rather than derived from the
+/// three flags the way [`set_user_access`] does it, because `local_disabled`
+/// is being set: the migration `026` CHECK makes 'disabled' the only status
+/// consistent with that, so a row written here cannot disagree with a row
+/// written there.
+pub async fn disable_users(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Uuid, String)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let disabled: Vec<(Uuid, String)> = sqlx::query_as(
+        "UPDATE users SET local_disabled = TRUE, status = 'disabled', updated_at = NOW() \
+         WHERE id = ANY($1::uuid[]) \
+         RETURNING id, email",
+    )
+    .bind(ids)
+    .fetch_all(&state.pool)
+    .await?;
+    crate::auth::session::revoke_sessions_for(
+        &state.pool,
+        &disabled.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+    )
+    .await?;
+    Ok(disabled)
 }
 
 /// Records a refused local write to a directory-owned attribute.

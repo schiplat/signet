@@ -548,6 +548,73 @@ async fn provisioning_is_audited_without_fanning_out_per_entry() {
     .await;
 }
 
+/// A manual run names the admin who triggered it on every event it writes.
+///
+/// The actor is resolved once per run and cloned into each event. That clone is
+/// the thing worth pinning: if it went missing, the events would still be
+/// written and every count in this suite would still pass — the audit trail
+/// would simply have stopped saying who did it.
+#[tokio::test]
+async fn every_event_of_a_manual_run_names_its_actor() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+    let admin = common::create_user(&state.pool, "").await;
+    // `scoped` takes ownership of the state; the admin is not attached to the
+    // source, so its cleanup has to happen from outside.
+    let pool = state.pool.clone();
+
+    common::scoped(state, source, move |state, source| async move {
+        let actor = signet::models::user_by_id(&state.pool, admin)
+            .await
+            .expect("load the triggering admin");
+        let run_id = common::begin_run(&state.pool, source.id).await;
+
+        let upstream = vec![
+            person(&source, "e-1", "One", &[]),
+            person(&source, "e-2", "Two", &[]),
+        ];
+        let local = load_local_state(&state.pool, source.id, &source.code)
+            .await
+            .expect("snapshot local state");
+        let planned = plan(
+            &upstream,
+            &local,
+            PlanOptions {
+                allowed_email_domains: Vec::new(),
+                sync_groups: source.sync_groups,
+                reconcile: true,
+                scope: ScopeFilter::default(),
+            },
+        );
+        apply_plan(&state, &source, run_id, &planned, Some(&actor))
+            .await
+            .expect("apply the plan");
+
+        // Two users were created in one batch; both rows must carry the actor.
+        let attributed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs \
+             WHERE action = 'directory.user.created' \
+               AND detail ->> 'source' = $1 \
+               AND actor_user_id = $2 AND actor_email = $3",
+        )
+        .bind(&source.code)
+        .bind(admin)
+        .bind(&actor.email)
+        .fetch_one(&state.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            attributed, 2,
+            "one create event per user, each naming the admin who ran the sync"
+        );
+    })
+    .await;
+
+    common::delete_user(&pool, admin).await;
+}
+
 /// Two sources: the higher-priority one keeps its authority, so the other cannot
 /// rewrite the user or disable them (§4.1).
 #[tokio::test]
