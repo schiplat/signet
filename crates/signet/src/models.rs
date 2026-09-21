@@ -4,7 +4,42 @@ use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
     mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
-    provisioned_via, local_disabled, directory_groups, created_at, updated_at, external_id";
+    provisioned_via, local_disabled, directory_disabled, scim_disabled, directory_groups, \
+    created_at, updated_at, external_id";
+
+/// The rule that turns the three disable flags into `status`, as SQL.
+///
+/// Each authority records its own intent — `local_disabled` for an admin,
+/// `directory_disabled` for "absent from a live directory source",
+/// `scim_disabled` for the IdP's `active: false` — and `status` is only ever the
+/// answer derived from them. No authority writes `status` on its own; that is
+/// what let the sync and SCIM silently undo each other.
+///
+/// Column-referencing, so an `UPDATE` that sets one flag re-derives `status`
+/// from the row's other two without a second query. An `UPDATE` that *changes* a
+/// flag cannot use it verbatim — `SET` expressions read the old row, so the new
+/// value has to be substituted for that flag by hand. Inserts have no row to
+/// reference and use [`status_from_flags`] instead; all three spellings are kept
+/// honest by migration `026`'s `users_status_matches_flags` CHECK, which rejects
+/// any row where the stored `status` disagrees with the flags, and by
+/// `tests/disable_flags.rs`, which walks every flag combination through both the
+/// Rust helper and the database.
+pub const STATUS_FROM_FLAGS: &str =
+    "CASE WHEN local_disabled OR directory_disabled OR scim_disabled \
+     THEN 'disabled' ELSE 'active' END";
+
+/// The same rule as [`STATUS_FROM_FLAGS`], for a row that does not exist yet.
+pub fn status_from_flags(
+    local_disabled: bool,
+    directory_disabled: bool,
+    scim_disabled: bool,
+) -> &'static str {
+    if local_disabled || directory_disabled || scim_disabled {
+        "disabled"
+    } else {
+        "active"
+    }
+}
 
 /// [`USER_COLS`] qualified with a table alias, for queries that join `users`
 /// with another table.
@@ -112,16 +147,23 @@ pub struct NewUser<'a> {
     pub password_hash: &'a str,
 
     /// Defaulted here because the INSERT names the column, so the database
-    /// default is never reached. Values mirror the schema: `status` is
-    /// `'active'` and `role` is `'member'` (migration `002`), `groups` is `'{}'`
-    /// (`006`), `must_change_password` is `FALSE` (`016`).
-    pub status: &'a str,
+    /// default is never reached. Values mirror the schema: `role` is `'member'`
+    /// (migration `002`), `groups` is `'{}'` (`006`), `must_change_password` is
+    /// `FALSE` (`016`).
     pub role: &'a str,
     pub username: Option<&'a str>,
     pub phone: Option<&'a str>,
     pub groups: &'a [String],
     pub external_id: Option<&'a str>,
     pub must_change_password: bool,
+
+    /// The IdP asked for the account to start disabled (SCIM's `active: false`).
+    ///
+    /// The creation paths used to set `status` itself, which is the thing that
+    /// let an authority's intent be overwritten by whoever ran next. They now
+    /// state their intent as a flag and `insert_user` derives `status` from the
+    /// flags, so an insert cannot ask for a combination the schema rejects.
+    pub scim_disabled: bool,
 }
 
 impl<'a> NewUser<'a> {
@@ -144,13 +186,13 @@ impl<'a> NewUser<'a> {
             email,
             display_name,
             password_hash,
-            status: "active",
             role: "member",
             username: None,
             phone: None,
             groups: &[],
             external_id: None,
             must_change_password: false,
+            scim_disabled: false,
         }
     }
 }
@@ -174,9 +216,9 @@ where
     sqlx::query_as::<_, User>(&format!(
         r#"
         INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role,
-                           groups, phone, external_id, must_change_password,
+                           groups, phone, external_id, must_change_password, scim_disabled,
                            created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW(), NOW())
         RETURNING {USER_COLS}
         "#
     ))
@@ -186,10 +228,16 @@ where
     .bind(new.username)
     .bind(new.display_name)
     .bind(new.password_hash)
-    .bind(new.status)
+    // Derived, never taken from the caller: the only flag a creation path can
+    // set is SCIM's, and the other two start clear because a brand new row has
+    // no admin intent and no directory claim yet.
+    .bind(status_from_flags(false, false, new.scim_disabled))
     .bind(new.role)
     .bind(new.groups)
     .bind(new.phone)
+    .bind(new.external_id)
+    .bind(new.must_change_password)
+    .bind(new.scim_disabled)
     .bind(new.external_id)
     .bind(new.must_change_password)
     .fetch_one(executor)
@@ -220,6 +268,12 @@ pub struct User {
     /// directory sync cannot silently re-enable an account an admin disabled.
     /// Only an explicit admin enable clears it (migration `024`).
     pub local_disabled: bool,
+    /// "Absent from a live directory source": the sync's disable intent, held
+    /// separately so a SCIM `active: true` cannot release it (migration `026`).
+    pub directory_disabled: bool,
+    /// The IdP's `active: false`, held separately so a directory re-sync cannot
+    /// release it (migration `026`).
+    pub scim_disabled: bool,
     /// Groups sourced from the directory, kept apart from the locally-managed
     /// `groups` column so sync replaces only its own membership.
     pub directory_groups: Vec<String>,

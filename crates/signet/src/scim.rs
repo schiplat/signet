@@ -258,16 +258,12 @@ async fn create_user(
         .password
         .unwrap_or_else(|| crate::crypto::util::random_token(24));
     let password_hash = hash_password(&password)?;
-    let status = if body.active == Some(false) {
-        "disabled"
-    } else {
-        "active"
-    };
 
     let mut new_user = NewUser::new(id, &sub, &email, &display_name, &password_hash);
-    // SCIM `active: false` provisions a disabled account, so this is the one
-    // creation path that sets the status.
-    new_user.status = status;
+    // SCIM `active: false` provisions a disabled account. Stated as SCIM's own
+    // intent rather than a `status`, so the next directory sync does not read it
+    // as "upstream is active" and release it.
+    new_user.scim_disabled = body.active == Some(false);
     new_user.username = Some(username.as_str());
     new_user.external_id = body
         .external_id
@@ -368,7 +364,9 @@ async fn put_user(
     let username = normalize_username(body.user_name.as_deref());
     let email = primary_email(&body.emails);
     let display_name = body.display_name.map(|s| s.trim().to_string());
-    let status = body.active.map(|a| if a { "active" } else { "disabled" });
+    // `None` means the body did not mention `active`, which a PUT may leave as it
+    // is — so the flag is bound as an `Option` and `COALESCE`d in the UPDATE.
+    let scim_disabled = body.active.map(|a| !a);
 
     if let Some(u) = &username {
         if existing.username.as_deref() != Some(u.as_str()) {
@@ -405,7 +403,13 @@ async fn put_user(
             email = COALESCE($2, email),
             username = COALESCE($3, username),
             display_name = COALESCE($4, display_name),
-            status = COALESCE($5, status),
+            scim_disabled = COALESCE($5, scim_disabled),
+            -- SCIM records only its own intent; `status` is the answer from all
+            -- three flags. The new `scim_disabled` is substituted rather than
+            -- referenced, because `SET` expressions read the old row.
+            status = CASE
+                WHEN local_disabled OR directory_disabled OR COALESCE($5, scim_disabled)
+                THEN 'disabled' ELSE 'active' END,
             external_id = $6,
             updated_at = NOW()
         WHERE id = $1
@@ -416,7 +420,7 @@ async fn put_user(
     .bind(email.as_deref())
     .bind(username.as_deref())
     .bind(display_name.as_deref())
-    .bind(status)
+    .bind(scim_disabled)
     .bind(
         body.external_id
             .as_deref()
@@ -639,16 +643,30 @@ async fn patch_user(
     // Attributes the PATCH did not mention keep their current value — a PATCH is
     // partial by definition, so "absent" must not be read as "set to default".
     let attrs = user_attrs_from_body(body)?;
-    let active = attrs.active.unwrap_or(existing.status == "active");
+    // Only the `active` attribute speaks for SCIM's intent. When it is absent,
+    // SCIM's claim is left exactly as it was — deliberately not re-derived from
+    // the effective status, which may be `disabled` because of an admin or the
+    // directory rather than because of SCIM.
+    let scim_disabled = attrs.active.map(|active| !active);
     let display_name = attrs
         .display_name
         .unwrap_or_else(|| existing.display_name.clone());
 
     let row = sqlx::query_as::<_, ScimUserRow>(&format!(
-        "UPDATE users SET status = $2, display_name = $3, updated_at = NOW() WHERE id = $1 RETURNING {USER_SELECT}"
+        r#"
+        UPDATE users SET
+            display_name = $3,
+            scim_disabled = COALESCE($2, scim_disabled),
+            status = CASE
+                WHEN local_disabled OR directory_disabled OR COALESCE($2, scim_disabled)
+                THEN 'disabled' ELSE 'active' END,
+            updated_at = NOW()
+        WHERE id = $1
+        RETURNING {USER_SELECT}
+        "#
     ))
     .bind(existing.id)
-    .bind(if active { "active" } else { "disabled" })
+    .bind(scim_disabled)
     .bind(&display_name)
     .fetch_one(&state.pool)
     .await?;

@@ -84,6 +84,7 @@ fn classifies_new_linked_absent_and_colliding_entries() {
                 display_name: "stale name".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: gone_id,
@@ -92,6 +93,7 @@ fn classifies_new_linked_absent_and_colliding_entries() {
                 display_name: "Gone".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: rival_id,
@@ -100,6 +102,7 @@ fn classifies_new_linked_absent_and_colliding_entries() {
                 display_name: "Elsewhere".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: rival_gone_id,
@@ -108,6 +111,7 @@ fn classifies_new_linked_absent_and_colliding_entries() {
                 display_name: "Rival Gone".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
         ],
         index: vec![
@@ -208,6 +212,7 @@ fn rerun_after_a_successful_apply_plans_no_writes() {
             display_name: fields.display_name.clone(),
             status: "active".into(),
             directory_groups: groups,
+            directory_disabled: false,
         }],
         index: vec![index(linked_id, &fields.email, "u-1")],
         managing: HashMap::from([(linked_id, SOURCE.to_string())]),
@@ -242,6 +247,7 @@ fn drifting_groups_are_rewritten_even_when_the_hash_matches() {
             display_name: fields.display_name.clone(),
             status: "active".into(),
             directory_groups: vec!["someone-elses-group".into()],
+            directory_disabled: false,
         }],
         index: vec![index(linked_id, &fields.email, "u-1")],
         managing: HashMap::from([(linked_id, SOURCE.to_string())]),
@@ -281,6 +287,7 @@ fn limited_runs_do_not_disable_anything() {
                 display_name: fields.display_name.clone(),
                 status: "active".into(),
                 directory_groups: vec!["staff".into()],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: beyond_limit_id,
@@ -289,6 +296,7 @@ fn limited_runs_do_not_disable_anything() {
                 display_name: "Two".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
         ],
         index: vec![
@@ -342,6 +350,7 @@ fn absent_entries_are_disabled_but_never_deleted() {
                 display_name: "Gone".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: already_disabled_id,
@@ -350,6 +359,7 @@ fn absent_entries_are_disabled_but_never_deleted() {
                 display_name: "Disabled".into(),
                 status: "disabled".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
         ],
         index: vec![

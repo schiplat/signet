@@ -149,15 +149,14 @@ async fn an_unknown_id_reports_not_found() {
     );
 }
 
-/// The pairing itself, asserted without a database.
+/// The local intent itself, asserted without a database.
 ///
-/// `status` and `local_disabled` are two columns driven by one value; this is
-/// the assertion that fails if someone adds a third `UserAccess` variant, or
-/// changes one derivation without the other.
+/// `UserAccess` carries one thing now — the admin's own intent. The name is the
+/// pair, so this fails if someone adds a variant. What the intent does to
+/// `status` is no longer this type's business: an account is disabled when *any*
+/// authority says so, which `tests/disable_flags.rs` walks end to end.
 #[test]
-fn the_two_columns_stay_on_the_same_side() {
-    assert_eq!(UserAccess::Enabled.status(), "active");
+fn the_local_intent_follows_the_variant() {
     assert!(!UserAccess::Enabled.local_disabled());
-    assert_eq!(UserAccess::Disabled.status(), "disabled");
     assert!(UserAccess::Disabled.local_disabled());
 }

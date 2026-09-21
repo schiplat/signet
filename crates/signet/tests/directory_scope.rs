@@ -240,6 +240,7 @@ fn linked_local(external_id: &str, id: Uuid, email: &str) -> LocalState {
             display_name: "Someone".into(),
             status: "active".into(),
             directory_groups: vec![],
+            directory_disabled: false,
         }],
         index: vec![UserIndexEntry {
             id,
@@ -335,6 +336,7 @@ fn a_transfer_is_distinguishable_from_a_departure_in_the_same_run() {
                 display_name: "Transfer".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
             UserSnapshot {
                 id: gone_id,
@@ -343,6 +345,7 @@ fn a_transfer_is_distinguishable_from_a_departure_in_the_same_run() {
                 display_name: "Gone".into(),
                 status: "active".into(),
                 directory_groups: vec![],
+                directory_disabled: false,
             },
         ],
         index: vec![

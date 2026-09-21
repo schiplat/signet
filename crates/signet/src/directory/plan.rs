@@ -52,6 +52,14 @@ pub struct UserSnapshot {
     pub display_name: String,
     pub status: String,
     pub directory_groups: Vec<String>,
+    /// Whether the sync currently holds a disable claim on this user.
+    ///
+    /// Carried because the planner has to be able to *release* it: a claim can be
+    /// set while the account is absent upstream, and an absent account has
+    /// nothing else about it that changes when it comes back. Without this, a
+    /// user who reappeared with identical attributes would look `Unchanged` and
+    /// stay disabled — the sync would have no reason to write anything.
+    pub directory_disabled: bool,
 }
 
 /// Minimal identity of a local user, for collision detection. Loaded for every
@@ -573,13 +581,20 @@ pub fn plan(upstream: &[UpstreamUser], local: &LocalState, opts: PlanOptions) ->
                 // different `sync_groups` semantics): re-writing is idempotent
                 // and keeps the stored values from drifting away from the hash
                 // that claims they are current.
+                //
+                // `directory_disabled` is the third reason to write, and the only
+                // one that is not about the managed attributes: an entry is
+                // listed here, so this run's claim must be off. A user who was
+                // disabled for being absent upstream and then came back with
+                // everything else identical would otherwise stay disabled
+                // forever, because nothing else about them changed.
                 let target = fingerprint(&fields, groups.as_deref());
                 let hash_matches = link.source_hash.as_deref() == Some(target.as_str());
                 let groups_match = groups
                     .as_ref()
                     .is_none_or(|g| *g == normalize_groups(&current.directory_groups));
                 changes.push(Change {
-                    outcome: if hash_matches && groups_match {
+                    outcome: if hash_matches && groups_match && !current.directory_disabled {
                         Outcome::Unchanged
                     } else {
                         Outcome::Update

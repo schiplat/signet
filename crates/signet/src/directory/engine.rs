@@ -534,11 +534,12 @@ pub async fn apply_plan(
 
 /// Disables users the directory no longer lists (D3: never delete).
 ///
-/// `local_disabled` is deliberately untouched: the sync only ever reflects the
-/// upstream status, and the local intent is cleared solely by an admin enable
-/// (§4.2). Sessions are revoked so a disabled directory user does not keep
-/// browsing until their session expires — the same thing the admin disable path
-/// does.
+/// Records the sync's own intent in `directory_disabled` rather than only
+/// writing `status`: `local_disabled` stays the admin's and `scim_disabled` the
+/// IdP's, so each authority's decision survives the others (migration `026`).
+/// The local intent is still cleared solely by an admin enable (§4.2). Sessions
+/// are revoked so a disabled directory user does not keep browsing until their
+/// session expires — the same thing the admin disable path does.
 async fn apply_disables(
     state: &AppState,
     row: &SourceRow,
@@ -573,8 +574,8 @@ async fn apply_disables(
     let mut tx = state.pool.begin().await?;
     let disabled: Vec<Uuid> = sqlx::query_scalar(
         r#"
-        UPDATE users SET status = 'disabled', updated_at = NOW()
-        WHERE id = ANY($1) AND status <> 'disabled'
+        UPDATE users SET directory_disabled = TRUE, status = 'disabled', updated_at = NOW()
+        WHERE id = ANY($1) AND NOT directory_disabled
         RETURNING id
         "#,
     )
@@ -672,15 +673,21 @@ async fn update_user(
     let id = change.user_id.expect("Update always has a user");
 
     // Status is re-derived on every update so a user who reappeared upstream is
-    // re-enabled, while the local disable intent still wins (§4.2). `COALESCE`
-    // leaves `directory_groups` alone when this run does not own groups.
+    // re-enabled, while the other authorities' intents still win (§4.2): the
+    // directory releases only its own claim. `COALESCE` leaves
+    // `directory_groups` alone when this run does not own groups.
+    //
+    // The `status` expression spells out the flags rather than using
+    // `STATUS_FROM_FLAGS`: `SET` reads the old row, and this statement is the one
+    // changing `directory_disabled`, so it substitutes the new value.
     sqlx::query(
         r#"
         UPDATE users
         SET email = $2,
             username = $3,
             display_name = $4,
-            status = CASE WHEN local_disabled THEN 'disabled' ELSE 'active' END,
+            directory_disabled = FALSE,
+            status = CASE WHEN local_disabled OR scim_disabled THEN 'disabled' ELSE 'active' END,
             directory_groups = COALESCE($5::text[], directory_groups),
             updated_at = NOW()
         WHERE id = $1

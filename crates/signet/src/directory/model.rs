@@ -68,8 +68,19 @@ pub async fn load_linked_users(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_as::<_, (Uuid, String, Option<String>, String, String, Vec<String>)>(
-        "SELECT id, email, username, display_name, status, directory_groups \
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            String,
+            Vec<String>,
+            bool,
+        ),
+    >(
+        "SELECT id, email, username, display_name, status, directory_groups, directory_disabled \
          FROM users WHERE id = ANY($1)",
     )
     .bind(&ids)
@@ -78,13 +89,16 @@ pub async fn load_linked_users(
     Ok(rows
         .into_iter()
         .map(
-            |(id, email, username, display_name, status, directory_groups)| UserSnapshot {
-                id,
-                email,
-                username,
-                display_name,
-                status,
-                directory_groups,
+            |(id, email, username, display_name, status, directory_groups, directory_disabled)| {
+                UserSnapshot {
+                    id,
+                    email,
+                    username,
+                    display_name,
+                    status,
+                    directory_groups,
+                    directory_disabled,
+                }
             },
         )
         .collect())

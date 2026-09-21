@@ -299,6 +299,21 @@ async fn delete_source(
         .execute(&state.pool)
         .await?;
 
+    // The same liveness sweep as disabling: a deleted source is not live either.
+    // The `links > 0` guard above means this cannot be about the source's own
+    // links — it is about claims already orphaned by links removed by hand, which
+    // is exactly what this endpoint's error message invites the operator to do.
+    // Without it those accounts stay disabled with no authority left to release
+    // them (migration `026`).
+    let released = crate::directory::release_orphaned_claims(&state.pool).await?;
+    if released > 0 {
+        tracing::info!(
+            source = %code,
+            released,
+            "released orphaned directory disable claims"
+        );
+    }
+
     audit(
         &state,
         &headers,
@@ -327,6 +342,21 @@ async fn set_enabled(
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::not_found(format!("directory source not found: {code}")))?;
+
+    // Switching a source off retires its authority, so the disable claims it was
+    // holding go with it. Left in place they would outlive the source: an admin
+    // enable cannot override an upstream claim, so those accounts would have no
+    // way back (migration `026`).
+    if !view.enabled {
+        let released = crate::directory::release_orphaned_claims(&state.pool).await?;
+        if released > 0 {
+            tracing::info!(
+                source = %view.code,
+                released,
+                "released directory disable claims from a disabled source"
+            );
+        }
+    }
 
     audit(
         &state,

@@ -137,12 +137,14 @@ async fn status_is_settable_because_scim_provisions_disabled_accounts() {
 
     common::with_user(state, id, move |state, id| async move {
         let mut new = NewUser::new(id, &sub, &email, &display_name, &password_hash);
-        new.status = "disabled";
+        new.scim_disabled = true;
 
         let written = insert_user(&state.pool, &new)
             .await
             .expect("insert a disabled user");
+        // The caller states its intent; `status` is derived from it.
         assert_eq!(written.status, "disabled");
+        assert!(written.scim_disabled);
 
         // `active_user_by_id` must refuse it while `user_by_id` still returns
         // it: SCIM can create a disabled account, and nothing may mint a

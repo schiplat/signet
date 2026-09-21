@@ -22,13 +22,21 @@ use uuid::Uuid;
 /// Flips `status` directly. The loaders are what is under test, so the fixture
 /// must not go through admin's `set_user_access`, which writes `local_disabled`
 /// too and would make a failure here ambiguous.
+///
+/// Since migration `026` a raw `status` write is not enough: the database knows
+/// `status` must agree with the disable flags, so the fixture sets an upstream
+/// flag (the same one the sync uses) and lets the constraint check the pairing.
+/// Passing `"active"` clears it, which is how the tests restore the account.
 async fn set_status(pool: &PgPool, id: Uuid, status: &str) {
-    sqlx::query("UPDATE users SET status = $2, updated_at = NOW() WHERE id = $1")
-        .bind(id)
-        .bind(status)
-        .execute(pool)
-        .await
-        .expect("set user status");
+    sqlx::query(
+        "UPDATE users SET directory_disabled = $2, status = $3, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(id)
+    .bind(status != "active")
+    .bind(status)
+    .execute(pool)
+    .await
+    .expect("set user status");
 }
 
 #[tokio::test]

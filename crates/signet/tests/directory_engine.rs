@@ -90,6 +90,8 @@ struct StoredUser {
     role: String,
     provisioned_via: Option<String>,
     local_disabled: bool,
+    directory_disabled: bool,
+    scim_disabled: bool,
     directory_groups: Vec<String>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -98,7 +100,8 @@ async fn stored(pool: &PgPool, source_id: Uuid, external_id: &str) -> Option<Sto
     sqlx::query_as::<_, StoredUser>(
         r#"
         SELECT u.id, u.sub, u.email, u.username, u.display_name, u.password_hash, u.status,
-               u.role, u.provisioned_via, u.local_disabled, u.directory_groups, u.updated_at
+               u.role, u.provisioned_via, u.local_disabled, u.directory_disabled, u.scim_disabled,
+               u.directory_groups, u.updated_at
         FROM directory_entries e JOIN users u ON u.id = e.user_id
         WHERE e.source_id = $1 AND e.external_id = $2
         "#,
@@ -537,6 +540,119 @@ async fn a_dry_run_writes_nothing() {
         );
         assert_eq!(dry.counts().created, 1, "changes={:#?}", dry.changes);
         assert!(stored(&state.pool, source.id, "e-1").await.is_none());
+    })
+    .await;
+}
+
+/// The sync must not release a disable the IdP asked for.
+///
+/// The sync's update path re-derives `status` whenever a managed field changes,
+/// and before migration `026` that meant writing `'active'` over a SCIM
+/// deactivation: the IdP disabled someone, they changed their display name, and
+/// the account came back. Each authority now records its own claim, so the sync
+/// releases only its own.
+#[tokio::test]
+async fn the_sync_does_not_release_an_idp_disable() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+
+    common::scoped(state, source, |state, source| async move {
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        sync(
+            &state,
+            &source,
+            &[person(&source, "e-1", "One Person", &["staff"])],
+            run_id,
+        )
+        .await;
+
+        let id = stored(&state.pool, source.id, "e-1")
+            .await
+            .expect("e-1 must have been provisioned")
+            .id;
+        sqlx::query(
+            "UPDATE users SET scim_disabled = TRUE, status = 'disabled', updated_at = NOW() \
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("the IdP deactivates the account");
+
+        // A managed field changes, which is what made the old update path run.
+        let applied = sync(
+            &state,
+            &source,
+            &[person(&source, "e-1", "Renamed Person", &["staff"])],
+            run_id,
+        )
+        .await;
+        assert!(
+            applied.counts().updated >= 1,
+            "the update path must have run: {:#?}",
+            applied.changes
+        );
+
+        let after = stored(&state.pool, source.id, "e-1")
+            .await
+            .expect("e-1 is still linked");
+        assert_eq!(
+            after.display_name, "Renamed Person",
+            "the sync still manages its own fields"
+        );
+        assert_eq!(after.status, "disabled", "the IdP's claim must survive");
+        assert!(after.scim_disabled, "and must not be cleared");
+        assert!(
+            !after.directory_disabled,
+            "the sync releases only its own claim"
+        );
+    })
+    .await;
+}
+
+/// A user who reappears upstream is re-enabled even with nothing else changed.
+///
+/// Absence disables the account and sets the sync's claim, but an account that
+/// comes back identical has no managed-field change to notice — so without the
+/// claim being part of the comparison the planner reports `Unchanged`, writes
+/// nothing, and the account stays disabled for good.
+#[tokio::test]
+async fn a_reappearing_user_is_re_enabled_without_a_field_change() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+
+    common::scoped(state, source, |state, source| async move {
+        let run_id = common::begin_run(&state.pool, source.id).await;
+        let upstream = [person(&source, "e-1", "One Person", &["staff"])];
+        sync(&state, &source, &upstream, run_id).await;
+
+        // ── Absent upstream: disabled, and the sync holds the claim ─────
+        let gone = sync(&state, &source, &[], run_id).await;
+        assert_eq!(gone.counts().disabled, 1, "changes={:#?}", gone.changes);
+        let disabled = stored(&state.pool, source.id, "e-1")
+            .await
+            .expect("the account is kept, not deleted");
+        assert_eq!(disabled.status, "disabled");
+        assert!(disabled.directory_disabled, "the sync should claim it");
+
+        // ── Back, with every managed field identical ────────────────────
+        let back = sync(&state, &source, &upstream, run_id).await;
+        assert_eq!(
+            back.counts().updated,
+            1,
+            "reappearing must be an update, not `unchanged`: {:#?}",
+            back.changes
+        );
+
+        let after = stored(&state.pool, source.id, "e-1")
+            .await
+            .expect("e-1 is still linked");
+        assert!(!after.directory_disabled, "the claim must be released");
+        assert_eq!(after.status, "active", "and the account usable again");
     })
     .await;
 }

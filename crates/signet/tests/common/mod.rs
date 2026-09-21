@@ -274,6 +274,13 @@ where
     .await;
 }
 
+/// Serialises the SCIM-router tests inside one test binary.
+///
+/// `scim_config` is a singleton, so the token swap in [`with_scim_token`] must
+/// not overlap with another test's. Held only while a token is installed, which
+/// is what lets a single binary contain more than one SCIM test.
+static SCIM_TOKEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Runs `body` against the SCIM router with a bearer token the test knows.
 ///
 /// The configured token is stored only as a hash and is seeded from the
@@ -291,6 +298,8 @@ where
     F: FnOnce(AppState, String) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
+    let _serialised = SCIM_TOKEN_LOCK.lock().await;
+
     // The column is nullable, so the scalar type is `Option<String>` and
     // `fetch_optional` nests: `None` means no row at all.
     let previous: Option<Option<String>> =
@@ -337,6 +346,32 @@ where
 /// The SCIM API router, ready to drive with [`tower::ServiceExt::oneshot`].
 pub fn scim_router(state: &AppState) -> axum::Router {
     signet::scim::router().with_state(state.clone())
+}
+
+/// The directory admin router, ready to drive with [`tower::ServiceExt::oneshot`].
+pub fn directory_router(state: &AppState) -> axum::Router {
+    signet::directory::api::router().with_state(state.clone())
+}
+
+/// A session cookie header value for a freshly created admin.
+///
+/// The admin routes authenticate from the session cookie, so a test that drives
+/// one needs a real session; there is no way to hand a handler an actor. Returns
+/// the user id too, so the caller can clean it up.
+pub async fn admin_cookie(state: &AppState) -> (Uuid, String) {
+    let id = create_user(&state.pool, "").await;
+    sqlx::query("UPDATE users SET role = 'admin' WHERE id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await
+        .expect("promote the test admin");
+    let token = signet::auth::session::create_session(&state.pool, id, 1, None, None)
+        .await
+        .expect("create an admin session");
+    (
+        id,
+        format!("{}={token}", signet::auth::session::SESSION_COOKIE),
+    )
 }
 
 /// Runs `body`, then removes the `sources` and the `users`, even if the body

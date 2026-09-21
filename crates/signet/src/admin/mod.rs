@@ -9,7 +9,8 @@ use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    insert_user, normalize_username, user_by_id, NewUser, PublicUser, User, USER_COLS,
+    insert_user, normalize_username, status_from_flags, user_by_id, NewUser, PublicUser, User,
+    USER_COLS,
 };
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
@@ -957,19 +958,23 @@ async fn update_user(
         target.role.clone()
     };
 
-    // One parse feeds both columns, so the `status`/`local_disabled` pairing
-    // cannot drift: an explicit `status` in the body also states the local
-    // intent, and an absent one leaves both as the target already has them.
+    // One parse feeds the local intent, so an explicit `status` in the body
+    // states it and an absent one leaves it as the target already has it.
     let requested_access = match body.status.as_deref() {
         None => None,
         Some("active") => Some(UserAccess::Enabled),
         Some("disabled") => Some(UserAccess::Disabled),
         Some(_) => return Err(AppError::bad_request("invalid status")),
     };
-    let status = requested_access
-        .map(|a| a.status().to_string())
-        .unwrap_or_else(|| target.status.clone());
     let local_disabled = requested_access.map_or(target.local_disabled, UserAccess::local_disabled);
+    // The state this request leaves behind: the admin states its own intent, the
+    // upstream flags are untouched, and `status` is the answer from all three.
+    // Used for the guards below; the UPDATE derives the same value in SQL.
+    let status = status_from_flags(
+        local_disabled,
+        target.directory_disabled,
+        target.scim_disabled,
+    );
 
     if status == "disabled" && actor.id == id {
         return Err(AppError::bad_request("cannot disable yourself"));
@@ -1012,9 +1017,12 @@ async fn update_user(
     let user = sqlx::query_as::<_, User>(&format!(
         r#"
         UPDATE users
-        SET email = $2, display_name = $3, role = $4, status = $5,
-            mfa_required = $6, must_change_password = $7, groups = $8, phone = $9,
-            username = $10, local_disabled = $11, updated_at = NOW()
+        SET email = $2, display_name = $3, role = $4,
+            mfa_required = $5, must_change_password = $6, groups = $7, phone = $8,
+            username = $9, local_disabled = $10,
+            status = CASE WHEN $10 OR directory_disabled OR scim_disabled
+                          THEN 'disabled' ELSE 'active' END,
+            updated_at = NOW()
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
@@ -1023,7 +1031,6 @@ async fn update_user(
     .bind(&email)
     .bind(&display_name)
     .bind(&role)
-    .bind(&status)
     .bind(mfa_required)
     .bind(must_change_password)
     .bind(groups)
@@ -1243,9 +1250,12 @@ async fn revoke_user_sessions(
 /// A single value rather than a `status` string plus a `local_disabled` bool,
 /// because those two are not independent: an explicit local change must record
 /// the disable intent, or the next directory sync sees the account as simply
-/// "upstream active" and silently re-enables it (migration 024). As two
-/// arguments, nothing stopped a caller passing the combination that breaks
-/// that, and `update_user` re-derived the pairing by hand.
+/// "upstream active" and silently re-enables it (migration `024`).
+///
+/// The value states the *local* intent only. It no longer implies a `status`:
+/// since migration `026` an account is disabled when any authority says so, so
+/// the admin's enable cannot release a claim the directory or the IdP still
+/// holds. `status` is derived from all three flags, never set from here.
 ///
 /// Deliberately not used by SCIM: deactivating a user upstream is not a local
 /// admin's disable intent, so SCIM must not set `local_disabled`. Keeping this
@@ -1258,16 +1268,8 @@ pub enum UserAccess {
 }
 
 impl UserAccess {
-    /// The `users.status` value for this state.
-    pub fn status(self) -> &'static str {
-        match self {
-            Self::Enabled => "active",
-            Self::Disabled => "disabled",
-        }
-    }
-
     /// The `users.local_disabled` value: the local intent that must survive the
-    /// next sync. Always the same side of the pairing as [`Self::status`].
+    /// next sync.
     pub fn local_disabled(self) -> bool {
         matches!(self, Self::Disabled)
     }
@@ -1276,8 +1278,13 @@ impl UserAccess {
 /// Puts an account into a local access state and revokes its sessions if that
 /// state is disabled.
 ///
+/// Writes only `local_disabled` — the admin's own intent — and re-derives
+/// `status` from it plus the upstream flags. A local enable therefore cannot
+/// release an account the directory or the IdP is still holding disabled, which
+/// is the point: no authority can override another (migration `026`).
+///
 /// One operation instead of a status write plus a paired flag, so the
-/// `status`/`local_disabled` combination cannot be got wrong, and so disabling
+/// `status`/`local_disabled` pairing cannot be got wrong, and so disabling
 /// cannot leave live sessions behind: a disabled account is already refused by
 /// `user_from_session_token`'s status filter, but the rows should not linger.
 ///
@@ -1286,13 +1293,16 @@ impl UserAccess {
 pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> AppResult<User> {
     let user = sqlx::query_as::<_, User>(&format!(
         r#"
-        UPDATE users SET status = $2, local_disabled = $3, updated_at = NOW()
+        UPDATE users SET
+            local_disabled = $2,
+            status = CASE WHEN $2 OR directory_disabled OR scim_disabled
+                          THEN 'disabled' ELSE 'active' END,
+            updated_at = NOW()
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
     ))
     .bind(id)
-    .bind(access.status())
     .bind(access.local_disabled())
     .fetch_optional(&state.pool)
     .await?
