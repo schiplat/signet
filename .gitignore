@@ -10,3 +10,8 @@ dashboard/node_modules
 dashboard/dist
 .DS_Store
 .cursor/rules/registry-namespace.mdc
+
+# Throwaway diagnostics: ad-hoc test files that print from the dev database
+# instead of asserting, used while chasing a bug. They must not be committed —
+# one was, once.
+crates/signet/tests/zzz_*.rs

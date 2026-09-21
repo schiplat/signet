@@ -664,6 +664,36 @@ async fn delete_user(
     authorize(&state, &headers).await?;
     let existing = find_user(&state, &id).await?;
 
+    // D3: an upstream deletion only ever disables, and the admin delete path
+    // refuses a directory-managed user for the same reason. SCIM is an upstream
+    // too, so it must not be the one path that hard-deletes a managed account.
+    // The damage is worse than a lost row: `directory_entries.user_id` cascades,
+    // so the link goes with it, the next sync run no longer recognises the
+    // external id, and it provisions a *new* account for the same person —
+    // losing the old id's history, sessions and local state.
+    //
+    // Checked before `revoke_all_sessions` so a refused delete has no effect at
+    // all rather than signing the user out on the way to failing.
+    if let Some(source) = crate::directory::managing_source(&state.pool, existing.id).await? {
+        crate::audit::record(
+            &state,
+            crate::audit::AuditEvent {
+                actor: None,
+                action: crate::directory::AUDIT_MANAGED_WRITE_BLOCKED,
+                resource_type: "user",
+                resource_id: Some(existing.id.to_string()),
+                detail: json!({ "source": source, "field": "delete" }),
+                ip: None,
+                user_agent: crate::http::extract::user_agent(&headers),
+                client_id: None,
+            },
+        )
+        .await;
+        return Err(AppError::forbidden(crate::directory::managed_delete_error(
+            &source,
+        )));
+    }
+
     revoke_all_sessions(&state.pool, existing.id).await?;
     sqlx::query("DELETE FROM users WHERE id = $1")
         .bind(existing.id)

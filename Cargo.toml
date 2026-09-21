@@ -46,3 +46,10 @@ totp-rs = { version = "5.7", features = ["otpauth", "gen_secret"] }
 data-encoding = "2"
 hmac = "0.12"
 ipnet = "2"
+
+# Test-only. `tower` (not `tower-http`) is what drives a handler in a test via
+# `ServiceExt::oneshot`; `http-body-util` reads the response body back. Both are
+# already in the graph through axum, so this pins the same versions rather than
+# adding anything new to the build.
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }

@@ -48,3 +48,9 @@ totp-rs.workspace = true
 data-encoding.workspace = true
 hmac.workspace = true
 ipnet.workspace = true
+
+# Test-only: drives a router in-process so handler-level guards are covered by a
+# real request rather than by a copy of the guard's logic.
+[dev-dependencies]
+http-body-util.workspace = true
+tower.workspace = true

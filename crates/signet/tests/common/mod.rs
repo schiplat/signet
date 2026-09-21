@@ -274,6 +274,71 @@ where
     .await;
 }
 
+/// Runs `body` against the SCIM router with a bearer token the test knows.
+///
+/// The configured token is stored only as a hash and is seeded from the
+/// environment on first boot, so its plaintext cannot be recovered. The test
+/// installs its own hash for the duration and puts the previous value back
+/// afterwards.
+///
+/// Restoring matters for the same reason `with_users` does: `scim_config` is a
+/// singleton, so a test that clobbered it and then panicked would silently break
+/// the SCIM token a real IdP is configured with. The body runs in a spawned task
+/// and the restore happens after it settles, so an assertion failure still puts
+/// the original back.
+pub async fn with_scim_token<F, Fut>(state: AppState, body: F)
+where
+    F: FnOnce(AppState, String) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    // The column is nullable, so the scalar type is `Option<String>` and
+    // `fetch_optional` nests: `None` means no row at all.
+    let previous: Option<Option<String>> =
+        sqlx::query_scalar("SELECT token_hash FROM scim_config WHERE id = TRUE")
+            .fetch_optional(&state.pool)
+            .await
+            .expect("read the configured SCIM token");
+
+    let token = format!("test-scim-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO scim_config (id, token_hash) VALUES (TRUE, $1) \
+         ON CONFLICT (id) DO UPDATE SET token_hash = $1",
+    )
+    .bind(signet::crypto::util::sha256_hex(&token))
+    .execute(&state.pool)
+    .await
+    .expect("install a test SCIM token");
+
+    let outcome = tokio::spawn(body(state.clone(), token)).await;
+
+    match previous {
+        Some(hash) => {
+            sqlx::query("UPDATE scim_config SET token_hash = $1 WHERE id = TRUE")
+                .bind(hash)
+                .execute(&state.pool)
+                .await
+                .expect("restore the configured SCIM token");
+        }
+        // There was no row: remove the one this helper created rather than
+        // leaving SCIM configured with a token nobody holds.
+        None => {
+            sqlx::query("DELETE FROM scim_config WHERE id = TRUE")
+                .execute(&state.pool)
+                .await
+                .expect("remove the test SCIM token");
+        }
+    }
+
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic.into_panic());
+    }
+}
+
+/// The SCIM API router, ready to drive with [`tower::ServiceExt::oneshot`].
+pub fn scim_router(state: &AppState) -> axum::Router {
+    signet::scim::router().with_state(state.clone())
+}
+
 /// Runs `body`, then removes the `sources` and the `users`, even if the body
 /// panics.
 ///
