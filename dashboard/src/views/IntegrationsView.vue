@@ -2,6 +2,7 @@
 import { Check, Copy, Fingerprint, Globe, KeyRound, Link2, Plus, RefreshCw, Send, Trash2, Webhook as WebhookIcon, X } from "@lucide/vue";
 import { onMounted, ref } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
+import { splitList } from "@/lib/directoryMapping";
 import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import {
@@ -67,6 +68,7 @@ const ssoForm = ref({
   client_secret: "",
   issuer_url: "",
   scopes: "",
+  allowed_email_domains: "",
   enabled: true,
 });
 
@@ -88,6 +90,7 @@ function openSsoCreate() {
     client_secret: "",
     issuer_url: "",
     scopes: "",
+    allowed_email_domains: "",
     enabled: true,
   };
   ssoErr.value = "";
@@ -104,6 +107,7 @@ function openSsoEdit(p: SsoProvider) {
     client_secret: "",
     issuer_url: p.issuer_url ?? "",
     scopes: p.scopes ?? "",
+    allowed_email_domains: p.allowed_email_domains.join(", "),
     enabled: p.enabled,
   };
   ssoErr.value = "";
@@ -134,6 +138,7 @@ async function onSsoSave() {
     client_secret: f.client_secret.trim() || undefined,
     issuer_url: f.issuer_url.trim() || undefined,
     scopes: f.scopes.trim() || undefined,
+    allowed_email_domains: splitList(f.allowed_email_domains),
     enabled: f.enabled,
   };
   try {
@@ -825,6 +830,19 @@ async function copyText(text: string): Promise<boolean> {
                 class="field-input"
                 placeholder="Leave blank for provider defaults"
               />
+            </div>
+            <div>
+              <label class="type-label mb-1.5 block">Allowed email domains (optional)</label>
+              <input
+                v-model="ssoForm.allowed_email_domains"
+                class="field-input font-mono text-[12px]"
+                placeholder="corp.example"
+              />
+              <p class="type-meta mt-1 text-[11px]">
+                Comma separated. Only these domains may sign in <em>through this provider</em>;
+                subdomains are included. It narrows the global allowlist in Settings and can never
+                widen it. Blank means this provider adds no restriction.
+              </p>
             </div>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="ssoForm.enabled" type="checkbox" class="rounded" />

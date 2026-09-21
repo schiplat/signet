@@ -197,6 +197,39 @@ export async function updateMfaSettings(body: { required_globally: boolean }) {
   return parseJson<{ required_globally: boolean }>(res);
 }
 
+/**
+ * The sign-in and provisioning allowlist.
+ *
+ * `origin` is where the list in force came from: `setting` (a row an admin saved
+ * here), `environment` (`SIGNET_ALLOWED_EMAIL_DOMAINS`, which a save would
+ * override), or `unrestricted` (nothing configured, nobody refused).
+ */
+export type SignInSettings = {
+  allowed_email_domains: string[];
+  origin: "setting" | "environment" | "unrestricted";
+};
+
+export async function fetchSignInSettings() {
+  const res = await fetch("/api/v1/admin/settings/sign-in", { credentials: "include" });
+  return parseJson<SignInSettings>(res);
+}
+
+/**
+ * Saves the list, or clears it with `null` so the environment applies again.
+ *
+ * The server refuses a list that excludes the acting admin's own domain: it is
+ * the one mistake nothing inside the product can undo.
+ */
+export async function updateSignInSettings(allowed_email_domains: string[] | null) {
+  const res = await fetch("/api/v1/admin/settings/sign-in", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ allowed_email_domains }),
+  });
+  return parseJson<SignInSettings>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);
@@ -897,6 +930,11 @@ export type SsoProvider = {
   client_id: string;
   issuer_url: string | null;
   scopes: string | null;
+  /**
+   * Domains this provider may admit, on top of the global allowlist.
+   * Empty means the provider adds no restriction of its own.
+   */
+  allowed_email_domains: string[];
   enabled: boolean;
   bindings: number;
   /** Concrete redirect URI to register with this provider (server-computed). */
@@ -913,6 +951,7 @@ export type SsoProviderBody = {
   client_secret?: string;
   issuer_url?: string;
   scopes?: string;
+  allowed_email_domains?: string[];
   enabled?: boolean;
 };
 
