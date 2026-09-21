@@ -16,9 +16,14 @@
 
 mod common;
 
-use signet::directory::auth::{resolve, LoginPath};
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use http_body_util::BodyExt;
+use signet::directory::auth::{resolve, verify, BindTarget, Credential, LoginPath};
 use signet::directory::ldap::{bind_as, BindOutcome};
 use signet::directory::source::LdapConfig;
+use signet::state::AppState;
+use tower::ServiceExt;
 use uuid::Uuid;
 
 const DN: &str = "uid=alice,ou=people,dc=corp";
@@ -47,6 +52,128 @@ async fn an_unreachable_directory_reports_an_outage_not_a_bad_password() {
         matches!(outcome, BindOutcome::Unavailable(_)),
         "expected an outage, got {outcome:?}"
     );
+}
+
+fn target() -> BindTarget {
+    BindTarget {
+        source_code: "corp-ldap".into(),
+        config: unreachable_config(),
+        ca_cert_pem: None,
+        external_dn: DN.into(),
+    }
+}
+
+/// An empty password is refused without asking the directory.
+///
+/// Zero length is not "a password nobody knows": RFC 4513 §5.1.2 makes
+/// `simple_bind(dn, "")` an *unauthenticated* bind — a request to be treated as
+/// anonymous — and a server that accepts it answers with success, which `verify`
+/// reads as a valid credential and turns into a session for the account behind
+/// the DN. The DN comes from our own link table, so the password is the only
+/// thing standing between a request and that account.
+///
+/// The host is unreachable on purpose, and that is what makes the test work: the
+/// guard is proved by the verdict being `Invalid` rather than `Unavailable`.
+/// Reaching the directory at all is the failure this test exists to prevent, so
+/// it fails if the guard is removed even though no server is involved.
+#[tokio::test]
+async fn an_empty_password_is_refused_without_asking_the_directory() {
+    assert_eq!(
+        verify(&target(), "").await,
+        Credential::Invalid {
+            counts_toward_lockout: true
+        }
+    );
+}
+
+/// A whitespace-only password *is* sent, because it is an attempt at a real
+/// password rather than the anonymous-bind form.
+///
+/// Pinned because the guard above is deliberately narrow: trimming it "for
+/// tidiness" would make the decision about passwords that belong to the
+/// directory, and would let this code reject a password the directory would have
+/// accepted.
+#[tokio::test]
+async fn a_whitespace_password_is_still_the_directorys_to_judge() {
+    assert!(matches!(
+        verify(&target(), " ").await,
+        Credential::Unavailable { .. }
+    ));
+}
+
+/// The same guard, end to end: no password at all for a directory-managed
+/// account is an ordinary 401.
+///
+/// The distinction from the unit test above matters. A 401 says "wrong
+/// credentials" to someone who never had any business here, while a 503 would
+/// tell them the directory was down and to try again later — and a directory
+/// that answers an anonymous bind with success would have made this attempt a
+/// session instead. The host is unreachable, so a trip to the directory is
+/// visible as the wrong status.
+#[tokio::test]
+async fn a_login_with_no_password_answers_401_without_visiting_the_directory() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let source = common::create_source(&state.pool).await;
+    let user_id = common::create_user(&state.pool, "").await;
+    common::link_entry(&state.pool, source.id, "e-empty-pw", user_id, Some(DN)).await;
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read the test user's address");
+
+    common::scoped(state, source, move |state, _source| async move {
+        let (status, body) = post_login(&state, &email, "").await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an empty password must not become an outage or a session: {body}"
+        );
+        assert!(
+            body.contains("invalid email or password"),
+            "the refusal stays indistinguishable from a wrong password: {body}"
+        );
+        assert!(
+            !body.contains("unavailable"),
+            "the directory was never asked, so it cannot be the reason: {body}"
+        );
+    })
+    .await;
+}
+
+/// `POST /api/v1/login` against the real router, as the browser would send it.
+///
+/// The router's own mount point is `/login` (the `/api/v1` prefix is added when
+/// the API is assembled), and the address extractor needs the same
+/// `ConnectInfo` that `axum::serve` supplies on a real connection.
+async fn post_login(state: &AppState, email: &str, password: &str) -> (StatusCode, String) {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/login")
+        .header("content-type", "application/json")
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            4242,
+        ))))
+        .body(Body::from(
+            serde_json::json!({ "email": email, "password": password }).to_string(),
+        ))
+        .expect("build the login request");
+    let response = signet::auth::router()
+        .with_state(state.clone())
+        .oneshot(request)
+        .await
+        .expect("the router must answer");
+    let status = response.status();
+    let text = response
+        .into_body()
+        .collect()
+        .await
+        .expect("read the response body")
+        .to_bytes();
+    (status, String::from_utf8_lossy(&text).into_owned())
 }
 
 /// A user with no directory link is authenticated locally — including the local

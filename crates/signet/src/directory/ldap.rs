@@ -434,7 +434,21 @@ impl LdapConnector {
         ldap3::drive!(conn);
         ldap.with_timeout(OP_TIMEOUT);
 
-        ldap.simple_bind(&cfg.bind_dn, password.unwrap_or(""))
+        // Refused rather than defaulted to an empty string: `simple_bind(dn, "")`
+        // is an unauthenticated bind (RFC 4513 §5.1.2), and `requires_credential`
+        // keeps an LDAP source from being saved without one precisely because a
+        // server that accepts it answers with success while quietly returning a
+        // reduced view of the directory. Reaching here with nothing to send means
+        // the stored credential is missing or empty, which is a broken source and
+        // must not become an anonymous search.
+        let Some(password) = password.filter(|p| !p.is_empty()) else {
+            return Err(AppError::bad_request(
+                "this ldap source has no service-account credential; refusing an \
+                 anonymous bind",
+            ));
+        };
+
+        ldap.simple_bind(&cfg.bind_dn, password)
             .await
             .map_err(|e| upstream_error("ldap bind", e))?
             .success()

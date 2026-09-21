@@ -111,6 +111,28 @@ pub async fn resolve(state: &AppState, user_id: Uuid) -> AppResult<LoginPath> {
 /// therefore irrelevant here whether the source has one — an anonymous-capable
 /// directory works fine.
 pub async fn verify(target: &BindTarget, password: &str) -> Credential {
+    // A zero-length password must never reach `simple_bind`. RFC 4513 §5.1.2
+    // defines `simple_bind(dn, "")` as an *unauthenticated* bind — a request to
+    // be treated as anonymous — and a server that accepts it (OpenLDAP with
+    // `allow bind_anon_cred`) answers with success. This function would read
+    // that success as a valid credential and hand out a session for whoever owns
+    // the DN, which is account takeover with no password at all. The request
+    // says "no password", not "anonymous", so it is answered here instead.
+    //
+    // Only zero length. A whitespace-only password is an attempt at a real
+    // password and the directory is the right place to reject it — and this
+    // verdict is ours, not the directory's, so it is charged to the local
+    // counter like any other password we checked (§8.4).
+    if password.is_empty() {
+        tracing::info!(
+            source = %target.source_code,
+            "refusing an empty password without asking the directory"
+        );
+        return Credential::Invalid {
+            counts_toward_lockout: true,
+        };
+    }
+
     let started = std::time::Instant::now();
     let outcome = bind_as(
         &target.config,
