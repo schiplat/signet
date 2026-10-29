@@ -870,7 +870,8 @@ async function copyText(text: string): Promise<boolean> {
                 </select>
                 <p class="type-meta mt-1 text-[11px]">
                   First sign-in with a trusted email creates a local member. “Never” keeps
-                  sign-in to linking existing accounts.
+                  sign-in to linking existing accounts — typical for open platforms like
+                  GitHub, while a corporate Feishu/Google tenant is safe to auto-create.
                 </p>
               </div>
               <div>
@@ -881,8 +882,9 @@ async function copyText(text: string): Promise<boolean> {
                   <option value="verified">Require the verified flag</option>
                 </select>
                 <p class="type-meta mt-1 text-[11px]">
-                  Feishu has no verified flag; pick “any email” only for tenants you control —
-                  otherwise sign-in is limited to linking existing accounts.
+                  GitHub, Google and standard OIDC report a verified flag — keep the default.
+                  Feishu reports none: “any email” is only for a tenant you control. WeChat
+                  has no email API at all, so this setting never applies to it.
                 </p>
               </div>
             </div>

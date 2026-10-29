@@ -290,7 +290,17 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 - JIT **不会**在无验证邮箱时开户（微信开放平台通常无邮箱 → 仍需管理员开户或邀请绑定）。
 - 飞书需在应用侧开通邮箱相关权限，且 profile 能返回 `email` / `enterprise_email`，否则走第 5 步。对 `GET /open-apis/authen/v1/user_info`：`email` 需 **获取用户邮箱信息**（`contact:user.email:readonly`）；`enterprise_email` 另需 **获取用户受雇信息**（`contact:user.employee:readonly`）且租户已启用飞书邮箱。权限在开放平台开通并发布后生效（授权 URL 不带 `scope=`）。
 - 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
-- **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。典型组合：企业飞书租户 `jit_mode=on` + `email_trust=any`（可信租户自动开户），开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。飞书无验证邮箱标志：adapter 现如实上报「未验证」，迁移已把存量飞书 provider 置为 `email_trust=any` 保持行为；新建飞书 provider 默认 `inherit`（即只允许绑定，需显式选 `any` 才自动开户）。
+- **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。各平台差异速查：
+
+  | provider_type | 邮箱验证标志 | 建议配置 | 说明 |
+  |---------------|--------------|----------|------|
+  | `github` | 上游如实返回（primary + verified） | `inherit` | 验证邮箱才自动绑定 / 开户 |
+  | `google` | 上游如实返回（`email_verified`） | `inherit` | 同上 |
+  | `oidc` | 取决于上游，标准字段 | `inherit`；上游不可信时 `verified` 收紧 | 同上 |
+  | `feishu` | **无验证标志**（adapter 如实上报「未验证」） | 自有企业租户 `email_trust=any` + `jit_mode=on`；否则保持 `inherit` | 迁移 033 已把存量飞书 provider 置为 `any` 保持行为；新建默认 `inherit`（只允许绑定，需显式选 `any` 才自动开户） |
+  | `wechat` | **无邮箱 API** | 不适用（`email_trust` 无效果） | 依旧豁免邮箱要求，只能绑定已有账号 |
+
+  典型组合：企业飞书 / Google Workspace 租户 `jit_mode=on`（可信租户自动开户）；开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。
 - 第三方登录只证明上游身份：本地策略（强制改密、TOTP、全局/用户级强制 MFA）在会话签发前照常生效，与密码登录共用同一套 MFA 挑战（挑战行记录来源 `via=sso`）。
 
 失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `access_denied`（用户在第三方授权页拒绝/取消） / `missing_code` / `no_matching_account` / `email_required`（上游未返回邮箱；微信除外。已绑定过的 `(provider, subject)` 仍可直接登录）。
