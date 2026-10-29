@@ -976,6 +976,10 @@ export type SsoProvider = {
    * Empty means the provider adds no restriction of its own.
    */
   allowed_email_domains: string[];
+  /** JIT override: follow the global toggle, force on, or force off. */
+  jit_mode: "inherit" | "on" | "off";
+  /** How this provider's email assertion is read for auto-link/JIT. */
+  email_trust: "inherit" | "any" | "verified";
   enabled: boolean;
   bindings: number;
   /** Concrete redirect URI to register with this provider (server-computed). */
@@ -993,6 +997,8 @@ export type SsoProviderBody = {
   issuer_url?: string;
   scopes?: string;
   allowed_email_domains?: string[];
+  jit_mode?: "inherit" | "on" | "off";
+  email_trust?: "inherit" | "any" | "verified";
   enabled?: boolean;
 };
 

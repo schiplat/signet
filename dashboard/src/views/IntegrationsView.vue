@@ -70,6 +70,8 @@ const ssoForm = ref({
   issuer_url: "",
   scopes: "",
   allowed_email_domains: "",
+  jit_mode: "inherit" as "inherit" | "on" | "off",
+  email_trust: "inherit" as "inherit" | "any" | "verified",
   enabled: true,
 });
 
@@ -92,6 +94,8 @@ function openSsoCreate() {
     issuer_url: "",
     scopes: "",
     allowed_email_domains: "",
+    jit_mode: "inherit",
+    email_trust: "inherit",
     enabled: true,
   };
   ssoErr.value = "";
@@ -109,6 +113,8 @@ function openSsoEdit(p: SsoProvider) {
     issuer_url: p.issuer_url ?? "",
     scopes: p.scopes ?? "",
     allowed_email_domains: p.allowed_email_domains.join(", "),
+    jit_mode: p.jit_mode,
+    email_trust: p.email_trust,
     enabled: p.enabled,
   };
   ssoErr.value = "";
@@ -140,6 +146,8 @@ async function onSsoSave() {
     issuer_url: f.issuer_url.trim() || undefined,
     scopes: f.scopes.trim() || undefined,
     allowed_email_domains: splitList(f.allowed_email_domains),
+    jit_mode: f.jit_mode,
+    email_trust: f.email_trust,
     enabled: f.enabled,
   };
   try {
@@ -851,6 +859,32 @@ async function copyText(text: string): Promise<boolean> {
                 subdomains are included. It narrows the global allowlist in Settings and can never
                 widen it. Blank means this provider adds no restriction.
               </p>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="type-label mb-1.5 block">Auto-create accounts (JIT)</label>
+                <select v-model="ssoForm.jit_mode" class="field-input">
+                  <option value="inherit">Follow global setting</option>
+                  <option value="on">Always (override global off)</option>
+                  <option value="off">Never (override global on)</option>
+                </select>
+                <p class="type-meta mt-1 text-[11px]">
+                  First sign-in with a trusted email creates a local member. “Never” keeps
+                  sign-in to linking existing accounts.
+                </p>
+              </div>
+              <div>
+                <label class="type-label mb-1.5 block">Email trust</label>
+                <select v-model="ssoForm.email_trust" class="field-input">
+                  <option value="inherit">Provider's own verified flag</option>
+                  <option value="any">Any returned email counts as verified</option>
+                  <option value="verified">Require the verified flag</option>
+                </select>
+                <p class="type-meta mt-1 text-[11px]">
+                  Feishu has no verified flag; pick “any email” only for tenants you control —
+                  otherwise sign-in is limited to linking existing accounts.
+                </p>
+              </div>
             </div>
             <label class="flex items-center gap-2 text-sm">
               <input v-model="ssoForm.enabled" type="checkbox" class="rounded" />

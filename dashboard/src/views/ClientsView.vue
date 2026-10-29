@@ -46,10 +46,53 @@ const editPkce = ref(true);
 const editIpAllowlist = ref(true);
 const editAllowedCidrs = ref("");
 
-const secretDialog = ref<{ clientId: string; secret: string; title: string } | null>(null);
+const secretDialog = ref<{
+  clientId: string;
+  secret: string;
+  title: string;
+  client: Pick<AdminClient, "redirect_uris" | "post_logout_redirect_uris" | "scopes">;
+} | null>(null);
 const rotatingId = ref<string | null>(null);
-const copiedField = ref<"id" | "secret" | "both" | null>(null);
+const copiedField = ref<"id" | "secret" | "both" | "config" | null>(null);
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+// The issuer handed out with the onboarding config. The public discovery
+// document is the one source of truth (an operator may have set a
+// SIGNET_PUBLIC_BASE_URL different from the dashboard origin).
+const issuer = ref("");
+const configTab = ref<"env" | "toml">("env");
+
+const envSnippet = computed(() => {
+  const d = secretDialog.value;
+  if (!d) return "";
+  const lines = [
+    `OIDC_ISSUER=${issuer.value || "https://sso.example.com"}`,
+    `OIDC_CLIENT_ID=${d.clientId}`,
+    `OIDC_CLIENT_SECRET=${d.secret}`,
+    `OIDC_REDIRECT_URI=${d.client.redirect_uris[0] ?? ""}`,
+    `OIDC_SCOPES=${(d.client.scopes || ["openid"]).join(" ")}`,
+  ];
+  const postLogout = d.client.post_logout_redirect_uris?.[0];
+  if (postLogout) lines.push(`OIDC_POST_LOGOUT_REDIRECT_URI=${postLogout}`);
+  return lines.join("\n");
+});
+
+const tomlSnippet = computed(() => {
+  const d = secretDialog.value;
+  if (!d) return "";
+  const scopes = (d.client.scopes || ["openid"]).map((s) => JSON.stringify(s)).join(", ");
+  const lines = [
+    "[oidc]",
+    `issuer = "${issuer.value || "https://sso.example.com"}"`,
+    `client_id = "${d.clientId}"`,
+    `client_secret = "${d.secret}"`,
+    `redirect_uri = "${d.client.redirect_uris[0] ?? ""}"`,
+    `scopes = [${scopes}]`,
+  ];
+  const postLogout = d.client.post_logout_redirect_uris?.[0];
+  if (postLogout) lines.push(`post_logout_redirect_uri = "${postLogout}"`);
+  return lines.join("\n");
+});
 
 const filtered = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
@@ -95,6 +138,14 @@ onMounted(async () => {
     error.value = e instanceof Error ? e.message : "Failed to load clients";
   } finally {
     loading.value = false;
+  }
+  // Best-effort: the onboarding snippets need the issuer; discovery is public.
+  try {
+    const res = await fetch("/.well-known/openid-configuration");
+    const doc = await res.json();
+    if (typeof doc.issuer === "string") issuer.value = doc.issuer;
+  } catch {
+    /* fall back to the placeholder in the snippets */
   }
 });
 
@@ -148,7 +199,9 @@ async function onCreate() {
       clientId: res.client.client_id,
       secret: res.client_secret,
       title: "Client registered",
+      client: res.client,
     };
+    configTab.value = "env";
     await refresh();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Create failed";
@@ -209,7 +262,9 @@ async function onRotate(c: AdminClient) {
       clientId: res.client.client_id,
       secret: res.client_secret,
       title: "Secret rotated",
+      client: res.client,
     };
+    configTab.value = "env";
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Rotate failed";
   } finally {
@@ -237,7 +292,7 @@ async function onDelete(c: AdminClient) {
   }
 }
 
-async function copyText(text: string, field: "id" | "secret" | "both") {
+async function copyText(text: string, field: "id" | "secret" | "both" | "config") {
   try {
     await navigator.clipboard.writeText(text);
     copiedField.value = field;
@@ -254,6 +309,39 @@ function copyBoth() {
   if (!secretDialog.value) return;
   const { clientId, secret } = secretDialog.value;
   void copyText(`client_id=${clientId}\nclient_secret=${secret}`, "both");
+}
+
+const B64URL = (buf: ArrayBuffer | Uint8Array) =>
+  btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+/// Full authorize round trip against this client, in a new tab: PKCE pair and
+/// state minted here, redirect to the always-permitted test-callback URI. The
+/// result page shows what passed (auth/consent/redirect/scope) and what still
+/// needs a real integration (token endpoint + secret).
+async function onTestDrive(c: AdminClient) {
+  const verifier = B64URL(crypto.getRandomValues(new Uint8Array(32)));
+  const challenge = B64URL(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+  );
+  const state = B64URL(crypto.getRandomValues(new Uint8Array(16)));
+  const base = (issuer.value || window.location.origin).replace(/\/$/, "");
+  const scope = ["openid", ...(c.scopes || [])]
+    .filter((s, i, a) => a.indexOf(s) === i)
+    .join(" ");
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: c.client_id,
+    redirect_uri: `${base}/oauth/test-callback/${encodeURIComponent(c.client_id)}`,
+    scope,
+    state,
+    nonce: crypto.randomUUID(),
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+  });
+  window.open(`${base}/oauth/authorize?${params}`, "_blank", "noopener");
 }
 </script>
 
@@ -409,6 +497,15 @@ function copyBoth() {
                     <span v-else class="text-muted-foreground">Unrestricted</span>
                   </td>
                   <td class="space-x-1 whitespace-nowrap px-5 py-3 text-right">
+                    <UiButton
+                      v-if="c.enabled"
+                      variant="ghost"
+                      size="sm"
+                      :title="'Run a full authorize round trip against this client in a new tab'"
+                      @click="onTestDrive(c)"
+                    >
+                      Test drive
+                    </UiButton>
                     <UiButton variant="ghost" size="sm" @click="openEdit(c)">Edit</UiButton>
                     <UiButton
                       variant="ghost"
@@ -660,12 +757,54 @@ function copyBoth() {
                 </UiButton>
               </div>
             </div>
+
+            <div class="rounded-lg border border-border/50">
+              <div class="flex items-center justify-between border-b border-border/30 px-3 py-2">
+                <div class="flex gap-1 text-xs">
+                  <button
+                    type="button"
+                    class="rounded-md px-2 py-1"
+                    :class="configTab === 'env' ? 'bg-muted font-medium' : 'text-muted-foreground'"
+                    @click="configTab = 'env'"
+                  >
+                    .env
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded-md px-2 py-1"
+                    :class="configTab === 'toml' ? 'bg-muted font-medium' : 'text-muted-foreground'"
+                    @click="configTab = 'toml'"
+                  >
+                    config.toml
+                  </button>
+                </div>
+                <UiButton
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  class="h-7 w-7 shrink-0"
+                  :title="copiedField === 'config' ? 'Copied' : 'Copy snippet'"
+                  @click="copyText(configTab === 'env' ? envSnippet : tomlSnippet, 'config')"
+                >
+                  <Check v-if="copiedField === 'config'" class="h-3.5 w-3.5" />
+                  <Copy v-else class="h-3.5 w-3.5" />
+                </UiButton>
+              </div>
+              <pre class="max-h-56 overflow-auto px-3 py-2.5 font-mono text-[11px] leading-5">{{
+                configTab === "env" ? envSnippet : tomlSnippet
+              }}</pre>
+              <p class="border-t border-border/30 px-3 py-2 text-[11px] text-muted-foreground">
+                Hand this whole snippet to the subsystem — it already matches this client's
+                registered redirect URIs, scopes and logout address. The secret appears only
+                here and only once.
+              </p>
+            </div>
           </div>
           <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
             <UiButton type="button" variant="ghost" size="sm" @click="copyBoth">
               <Check v-if="copiedField === 'both'" class="h-3.5 w-3.5" />
               <Copy v-else class="h-3.5 w-3.5" />
-              {{ copiedField === "both" ? "Copied" : "Copy both" }}
+              {{ copiedField === "both" ? "Copied" : "Copy ID + secret" }}
             </UiButton>
             <UiButton type="button" size="sm" @click="secretDialog = null">Done</UiButton>
           </div>

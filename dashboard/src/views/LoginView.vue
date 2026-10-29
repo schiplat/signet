@@ -250,12 +250,35 @@ onMounted(async () => {
   if (err) {
     error.value = SSO_ERROR_MESSAGES[err] ?? "Third-party sign-in failed.";
   }
+  // Third-party sign-in continuation: the SSO callback resolved the account and
+  // parked the visitor on a local gate (TOTP / enrollment / forced password
+  // change). The mfa challenge cookie is already set, so jump straight to the
+  // matching step instead of showing the password form.
+  const ssoStep = typeof route.query.sso_step === "string" ? route.query.sso_step : "";
+  if (ssoStep === "mfa") {
+    step.value = "mfa";
+  } else if (ssoStep === "password_change") {
+    newPassword.value = "";
+    confirmPassword.value = "";
+    showNewPassword.value = false;
+    step.value = "password_change";
+  } else if (ssoStep === "enroll") {
+    try {
+      const started = await mfaEnrollStart();
+      enrollSecret.value = started.secret;
+      enrollUri.value = started.otpauth_uri;
+      enrollCode.value = "";
+      step.value = "enroll";
+    } catch {
+      error.value = "Sign-in session expired. Please start again.";
+    }
+  }
 });
 
 function ssoStartUrl(code: string): string {
   const params = new URLSearchParams();
   const returnTo = oauthReturnTo();
-  if (returnTo) params.set("client_id", returnTo);
+  if (returnTo) params.set("return_to", returnTo);
   const query = params.toString();
   return `/api/v1/auth/sso/${encodeURIComponent(code)}/start${query ? `?${query}` : ""}`;
 }
