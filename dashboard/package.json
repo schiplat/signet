@@ -18,7 +18,7 @@
     "qrcode": "^1.5.4",
     "radix-vue": "^1.9.17",
     "tailwind-merge": "^3.3.1",
-    "vue": "^3.5.18",
+    "vue": "^3.5.42",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {

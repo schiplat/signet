@@ -132,10 +132,14 @@ pub async fn test_callback(
             esc(&detail)
         )
     };
+    // The path segment is echoed into the page. Today only a real client code
+    // can reach this render (the redirect check pins it, and codes constrain
+    // the charset) — escaping keeps the page safe if that invariant moves.
+    let safe_client_id = esc(&client_id);
     let html = format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Test drive — {client_id}</title>\
+        "<!doctype html><meta charset=\"utf-8\"><title>Test drive — {safe_client_id}</title>\
          <body style=\"font-family:ui-sans-serif;max-width:34rem;margin:3rem auto;padding:0 1rem;line-height:1.5\">\
-         <h1 style=\"font-size:1.15rem\">Test drive passed for <code>{client_id}</code></h1>\
+         <h1 style=\"font-size:1.15rem\">Test drive passed for <code>{safe_client_id}</code></h1>\
          <p style=\"color:#555\">Everything inside Signet worked end to end:</p>\
          <ul style=\"padding-left:1.2rem\">\
          {}\

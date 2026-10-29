@@ -1,3 +1,8 @@
 allowBuilds:
   esbuild: true
   vue-demi: true
+# RUSTSEC-style pin: source-map-js <1.2.2 has an event-loop DoS via indexed
+# source-map section offsets (GHSA-68fv-2mgg-jv7q). Pulled in transitively by
+# the Vue compiler; drop the override once vue's floor reaches 1.2.2.
+overrides:
+  source-map-js@<1.2.2: ">=1.2.2"
