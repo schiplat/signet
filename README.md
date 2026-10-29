@@ -10,6 +10,38 @@ Unified identity authentication (SSO / OIDC IdP) service.
 
 > Naming note: this project is an SSO, **not** Alibaba Cloud Object Storage (OSS).
 
+## Quick Start
+
+Prerequisites: Rust stable, Node 20+ with pnpm, and Docker (only to run a PostgreSQL).
+
+```bash
+# 1. Start Postgres — matches the built-in default connection string
+#    (signet/signet@127.0.0.1:5433/signet); no configuration needed
+docker compose -f build/docker-compose.yml --profile dev up -d db
+
+# 2. Build the dashboard — rust-embed bakes dashboard/dist into the binary at
+#    compile time, so it must exist before cargo run
+cd dashboard && pnpm install && pnpm build && cd ..
+
+# 3. Start the server
+cargo run -p signet
+```
+
+4. Open **http://localhost:8443** — the first visit redirects to **`/setup`**, where you create the first administrator and sign in.
+
+5. Try SSO: register a client under **Dashboard → Clients** (the secret is shown once, together with ready-to-paste `.env` / `config.toml` snippets), then click **Test drive** in the row — a new tab walks the real authorize → sign-in → consent → callback round trip.
+
+6. (Optional) run the example client for the full integration in five minutes:
+
+   ```bash
+   cd examples/axum-oidc-client
+   export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<id above> OIDC_CLIENT_SECRET=<secret above>
+   cargo run
+   # open http://127.0.0.1:3000 → Sign in → signed in through SSO
+   ```
+
+For the hot-reload dev server (`:5173` proxying `:8443`) and environment variables, see [Local development](#local-development) below. Client integration guide: [docs/client-integration.md](./docs/client-integration.md).
+
 ## Features
 
 - OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
@@ -51,6 +83,8 @@ display name, and password).
 ```bash
 cargo run -p signet
 ```
+
+> Note: the binary embeds `dashboard/dist` at compile time (rust-embed); a missing folder fails the build. Build the dashboard (step 3) first, or just follow [Quick Start](#quick-start) in order.
 
 Health check: `GET http://localhost:8443/health`
 

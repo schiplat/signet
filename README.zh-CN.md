@@ -10,6 +10,36 @@
 
 > 命名说明：本项目为 SSO，**不是**阿里云 Object Storage（OSS）。
 
+## Quick Start
+
+前提：Rust stable、Node 20+ 与 pnpm、Docker（只为跑一个 Postgres）。
+
+```bash
+# 1. 起 Postgres —— 与内置默认连接串一致（signet/signet@127.0.0.1:5433/signet），无需任何配置
+docker compose -f build/docker-compose.yml --profile dev up -d db
+
+# 2. 构建前端产物 —— rust-embed 在编译期嵌入 dashboard/dist，必须先于 cargo run 存在
+cd dashboard && pnpm install && pnpm build && cd ..
+
+# 3. 起服务
+cargo run -p signet
+```
+
+4. 打开 **http://localhost:8443** —— 首次访问自动跳转 **`/setup`**，创建第一个管理员并登录。
+
+5. 体验 SSO：**Dashboard → Clients** 注册一个客户端（secret 只展示一次，弹窗里就是可直接复制给子系统的 `.env` / `config.toml` 片段），然后在列表里点 **Test drive** —— 新标签页走完真实的 authorize → 登录 → consent → 回调，验证整条链路。
+
+6. （可选）用示例客户端跑一遍完整对接，五分钟看到端到端登录：
+
+   ```bash
+   cd examples/axum-oidc-client
+   export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<上面的 id> OIDC_CLIENT_SECRET=<上面的 secret>
+   cargo run
+   # 打开 http://127.0.0.1:3000 → Sign in → SSO 登录成功
+   ```
+
+前端热更新开发（`:5173` 代理 `:8443`）、环境变量说明见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/client-integration.md)。
+
 ## 功能概览
 
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
@@ -50,6 +80,8 @@ cp .env.example .env
 ```bash
 cargo run -p signet
 ```
+
+> 注意：二进制在编译期嵌入 `dashboard/dist`（rust-embed），该目录不存在会编译失败。首次请先执行上方第 3 步的前端构建，或直接按 [Quick Start](#quick-start) 顺序操作。
 
 探活：`GET http://localhost:8443/health`
 
