@@ -62,7 +62,13 @@ impl JwtKeys {
         let kid = crate::crypto::util::sha256_hex(&n)[..16].to_string();
 
         let encoding_key = EncodingKey::from_rsa_pem(pem.as_bytes()).context("encoding key")?;
-        let decoding_key = DecodingKey::from_rsa_pem(pem.as_bytes()).context("decoding key")?;
+        // From the public components, NOT `DecodingKey::from_rsa_pem`: on this
+        // jsonwebtoken/ring combination the PEM-built key fails verification of
+        // its own signatures (found on aarch64; userinfo 401'd every client
+        // while the JWKS path — components-based — kept working). The n/e pair
+        // is already at hand for the JWKS, so the components constructor is the
+        // natural route; `tests/jwt_roundtrip.rs` pins the property.
+        let decoding_key = DecodingKey::from_rsa_components(&n, &e).context("decoding key")?;
         let jwks = Arc::new(Jwks {
             keys: vec![Jwk {
                 kty: "RSA".into(),
