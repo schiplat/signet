@@ -12,11 +12,45 @@ Unified identity authentication (SSO / OIDC IdP) service.
 
 ## Quick Start
 
+Three ways to get a server running. **The release binary is the recommended way**: each [GitHub Release](https://github.com/schiplat/signet/releases) ships self-contained `linux-amd64` / `linux-arm64` / `macos-arm64` binaries with the dashboard embedded at compile time — one file plus a PostgreSQL, no Rust or Node toolchain. DB migrations are embedded too and run automatically on startup.
+
+**A. Release binary (recommended)**
+
+```bash
+# 1. Download the asset for your platform from GitHub Releases (grab the
+#    latest tag there), e.g.:
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.3/signet-0.4.3-macos-arm64
+chmod +x signet-0.4.3-macos-arm64 && mv signet-0.4.3-macos-arm64 signet
+
+# 2. Start a PostgreSQL matching the built-in default connection string
+#    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
+docker run -d --name signet-db -p 5433:5432 \
+  -e POSTGRES_USER=signet -e POSTGRES_PASSWORD=signet -e POSTGRES_DB=signet \
+  postgres:16-alpine
+
+# 3. Run — reads .env from the working directory (see Configuration below)
+./signet
+```
+
+**B. Docker image**
+
+Each release also publishes a runtime image (Docker Hub + ACR). The pull-only production stack lives in [`deploy/`](./deploy/):
+
+```bash
+cd deploy
+cp ../.env.example .env   # edit SIGNET_*; set SIGNET_IMAGE=<registry>/signet:<tag>
+docker compose up -d
+```
+
+Production layout (external Postgres, keys volume): [docs/deploy.md](./docs/deploy.md).
+
+**C. Build from source (development)**
+
 Prerequisites: Rust stable, Node 20+ with pnpm, and Docker (only to run a PostgreSQL).
 
 ```bash
-# 1. Start Postgres — matches the built-in default connection string
-#    (signet/signet@127.0.0.1:5433/signet); no configuration needed
+# 1. Start Postgres — matches the built-in default connection string; no
+#    configuration needed
 docker compose -f build/docker-compose.yml --profile dev up -d db
 
 # 2. Build the dashboard — rust-embed bakes dashboard/dist into the binary at
@@ -27,20 +61,41 @@ cd dashboard && pnpm install && pnpm build && cd ..
 cargo run -p signet
 ```
 
-4. Open **http://localhost:8443** — the first visit redirects to **`/setup`**, where you create the first administrator and sign in.
+### Configuration
 
-5. Try SSO: register a client under **Dashboard → Clients** (the secret is shown once, together with ready-to-paste `.env` / `config.toml` snippets), then click **Test drive** in the row — a new tab walks the real authorize → sign-in → consent → callback round trip.
+All three options read the same environment: the binary loads `.env` from its working directory, the compose files inject the same variables. The two lines below are enough to start; `.env.example` is the full annotated reference.
 
-6. (Optional) run the example client for the full integration in five minutes:
+```dotenv
+SIGNET_DATABASE_URL=postgres://signet:signet@127.0.0.1:5433/signet
+SIGNET_ISSUER=http://localhost:8443
+```
 
-   ```bash
-   cd examples/axum-oidc-client
-   export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<id above> OIDC_CLIENT_SECRET=<secret above>
-   cargo run
-   # open http://127.0.0.1:3000 → Sign in → signed in through SSO
-   ```
+| Setting | Notes |
+|---------|-------|
+| `SIGNET_DATABASE_URL` | PostgreSQL connection string (the value above is the built-in default, matching the dev `db` container) |
+| `SIGNET_ISSUER` | Public origin clients use to reach this IdP; must not end with `/`. Set it to the real HTTPS domain in production — an https issuer also turns on `Secure` cookies |
+| `SIGNET_HTTP_BIND` | HTTP listen address; default `0.0.0.0:8443` |
+| `SIGNET_TRUSTED_PROXIES` | Only behind a reverse proxy: comma-separated proxy IPs/CIDRs allowed to assert `X-Forwarded-For` |
+| Keys | `./data/jwt_private.pem` and `./data/encryption.key` are auto-generated on first boot — **back them up**: losing or rotating them invalidates issued tokens and stored TOTP secrets |
 
-For the hot-reload dev server (`:5173` proxying `:8443`) and environment variables, see [Local development](#local-development) below. Client integration guide: [docs/client-integration.md](./docs/client-integration.md).
+The first administrator is **not** configured via the file: on first boot the dashboard redirects to `/setup` to create it.
+
+### First run
+
+Open **http://localhost:8443** — the first visit redirects to **`/setup`**, where you create the first administrator and sign in.
+
+**Try SSO:** register a client under **Dashboard → Clients** (the secret is shown once, together with ready-to-paste `.env` / `config.toml` snippets), then click **Test drive** in the row — a new tab walks the real authorize → sign-in → consent → callback round trip.
+
+**(Optional) example client** for the full integration in five minutes:
+
+```bash
+cd examples/axum-oidc-client
+export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<id above> OIDC_CLIENT_SECRET=<secret above>
+cargo run
+# open http://127.0.0.1:3000 → Sign in → signed in through SSO
+```
+
+For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development](#local-development) below. Client integration guide: [docs/client-integration.md](./docs/client-integration.md).
 
 ## Features
 
@@ -84,7 +139,7 @@ display name, and password).
 cargo run -p signet
 ```
 
-> Note: the binary embeds `dashboard/dist` at compile time (rust-embed); a missing folder fails the build. Build the dashboard (step 3) first, or just follow [Quick Start](#quick-start) in order.
+> Note: the binary embeds `dashboard/dist` at compile time (rust-embed); a missing folder fails the build. Build the dashboard first (Quick Start option C, step 2), or just follow [Quick Start](#quick-start) in order.
 
 Health check: `GET http://localhost:8443/health`
 

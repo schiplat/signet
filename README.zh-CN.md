@@ -12,10 +12,42 @@
 
 ## Quick Start
 
+有三种把服务跑起来的方式。**推荐使用 release 二进制**：每个 [GitHub Release](https://github.com/schiplat/signet/releases) 都提供自包含的 `linux-amd64` / `linux-arm64` / `macos-arm64` 可执行文件，Dashboard 已在编译期嵌入——单个文件加一个 PostgreSQL 即可运行，无需 Rust / Node 工具链；数据库迁移也已内置，启动时自动执行。
+
+**方式 A：release 二进制（推荐）**
+
+```bash
+# 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.3/signet-0.4.3-macos-arm64
+chmod +x signet-0.4.3-macos-arm64 && mv signet-0.4.3-macos-arm64 signet
+
+# 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
+docker run -d --name signet-db -p 5433:5432 \
+  -e POSTGRES_USER=signet -e POSTGRES_PASSWORD=signet -e POSTGRES_DB=signet \
+  postgres:16-alpine
+
+# 3. 运行 —— 会从工作目录读取 .env（见下方「配置文件」）
+./signet
+```
+
+**方式 B：Docker 镜像**
+
+每个 release 同步发布运行时镜像（Docker Hub + ACR）；只拉不建的生产编排见 [`deploy/`](./deploy/)：
+
+```bash
+cd deploy
+cp ../.env.example .env   # 编辑 SIGNET_*；并设置 SIGNET_IMAGE=<registry>/signet:<tag>
+docker compose up -d
+```
+
+生产布局（外部 Postgres、密钥卷）详见 [docs/deploy.md](./docs/deploy.md)。
+
+**方式 C：源码构建（开发）**
+
 前提：Rust stable、Node 20+ 与 pnpm、Docker（只为跑一个 Postgres）。
 
 ```bash
-# 1. 起 Postgres —— 与内置默认连接串一致（signet/signet@127.0.0.1:5433/signet），无需任何配置
+# 1. 起 Postgres —— 与内置默认连接串一致，无需任何配置
 docker compose -f build/docker-compose.yml --profile dev up -d db
 
 # 2. 构建前端产物 —— rust-embed 在编译期嵌入 dashboard/dist，必须先于 cargo run 存在
@@ -25,20 +57,41 @@ cd dashboard && pnpm install && pnpm build && cd ..
 cargo run -p signet
 ```
 
-4. 打开 **http://localhost:8443** —— 首次访问自动跳转 **`/setup`**，创建第一个管理员并登录。
+### 配置文件
 
-5. 体验 SSO：**Dashboard → Clients** 注册一个客户端（secret 只展示一次，弹窗里就是可直接复制给子系统的 `.env` / `config.toml` 片段），然后在列表里点 **Test drive** —— 新标签页走完真实的 authorize → 登录 → consent → 回调，验证整条链路。
+三种方式读的是同一套环境变量：二进制从工作目录加载 `.env`，compose 注入同名变量。下面两行即可启动；完整带注释的参考见 [.env.example](./.env.example)。
 
-6. （可选）用示例客户端跑一遍完整对接，五分钟看到端到端登录：
+```dotenv
+SIGNET_DATABASE_URL=postgres://signet:signet@127.0.0.1:5433/signet
+SIGNET_ISSUER=http://localhost:8443
+```
 
-   ```bash
-   cd examples/axum-oidc-client
-   export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<上面的 id> OIDC_CLIENT_SECRET=<上面的 secret>
-   cargo run
-   # 打开 http://127.0.0.1:3000 → Sign in → SSO 登录成功
-   ```
+| 配置 | 说明 |
+|------|------|
+| `SIGNET_DATABASE_URL` | PostgreSQL 连接串（上面的值即内置默认值，与本地 dev `db` 容器一致） |
+| `SIGNET_ISSUER` | 客户端访问本服务的公开 origin；不能以 `/` 结尾。生产必须设为真实 HTTPS 域名（issuer 为 https 时自动启用 `Secure` Cookie） |
+| `SIGNET_HTTP_BIND` | HTTP 监听地址；默认 `0.0.0.0:8443` |
+| `SIGNET_TRUSTED_PROXIES` | 仅反向代理后需要：允许断言 `X-Forwarded-For` 的代理 IP/CIDR，逗号分隔 |
+| 密钥 | `./data/jwt_private.pem` 与 `./data/encryption.key` 首次启动自动生成——**务必备份**：丢失或轮换会使已签发 token 失效、已存 TOTP 无法解密 |
 
-前端热更新开发（`:5173` 代理 `:8443`）、环境变量说明见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/client-integration.md)。
+首位管理员**不**通过配置文件创建：首次启动时 Dashboard 会跳转 `/setup` 创建。
+
+### 首次运行
+
+打开 **http://localhost:8443** —— 首次访问自动跳转 **`/setup`**，创建第一个管理员并登录。
+
+**体验 SSO：** **Dashboard → Clients** 注册一个客户端（secret 只展示一次，弹窗里就是可直接复制给子系统的 `.env` / `config.toml` 片段），然后在列表里点 **Test drive** —— 新标签页走完真实的 authorize → 登录 → consent → 回调，验证整条链路。
+
+**（可选）示例客户端**，五分钟跑通端到端登录：
+
+```bash
+cd examples/axum-oidc-client
+export OIDC_ISSUER=http://localhost:8443 OIDC_CLIENT_ID=<上面的 id> OIDC_CLIENT_SECRET=<上面的 secret>
+cargo run
+# 打开 http://127.0.0.1:3000 → Sign in → SSO 登录成功
+```
+
+前端热更新开发（`:5173` 代理 `:8443`）见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/client-integration.md)。
 
 ## 功能概览
 
@@ -81,7 +134,7 @@ cp .env.example .env
 cargo run -p signet
 ```
 
-> 注意：二进制在编译期嵌入 `dashboard/dist`（rust-embed），该目录不存在会编译失败。首次请先执行上方第 3 步的前端构建，或直接按 [Quick Start](#quick-start) 顺序操作。
+> 注意：二进制在编译期嵌入 `dashboard/dist`（rust-embed），该目录不存在会编译失败。首次请先构建前端（Quick Start 方式 C 的第 2 步），或直接按 [Quick Start](#quick-start) 顺序操作。
 
 探活：`GET http://localhost:8443/health`
 
