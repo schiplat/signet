@@ -15,7 +15,7 @@
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard：用户、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
-  绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则在 Settings「JIT provision」开启（**默认开**，亦可用 `SIGNET_SSO_JIT_PROVISION` 回退）时 **JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+  绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则按 JIT 策略（全局 Settings 开关 + **每个 provider 可独立覆盖** `jit_mode`，并可单独配置 email 可信级别 `email_trust`）**JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。本地 MFA / 强制改密策略对第三方登录同样生效。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
 ![Dashboard 总览](./docs/screenshot_overview.png)
 
@@ -135,6 +135,7 @@ cd .. && cargo build -p signet
 crates/signet/          Axum OIDC IdP + /api/v1（含 federation/）
 dashboard/              Vue 3 + Tailwind CSS v4
 migrations/             Postgres 迁移（… audit client_id、身份联邦 …）
+examples/               axum-oidc-client：业务系统接入 quickstart（可运行）
 build/                  Dockerfile + 本地 compose（镜像构建、可选 Postgres）
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 生产 compose + env 模板（OSS 配置包）

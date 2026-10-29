@@ -17,6 +17,8 @@ fn cfg(provider_type: &str, scopes: Option<&str>, issuer: Option<&str>) -> Provi
         client_secret: "sec".into(),
         issuer_url: issuer.map(|s| s.into()),
         scopes: scopes.map(|s| s.into()),
+        jit_mode: "inherit".into(),
+        email_trust: "inherit".into(),
     }
 }
 
@@ -60,12 +62,15 @@ fn empty_scopes_string_uses_defaults() {
 }
 
 #[test]
-fn google_includes_nonce_and_scope() {
+fn google_sends_scope_but_no_nonce() {
     let c = cfg("google", None, None);
     let url = block_on_url(Google.authorize_url(&c, "https://id.example.com/cb", "s2", "nonce-1"))
         .unwrap();
     assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
-    assert!(url.contains("nonce=nonce-1"));
+    // No nonce on purpose: the flow never consumes the id_token it would
+    // protect (identity comes from userinfo), so asserting its absence pins
+    // that decision.
+    assert!(!url.contains("nonce="));
     assert!(url.contains("scope=openid%20email%20profile"));
 }
 
@@ -111,7 +116,7 @@ fn generic_oidc_direct_authorize_url_encodes_params() {
     let url = block_on_url(GenericOidc.authorize_url(&c, "https://id.example.com/cb", "s6", "n6"))
         .unwrap();
     assert!(url.starts_with("https://sso.acme.com/authorize?"));
-    assert!(url.contains("nonce=n6"));
+    assert!(!url.contains("nonce="));
     assert!(url.contains("scope=openid%20email"));
 }
 

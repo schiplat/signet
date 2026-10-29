@@ -119,11 +119,12 @@ impl UpstreamProvider for Feishu {
                     .or_else(|| jstr(&data, "union_id"))
                     .ok_or_else(|| anyhow!("feishu profile missing open_id"))?,
                 email: jstr(&data, "email").or_else(|| jstr(&data, "enterprise_email")),
-                // Feishu does not expose a separate verified flag; treat a
-                // returned email as verified for auto-link purposes.
-                email_verified: jstr(&data, "email")
-                    .or_else(|| jstr(&data, "enterprise_email"))
-                    .is_some(),
+                // Feishu's contact API exposes no verified flag, so report the
+                // honest `false`; whether an address still counts as verified
+                // is the row's `email_trust` decision (`any` — what migration
+                // 033 pinned for existing Feishu providers — vs `verified`,
+                // which turns the provider pending-link-only).
+                email_verified: false,
                 display_name: jstr(&data, "name"),
                 raw: data,
             })

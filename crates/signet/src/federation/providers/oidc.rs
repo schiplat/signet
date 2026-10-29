@@ -54,7 +54,7 @@ impl UpstreamProvider for GenericOidc {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         state: &'a str,
-        nonce: &'a str,
+        _nonce: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let issuer = cfg
@@ -62,13 +62,16 @@ impl UpstreamProvider for GenericOidc {
                 .as_deref()
                 .ok_or_else(|| anyhow!("oidc provider requires issuer_url"))?;
             let auth = authorization_endpoint(issuer).await?;
+            // No `nonce`: identity is resolved from userinfo over the
+            // server-side token exchange, never from the id_token a nonce
+            // would protect — sending an unverified one would only suggest
+            // protection that is not there.
             let query = format!(
-                "client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&nonce={}",
+                "client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
                 urlencoding::encode(&cfg.client_id),
                 urlencoding::encode(redirect_uri),
                 urlencoding::encode(&self.scopes(cfg)),
                 urlencoding::encode(state),
-                urlencoding::encode(nonce),
             );
             Ok(format!("{auth}?{query}"))
         })

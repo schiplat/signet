@@ -131,6 +131,12 @@ struct AdminProvider {
     /// Per-provider admission list; `[]` means the provider adds no restriction
     /// of its own (the global list still applies).
     allowed_email_domains: Vec<String>,
+    /// `inherit` | `on` | `off`: this provider's override of the global JIT
+    /// toggle (`inherit` follows Settings → SSO).
+    jit_mode: String,
+    /// `inherit` | `any` | `verified`: how this provider's email assertion is
+    /// read for auto-link/JIT.
+    email_trust: String,
     enabled: bool,
     /// Count of user bindings, for the admin list view.
     bindings: i64,
@@ -156,7 +162,7 @@ async fn admin_list(
     let mut providers: Vec<AdminProvider> = sqlx::query_as(
         r#"
         SELECT p.code, p.provider_type, p.display_name, p.client_id, p.issuer_url,
-               p.scopes, p.allowed_email_domains, p.enabled,
+               p.scopes, p.allowed_email_domains, p.jit_mode, p.email_trust, p.enabled,
                (SELECT COUNT(*) FROM user_identities ui WHERE ui.provider_code = p.code) AS bindings,
                p.created_at, p.updated_at
         FROM upstream_providers p
@@ -189,11 +195,37 @@ struct ProviderBody {
     /// provider had before this existed.
     #[serde(default)]
     allowed_email_domains: Option<Vec<String>>,
+    /// Per-provider JIT override; defaults to following the global toggle.
+    #[serde(default)]
+    jit_mode: Option<String>,
+    /// Per-provider email trust; defaults to the adapter's own flag.
+    #[serde(default)]
+    email_trust: Option<String>,
     #[serde(default)]
     enabled: Option<bool>,
 }
 
 const VALID_TYPES: &[&str] = &["github", "google", "feishu", "wechat", "oidc"];
+const VALID_JIT_MODES: &[&str] = &["inherit", "on", "off"];
+const VALID_EMAIL_TRUST: &[&str] = &["inherit", "any", "verified"];
+
+/// Normalizes the two per-provider policy fields, rejecting unknown values
+/// under a name that says which field is wrong.
+fn provider_policy(body: &ProviderBody) -> AppResult<(String, String)> {
+    let jit_mode = body.jit_mode.as_deref().unwrap_or("inherit").trim();
+    if !VALID_JIT_MODES.contains(&jit_mode) {
+        return Err(AppError::bad_request(
+            "jit_mode must be one of: inherit, on, off",
+        ));
+    }
+    let email_trust = body.email_trust.as_deref().unwrap_or("inherit").trim();
+    if !VALID_EMAIL_TRUST.contains(&email_trust) {
+        return Err(AppError::bad_request(
+            "email_trust must be one of: inherit, any, verified",
+        ));
+    }
+    Ok((jit_mode.to_string(), email_trust.to_string()))
+}
 
 /// The provider's domain list, checked and normalized.
 ///
@@ -248,6 +280,7 @@ async fn admin_create(
     let actor = require_admin(&state, &headers).await?;
     validate_body(&body, state.config.outbound_allow_private)?;
     let allowed_email_domains = provider_domains(&body)?;
+    let (jit_mode, email_trust) = provider_policy(&body)?;
     let secret = body
         .client_secret
         .as_deref()
@@ -274,8 +307,8 @@ async fn admin_create(
         r#"
         INSERT INTO upstream_providers
             (code, provider_type, display_name, client_id, client_secret_enc,
-             issuer_url, scopes, allowed_email_domains, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             issuer_url, scopes, allowed_email_domains, jit_mode, email_trust, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(&body.code)
@@ -291,6 +324,8 @@ async fn admin_create(
     )
     .bind(&scopes_value)
     .bind(&allowed_email_domains)
+    .bind(&jit_mode)
+    .bind(&email_trust)
     .bind(body.enabled.unwrap_or(true))
     .execute(&state.pool)
     .await
@@ -303,7 +338,11 @@ async fn admin_create(
             action: "admin.sso_provider.create",
             resource_type: "sso_provider",
             resource_id: Some(body.code.clone()),
-            detail: json!({ "provider_type": body.provider_type }),
+            detail: json!({
+                "provider_type": body.provider_type,
+                "jit_mode": jit_mode,
+                "email_trust": email_trust,
+            }),
             ip: None,
             user_agent: None,
             client_id: None,
@@ -323,6 +362,7 @@ async fn admin_update(
     let actor = require_admin(&state, &headers).await?;
     validate_body(&body, state.config.outbound_allow_private)?;
     let allowed_email_domains = provider_domains(&body)?;
+    let (jit_mode, email_trust) = provider_policy(&body)?;
 
     // NOT NULL columns: empty form values become "" / code, never SQL NULL.
     let scopes_value = body
@@ -352,7 +392,8 @@ async fn admin_update(
             UPDATE upstream_providers SET
                 provider_type = $2, display_name = $3, client_id = $4,
                 client_secret_enc = $5, issuer_url = $6, scopes = $7,
-                allowed_email_domains = $8, enabled = $9, updated_at = NOW()
+                allowed_email_domains = $8, jit_mode = $9, email_trust = $10,
+                enabled = $11, updated_at = NOW()
             WHERE code = $1
             "#,
         )
@@ -369,6 +410,8 @@ async fn admin_update(
         )
         .bind(&scopes_value)
         .bind(&allowed_email_domains)
+        .bind(&jit_mode)
+        .bind(&email_trust)
         .bind(body.enabled.unwrap_or(true))
         .execute(&state.pool)
         .await
@@ -378,7 +421,7 @@ async fn admin_update(
             UPDATE upstream_providers SET
                 provider_type = $2, display_name = $3, client_id = $4,
                 issuer_url = $5, scopes = $6, allowed_email_domains = $7,
-                enabled = $8, updated_at = NOW()
+                jit_mode = $8, email_trust = $9, enabled = $10, updated_at = NOW()
             WHERE code = $1
             "#,
         )
@@ -394,6 +437,8 @@ async fn admin_update(
         )
         .bind(&scopes_value)
         .bind(&allowed_email_domains)
+        .bind(&jit_mode)
+        .bind(&email_trust)
         .bind(body.enabled.unwrap_or(true))
         .execute(&state.pool)
         .await
@@ -412,6 +457,8 @@ async fn admin_update(
             detail: json!({
                 "secret_rotated": body.client_secret.is_some(),
                 "allowed_email_domains": allowed_email_domains,
+                "jit_mode": jit_mode,
+                "email_trust": email_trust,
             }),
             ip: None,
             user_agent: None,

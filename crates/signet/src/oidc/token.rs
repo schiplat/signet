@@ -1,3 +1,4 @@
+use crate::audit::{record, AuditEvent};
 use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::client_ip;
@@ -84,7 +85,16 @@ pub async fn token(
 
     let body = match form.grant_type.as_str() {
         "authorization_code" => issue_from_code(&state, &client, &form).await?,
-        "refresh_token" => issue_from_refresh(&state, &client, &form).await?,
+        "refresh_token" => {
+            issue_from_refresh(
+                &state,
+                &client,
+                &form,
+                source,
+                crate::http::extract::user_agent(&headers),
+            )
+            .await?
+        }
         _ => return Err(AppError::bad_request("unsupported grant_type")),
     };
     Ok((StatusCode::OK, axum::Json(body)))
@@ -197,13 +207,28 @@ async fn issue_from_code(
         .await?;
 
     let user = active_user_by_id(&state.pool, row.user_id).await?;
-    build_token_response(state, client, &user, &row.scope, row.nonce).await
+    // A code exchange starts a fresh family; rotation keeps the parent's.
+    build_token_response(state, client, &user, &row.scope, row.nonce, None).await
+}
+
+/// Revokes every still-live refresh token in `family`. Returns how many died.
+pub async fn revoke_refresh_family(pool: &sqlx::PgPool, family: Uuid) -> AppResult<u64> {
+    let res = sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = NOW() \
+         WHERE COALESCE(family_id, id) = $1 AND revoked_at IS NULL",
+    )
+    .bind(family)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
 }
 
 async fn issue_from_refresh(
     state: &AppState,
     client: &ClientApp,
     form: &TokenForm,
+    ip: Option<String>,
+    user_agent: Option<String>,
 ) -> AppResult<serde_json::Value> {
     let refresh = form
         .refresh_token
@@ -213,7 +238,7 @@ async fn issue_from_refresh(
 
     let row = sqlx::query_as::<_, RefreshRow>(
         r#"
-        SELECT id, client_id, user_id, scope, expires_at, revoked_at
+        SELECT id, client_id, user_id, scope, expires_at, revoked_at, family_id
         FROM refresh_tokens
         WHERE token_hash = $1
         "#,
@@ -223,7 +248,33 @@ async fn issue_from_refresh(
     .await?
     .ok_or_else(|| AppError::bad_request("invalid refresh_token"))?;
 
-    if row.revoked_at.is_some() || row.expires_at < Utc::now() {
+    if row.revoked_at.is_some() {
+        // A refresh token is single-use: it was revoked by its own rotation.
+        // Presenting it again therefore means either the client or the holder
+        // of a stolen copy just replayed it — the standard response (OAuth 2.0
+        // BCP) is to kill the whole family, so the thief's newer token dies
+        // with the legitimate client's. A client that merely lost its refresh
+        // response re-authenticates; a leak would have forced that anyway.
+        let family = row.family_id.unwrap_or(row.id);
+        let revoked = revoke_refresh_family(&state.pool, family).await?;
+        tracing::warn!(client_id = %client.client_id, revoked, "refresh token reuse detected; family revoked");
+        record(
+            state,
+            AuditEvent {
+                actor: None,
+                action: "oauth.refresh_reuse",
+                resource_type: "user",
+                resource_id: Some(row.user_id.to_string()),
+                detail: json!({ "client_id": client.client_id, "revoked": revoked }),
+                ip,
+                user_agent,
+                client_id: Some(client.client_id.clone()),
+            },
+        )
+        .await;
+        return Err(AppError::bad_request("refresh_token expired or revoked"));
+    }
+    if row.expires_at < Utc::now() {
         return Err(AppError::bad_request("refresh_token expired or revoked"));
     }
     if row.client_id != client.client_id {
@@ -237,7 +288,7 @@ async fn issue_from_refresh(
         .await?;
 
     let user = active_user_by_id(&state.pool, row.user_id).await?;
-    build_token_response(state, client, &user, &row.scope, None).await
+    build_token_response(state, client, &user, &row.scope, None, row.family_id).await
 }
 
 async fn build_token_response(
@@ -246,6 +297,7 @@ async fn build_token_response(
     user: &User,
     scope: &str,
     nonce: Option<String>,
+    family: Option<Uuid>,
 ) -> AppResult<serde_json::Value> {
     let now = Utc::now();
     let access_exp = now + Duration::seconds(state.config.access_token_ttl_secs);
@@ -286,8 +338,8 @@ async fn build_token_response(
     let refresh_exp = now + Duration::days(state.config.refresh_token_ttl_days);
     sqlx::query(
         r#"
-        INSERT INTO refresh_tokens (id, token_hash, client_id, user_id, scope, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO refresh_tokens (id, token_hash, client_id, user_id, scope, family_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(Uuid::new_v4())
@@ -295,6 +347,7 @@ async fn build_token_response(
     .bind(&client.client_id)
     .bind(user.id)
     .bind(scope)
+    .bind(family.unwrap_or_else(Uuid::new_v4))
     .bind(refresh_exp)
     .execute(&state.pool)
     .await?;
@@ -332,4 +385,5 @@ struct RefreshRow {
     scope: String,
     expires_at: chrono::DateTime<Utc>,
     revoked_at: Option<chrono::DateTime<Utc>>,
+    family_id: Option<Uuid>,
 }

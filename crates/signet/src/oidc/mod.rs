@@ -5,6 +5,7 @@ mod end_session;
 mod jwks;
 mod register;
 mod revoke;
+mod test_callback;
 mod token;
 mod userinfo;
 
@@ -17,6 +18,11 @@ use axum::Router;
 pub(crate) fn scope_contains(scope: &str, wanted: &str) -> bool {
     scope.split_whitespace().any(|s| s == wanted)
 }
+
+/// Revoking a refresh family on reuse detection is the one token behavior tests
+/// pin directly (the family SQL outlives the handler plumbing around it), so it
+/// is re-exported past the private `token` module.
+pub use token::revoke_refresh_family;
 
 /// De-duplicates a space-separated scope list, preserving first-seen order.
 /// OIDC scopes form a set, so duplicates (e.g. a client that sends
@@ -75,4 +81,8 @@ pub fn router() -> Router<AppState> {
             get(end_session::end_session).post(end_session::end_session),
         )
         .route("/oauth/consent", post(consent::consent))
+        .route(
+            "/oauth/test-callback/{client_id}",
+            get(test_callback::test_callback),
+        )
 }

@@ -67,7 +67,8 @@
 
 ### 2.4 登录审计 ✅
 
-- 成功/失败登录均写审计，记录客户端 IP（`X-Forwarded-For` → `X-Real-IP` → peer 兜底）与浏览器/OS（由 `User-Agent` 解析，见 §6）。
+- 成功/失败登录均写审计，记录客户端 IP 与浏览器/OS（由 `User-Agent` 解析，见 §6）。
+- **客户端 IP 只信可信代理**（`SIGNET_TRUSTED_PROXIES`）：仅当直连 peer 命中该列表时才采信 `X-Forwarded-For` / `X-Real-IP`，且取**从右往左第一个不可信跳**（而非最左侧——那是客户端可伪造的）。未配置时一律用 peer 地址，伪造的转发头无法影响 IP 白名单、限流与审计。
 
 ### 2.5 密码重置 ✅
 
@@ -106,7 +107,11 @@
 | 统一登出 | OIDC `end_session`（`/oauth/end_session`），`post_logout_redirect_uri` 走客户端白名单 |
 | 冻结联动 | 用户被冻结/删除时自动清除其会话 |
 
-会话 Cookie：HttpOnly、SameSite=Lax、可配 Secure（`SIGNET_COOKIE_SECURE`）。
+会话 Cookie：HttpOnly、SameSite=Lax；Secure 在 issuer 为 `https://` 时**自动强制**（`SIGNET_COOKIE_SECURE` 仅用于覆盖 http 场景）。
+
+### 3.1 第三方登录走同一套本地闸门 ✅
+
+联邦登录（GitHub/Google/飞书/微信/通用 OIDC）只证明上游身份；本地账户策略在建立会话前仍然生效（`finish_sign_in`）：强制改密（`must_change_password`）、TOTP 挑战、全局/用户级强制 MFA 的注册（enroll）——与密码登录共用同一套 MFA 挑战与续接端点，挑战行记录来源 `via=sso`，`auth.sign_in_blocked` 审计可区分路径。已持有该账户会话的用户（资料页绑定时）不重复挑战。
 
 ---
 
@@ -136,6 +141,7 @@
 | 授权/consent 回跳统一 **303**（避免缓存/方法转换） | ✅ |
 | Token 短 TTL（access/id 1h，auth code 5min） | ✅ |
 | Refresh token **轮换**（每次刷新旧 token 作废） | ✅ |
+| Refresh token **复用检测**（已轮换 token 再次出现 = 疑似盗用，吊销整个 token 家族并写 `oauth.refresh_reuse` 审计） | ✅ |
 | RFC 7009 独立吊销端点 `/oauth/revoke` | ✅ |
 | RFC 7591 动态客户端注册 `/oauth/register`（需一次性注册 token） | ✅ |
 | 客户端 Source IP 白名单（新建默认开启） | ✅ |
@@ -192,7 +198,8 @@
 |--------|------|------|
 | `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 私钥，首启生成 |
 | `SIGNET_ENCRYPTION_KEY_PATH` | `./data/encryption.key` | AES-256-GCM 密钥，首启生成 |
-| `SIGNET_COOKIE_SECURE` | `false` | 生产应置 `true` |
+| `SIGNET_COOKIE_SECURE` | `false` | issuer 为 https 时自动生效；显式配置仅用于覆盖 |
+| `SIGNET_TRUSTED_PROXIES` | — | 可信反向代理 IP/CIDR 列表；未配置时忽略转发头，取 peer 地址 |
 | `SIGNET_MAX_LOGIN_ATTEMPTS` | `5` | 登录锁定阈值 |
 | `SIGNET_LOCKOUT_MINUTES` | `15` | 锁定时长 |
 | `SIGNET_PASSWORD_MIN_LENGTH` | `10` | 密码最小长度 |

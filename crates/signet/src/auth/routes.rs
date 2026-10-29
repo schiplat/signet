@@ -200,6 +200,7 @@ async fn login(
         ip,
         crate::http::extract::user_agent(&headers),
         client_id,
+        crate::admission::via::PASSWORD,
     )
     .await
 }

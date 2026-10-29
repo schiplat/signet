@@ -4,6 +4,8 @@
 
 相关文档：[设计总览](./design.md) · [MFA](./mfa.md) · [Dashboard API](./api-v1.md) · [管理台](./dashboard.md)
 
+> **可运行的参考实现**：[`examples/axum-oidc-client`](../examples/axum-oidc-client/)（Axum，一个文件覆盖本指南全部要求，复制改 5 个环境变量即可跑通）。非 Rust 子系统参见其 README §4 的标准库配方表。
+
 > 本文描述 **OIDC**（`/oauth/*`）。Signet 管理台 JSON API 在 **`/api/v1/*`**，与业务客户端无关。
 
 ---
@@ -50,7 +52,8 @@ Discovery 返回（节选）：
 - `redirect_uris`：精确匹配白名单（一行一个）
 - `pkce_required`：默认开启（当前授权端点**始终要求** PKCE S256）
 - **Source IP allowlist**（默认开启）：仅允许列出的 IP / CIDR 访问该客户端的 `/oauth/authorize` 与 `/oauth/token`；可关闭为不限制。开启时必须至少配置一条 CIDR/IP。
-- 创建后 **client_secret 只展示一次**，请妥善保存；可 Rotate
+- 创建后 **client_secret 只展示一次**，同时展示可直接复制给子系统的**对接配置片段**（`.env` / `config.toml` 两种形态，issuer/client/scopes/redirect 全部预填）；可 Rotate（轮换后同样展示）
+- **Test drive**：Clients 列表对已启用客户端提供一键联调——用系统自带的 `{issuer}/oauth/test-callback/{client_id}` 回调地址走真实 authorize → 登录 → consent → 回调，结果页展示通过项（认证、scope、redirect 匹配、一次性 code）。token 端点 + secret + PKCE verifier 不在覆盖范围（服务端只存 secret 哈希），需真实集成验证
 
 禁用客户端后无法完成授权 / 换票。
 

@@ -20,6 +20,11 @@ pub mod routes;
 
 pub use link::consume_pending_link;
 
+/// Re-exported for `tests/`: the `return_to` sanitizer is the open-redirect
+/// boundary of the SSO flow and the login-URL builder feeds every redirect out
+/// of it, so both get pinned directly rather than through HTTP plumbing.
+pub use routes::{login_url, safe_return_to};
+
 use crate::state::AppState;
 
 /// Path template for the SSO callback, relative to [`crate::API_PREFIX`].

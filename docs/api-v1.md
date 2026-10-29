@@ -271,8 +271,8 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 
 | 路径 | 说明 |
 |------|------|
-| `GET /api/v1/auth/sso/{provider}/start?client_id=` | 生成 CSRF state（HttpOnly cookie 存明文、库中仅存 SHA-256，一次性，10 分钟），302 到上游授权页 |
-| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话或暂存待绑定（`auth.login.thirdparty` 审计） |
+| `GET /api/v1/auth/sso/{provider}/start?return_to=` | 生成 CSRF state（HttpOnly cookie 存明文、库中仅存 SHA-256，一次性，10 分钟），302 到上游授权页。可选 `return_to`：发起登录的 `/oauth/authorize?...` URL（仅接受同源 OIDC 路径，防开放重定向），登录完成后回跳以续接原流程 |
+| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话或暂存待绑定（`auth.login.thirdparty` 审计）。账号仍有本地闸门（强制改密 / TOTP / 强制 MFA 注册）时，重定向 `/login?sso_step=mfa|enroll|password_change` 走与密码登录相同的续接流程 |
 | `GET /api/v1/auth/sso/providers` | 公开接口：返回启用中的 provider（登录页按钮用） |
 
 ### 绑定策略（防账号接管 + OA JIT）
@@ -290,6 +290,8 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 - JIT **不会**在无验证邮箱时开户（微信开放平台通常无邮箱 → 仍需管理员开户或邀请绑定）。
 - 飞书需在应用侧开通邮箱相关权限，且 profile 能返回 `email` / `enterprise_email`，否则走第 5 步。对 `GET /open-apis/authen/v1/user_info`：`email` 需 **获取用户邮箱信息**（`contact:user.email:readonly`）；`enterprise_email` 另需 **获取用户受雇信息**（`contact:user.employee:readonly`）且租户已启用飞书邮箱。权限在开放平台开通并发布后生效（授权 URL 不带 `scope=`）。
 - 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
+- **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。典型组合：企业飞书租户 `jit_mode=on` + `email_trust=any`（可信租户自动开户），开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。飞书无验证邮箱标志：adapter 现如实上报「未验证」，迁移已把存量飞书 provider 置为 `email_trust=any` 保持行为；新建飞书 provider 默认 `inherit`（即只允许绑定，需显式选 `any` 才自动开户）。
+- 第三方登录只证明上游身份：本地策略（强制改密、TOTP、全局/用户级强制 MFA）在会话签发前照常生效，与密码登录共用同一套 MFA 挑战（挑战行记录来源 `via=sso`）。
 
 失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `access_denied`（用户在第三方授权页拒绝/取消） / `missing_code` / `no_matching_account` / `email_required`（上游未返回邮箱；微信除外。已绑定过的 `(provider, subject)` 仍可直接登录）。
 
@@ -297,9 +299,9 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 
 | 方法/路径 | 说明 |
 |-----------|------|
-| `GET /api/v1/admin/sso/providers` | 列表（含 `bindings`、每条记录的具体 `callback_url`；`client_secret` 永不回传） |
-| `POST /api/v1/admin/sso/providers` | 创建（`code` `[a-zA-Z0-9_-]`，`oidc` 必填 `issuer_url`） |
-| `PUT /api/v1/admin/sso/providers/{code}` | 更新；`client_secret` 留空保持不变，传入即轮换 |
+| `GET /api/v1/admin/sso/providers` | 列表（含 `bindings`、`jit_mode`、`email_trust`、每条记录的具体 `callback_url`；`client_secret` 永不回传） |
+| `POST /api/v1/admin/sso/providers` | 创建（`code` `[a-zA-Z0-9_-]`，`oidc` 必填 `issuer_url`；可选 `jit_mode` / `email_trust`，缺省 `inherit`） |
+| `PUT /api/v1/admin/sso/providers/{code}` | 更新；`client_secret` 留空保持不变，传入即轮换；`jit_mode` / `email_trust` 同创建 |
 | `DELETE /api/v1/admin/sso/providers/{code}` | 删除（级联删除绑定关系） |
 | `POST /api/v1/admin/sso/providers/{code}/enabled` | 启用/禁用 `{"enabled": bool}` |
 | `GET/PATCH /api/v1/admin/settings/sso` | JIT 开户开关 `{"jit_provision": bool}`（写入 `app_settings`） |

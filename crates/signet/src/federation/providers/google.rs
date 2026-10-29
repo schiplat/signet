@@ -22,16 +22,18 @@ impl UpstreamProvider for Google {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         state: &'a str,
-        nonce: &'a str,
+        _nonce: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         let scope = self.scopes(cfg);
+        // No `nonce`: this flow never consumes Google's id_token (identity is
+        // resolved server-side from userinfo via the access token), so a nonce
+        // we would not check is dead weight, not protection.
         let query = format!(
-            "client_id={}&redirect_uri={}&response_type=code&state={}&scope={}&nonce={}&access_type=online&include_granted_scopes=true",
+            "client_id={}&redirect_uri={}&response_type=code&state={}&scope={}&access_type=online&include_granted_scopes=true",
             urlencoding::encode(&cfg.client_id),
             urlencoding::encode(redirect_uri),
             urlencoding::encode(state),
             urlencoding::encode(&scope),
-            urlencoding::encode(nonce),
         );
         ready_url(format!("{}?{}", Self::AUTHORIZE, query))
     }

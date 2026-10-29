@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -61,9 +61,14 @@ impl RateLimiter {
 
 /// axum middleware enforcing the global rate limit (see `AppState::rate_limiter`).
 pub async fn track(State(state): State<AppState>, req: Request, next: Next) -> Response {
-    let key = client_ip(
+    // The shared extractor, not a local copy: rate-limit keys must obey the
+    // same trusted-proxy rules as allowlists and audit IPs, or a spoofed
+    // `X-Forwarded-For` would mint fresh rate-limit buckets per request.
+    let key = crate::http::extract::client_ip(
         req.headers(),
-        req.extensions().get::<ConnectInfo<SocketAddr>>().cloned(),
+        req.extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|c| c.0),
     )
     .unwrap_or_else(|| "unknown".to_string());
 
@@ -76,23 +81,4 @@ pub async fn track(State(state): State<AppState>, req: Request, next: Next) -> R
         )
             .into_response()
     }
-}
-
-/// Best-effort client IP: `X-Forwarded-For` → `X-Real-IP` → peer.
-fn client_ip(headers: &HeaderMap, peer: Option<ConnectInfo<SocketAddr>>) -> Option<String> {
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = xff.split(',').next() {
-            let t = first.trim();
-            if !t.is_empty() {
-                return Some(t.to_string());
-            }
-        }
-    }
-    if let Some(real) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        let t = real.trim();
-        if !t.is_empty() {
-            return Some(t.to_string());
-        }
-    }
-    peer.map(|c| c.0.ip().to_string())
 }

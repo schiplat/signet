@@ -122,9 +122,13 @@ struct MfaChallenge {
     user_id: Uuid,
     purpose: String,
     pending_secret: Option<String>,
+    /// The first factor that opened this challenge (`password`, `passkey`,
+    /// `sso`); the session issued at the end of the continuation is attributed
+    /// to the same path.
+    via: String,
 }
 
-fn mfa_cookie(token: &str, secure: bool) -> Cookie<'static> {
+pub fn mfa_cookie(token: &str, secure: bool) -> Cookie<'static> {
     let mut cookie = Cookie::build((MFA_COOKIE, token.to_string()))
         .path("/")
         .http_only(true)
@@ -150,11 +154,14 @@ fn clear_mfa_cookie(secure: bool) -> Cookie<'static> {
     cookie
 }
 
-async fn create_challenge(
+/// Opens an MFA challenge. `via` names the first factor that earned it and
+/// rides the row through to session creation.
+pub async fn create_challenge(
     pool: &PgPool,
     user_id: Uuid,
     purpose: &str,
     pending_secret: Option<&str>,
+    via: &str,
 ) -> AppResult<String> {
     let token = crate::crypto::util::random_token(32);
     let token_hash = crate::crypto::util::sha256_hex(&token);
@@ -162,8 +169,8 @@ async fn create_challenge(
     let expires_at = Utc::now() + Duration::minutes(MFA_TTL_MINUTES);
     sqlx::query(
         r#"
-        INSERT INTO mfa_challenges (id, user_id, token_hash, purpose, pending_secret, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO mfa_challenges (id, user_id, token_hash, purpose, pending_secret, via, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(id)
@@ -171,6 +178,7 @@ async fn create_challenge(
     .bind(token_hash)
     .bind(purpose)
     .bind(pending_secret)
+    .bind(via)
     .bind(expires_at)
     .execute(pool)
     .await?;
@@ -183,7 +191,7 @@ async fn load_challenge(pool: &PgPool, headers: &HeaderMap) -> AppResult<MfaChal
     let token_hash = crate::crypto::util::sha256_hex(&token);
     sqlx::query_as::<_, MfaChallenge>(
         r#"
-        SELECT id, user_id, purpose, pending_secret
+        SELECT id, user_id, purpose, pending_secret, via
         FROM mfa_challenges
         WHERE token_hash = $1 AND expires_at > NOW()
         "#,
@@ -223,18 +231,13 @@ async fn issue_session(
     ip: Option<String>,
     user_agent: Option<String>,
     client_id: Option<String>,
+    via: &str,
 ) -> AppResult<impl IntoResponse> {
-    // The allowlist is applied here rather than where the password was checked,
-    // because MFA and forced enrollment are continuations of the same sign-in and
-    // this is the point at which it is admitted.
-    let token = create_sign_in_session(
-        state,
-        &user,
-        crate::admission::via::PASSWORD,
-        ip.as_deref(),
-        user_agent.as_deref(),
-    )
-    .await?;
+    // The allowlist is applied here rather than where the first factor was
+    // checked, because MFA and forced enrollment are continuations of the same
+    // sign-in and this is the point at which it is admitted.
+    let token =
+        create_sign_in_session(state, &user, via, ip.as_deref(), user_agent.as_deref()).await?;
     let jar = jar
         .add(session_cookie(
             &token,
@@ -338,14 +341,15 @@ async fn clear_user_mfa(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
 }
 
 /// Issues a single-use forced password-change challenge before a session is
-/// established. Called after first-factor authentication succeeds (password or
-/// passkey) while `must_change_password` is still set.
+/// established. Called after first-factor authentication succeeds (password,
+/// passkey, or a federated identity) while `must_change_password` is still set.
 pub async fn challenge_password_change(
     state: &AppState,
     jar: CookieJar,
     user: User,
+    via: &str,
 ) -> AppResult<(CookieJar, Json<Value>)> {
-    let token = create_challenge(&state.pool, user.id, "change_password", None).await?;
+    let token = create_challenge(&state.pool, user.id, "change_password", None, via).await?;
     let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
     Ok((
         jar,
@@ -355,7 +359,9 @@ pub async fn challenge_password_change(
     ))
 }
 
-/// Called from auth login after password OK.
+/// Called from auth login after the first factor succeeded. `via` names the
+/// factor (`password`, `passkey`, `sso`) and follows the challenge through to
+/// the session the continuation issues.
 pub async fn begin_login_mfa_flow(
     state: &AppState,
     jar: CookieJar,
@@ -363,15 +369,16 @@ pub async fn begin_login_mfa_flow(
     ip: Option<String>,
     user_agent: Option<String>,
     client_id: Option<String>,
+    via: &str,
 ) -> AppResult<impl IntoResponse> {
     if user.must_change_password {
-        return challenge_password_change(state, jar, user).await;
+        return challenge_password_change(state, jar, user, via).await;
     }
 
     let global = global_mfa_required(&state.pool).await?;
 
     if user.totp_enabled {
-        let token = create_challenge(&state.pool, user.id, "login", None).await?;
+        let token = create_challenge(&state.pool, user.id, "login", None, via).await?;
         let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
         return Ok((
             jar,
@@ -382,7 +389,7 @@ pub async fn begin_login_mfa_flow(
     }
 
     if global || user.mfa_required {
-        let token = create_challenge(&state.pool, user.id, "enroll", None).await?;
+        let token = create_challenge(&state.pool, user.id, "enroll", None, via).await?;
         let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
         return Ok((
             jar,
@@ -392,14 +399,8 @@ pub async fn begin_login_mfa_flow(
         ));
     }
 
-    let token = create_sign_in_session(
-        state,
-        &user,
-        crate::admission::via::PASSWORD,
-        ip.as_deref(),
-        user_agent.as_deref(),
-    )
-    .await?;
+    let token =
+        create_sign_in_session(state, &user, via, ip.as_deref(), user_agent.as_deref()).await?;
     let jar = jar.add(session_cookie(
         &token,
         state.config.cookie_secure,
@@ -456,6 +457,7 @@ pub(crate) async fn force_password_change(
     if challenge.purpose != "change_password" {
         return Err(AppError::bad_request("password change challenge required"));
     }
+    let via = challenge.via.clone();
     let user = user_by_id(&state.pool, challenge.user_id).await?;
     if user.status != "active" {
         return Err(AppError::unauthorized("account disabled"));
@@ -496,7 +498,7 @@ pub(crate) async fn force_password_change(
     .await;
 
     let user = user_by_id(&state.pool, user.id).await?;
-    begin_login_mfa_flow(&state, jar, user, ip, user_agent, None).await
+    begin_login_mfa_flow(&state, jar, user, ip, user_agent, None, &via).await
 }
 
 // --- verify ---
@@ -618,6 +620,7 @@ async fn verify_mfa(
         ip,
         crate::http::extract::user_agent(&headers),
         client_id,
+        &challenge.via,
     )
     .await
 }
@@ -686,6 +689,7 @@ async fn enroll_confirm_challenge(
     }
 
     let user_id = challenge.user_id;
+    let via = challenge.via.clone();
     sqlx::query(
         r#"
         UPDATE users
@@ -722,7 +726,7 @@ async fn enroll_confirm_challenge(
     let token = create_sign_in_session(
         &state,
         &user,
-        crate::admission::via::PASSWORD,
+        &via,
         ip.as_deref(),
         crate::http::extract::user_agent(&headers).as_deref(),
     )
@@ -807,7 +811,16 @@ async fn enroll_start_session(
         .bind(user.id)
         .execute(&state.pool)
         .await?;
-    let token = create_challenge(&state.pool, user.id, "enroll", Some(&secret)).await?;
+    // Self-service enrollment inside an existing session: the challenge never
+    // issues a session, so the via label is only a placeholder.
+    let token = create_challenge(
+        &state.pool,
+        user.id,
+        "enroll",
+        Some(&secret),
+        crate::admission::via::PASSWORD,
+    )
+    .await?;
     let uri = otpauth_uri(&secret, "Signet", &user.email)?;
     let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
     Ok((
@@ -993,7 +1006,14 @@ async fn rebind_start(
         .bind(user.id)
         .execute(&state.pool)
         .await?;
-    let token = create_challenge(&state.pool, user.id, "enroll", Some(&new_secret)).await?;
+    let token = create_challenge(
+        &state.pool,
+        user.id,
+        "enroll",
+        Some(&new_secret),
+        crate::admission::via::PASSWORD,
+    )
+    .await?;
     let uri = otpauth_uri(&new_secret, "Signet", &user.email)?;
     Ok((
         jar.add(mfa_cookie(&token, state.config.cookie_secure)),

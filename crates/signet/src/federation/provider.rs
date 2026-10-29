@@ -36,6 +36,12 @@ pub struct ProviderConfig {
     pub client_secret: String,
     pub issuer_url: Option<String>,
     pub scopes: Option<String>,
+    /// `inherit` | `on` | `off` — this provider's override of the global JIT
+    /// toggle. Resolved with [`effective_jit`].
+    pub jit_mode: String,
+    /// `inherit` | `any` | `verified` — how this provider's email assertion is
+    /// read for auto-link/JIT. Resolved with [`effective_email_verified`].
+    pub email_trust: String,
 }
 
 impl ProviderConfig {
@@ -47,6 +53,37 @@ impl ProviderConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or(default)
             .to_string()
+    }
+}
+
+/// Resolves the provider's `jit_mode` against the global JIT toggle.
+///
+/// `on`/`off` are the administrator's per-provider word over the global
+/// setting — the shape of "the corporate tenant may auto-create, the open
+/// IdP may not". Unknown values fall through to `inherit`: a CHECK constraint
+/// already guards the column, so this branch is belt-and-suspenders.
+pub fn effective_jit(jit_mode: &str, global: bool) -> bool {
+    match jit_mode {
+        "on" => true,
+        "off" => false,
+        _ => global,
+    }
+}
+
+/// Resolves how much a provider's email assertion is trusted, given what the
+/// adapter reported and whether it returned an address at all.
+///
+/// - `any`: an address is proof enough (the Feishu stance — no verified flag
+///   exists there; the row is pinned to this by migration for old providers).
+/// - `verified` / `inherit`: the adapter's own flag stands.
+pub fn effective_email_verified(
+    email_trust: &str,
+    adapter_verified: bool,
+    has_email: bool,
+) -> bool {
+    match email_trust {
+        "any" => has_email,
+        _ => adapter_verified,
     }
 }
 

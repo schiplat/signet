@@ -387,7 +387,13 @@ async fn login_finish(
 
     let user = active_user_by_id(&state.pool, user_id).await?;
     if user.must_change_password {
-        return crate::mfa::challenge_password_change(&state, jar, user).await;
+        return crate::mfa::challenge_password_change(
+            &state,
+            jar,
+            user,
+            crate::admission::via::PASSKEY,
+        )
+        .await;
     }
     let token = create_sign_in_session(
         &state,

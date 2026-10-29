@@ -1,7 +1,9 @@
 use anyhow::{bail, Context, Result};
+use ipnet::IpNet;
 use std::env;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -41,6 +43,11 @@ pub struct Config {
     /// `app_settings.auth.allowed_email_domains` is absent. Empty means no
     /// restriction; see [`crate::admission`].
     pub allowed_email_domains: Vec<String>,
+    /// Reverse proxies allowed to assert the client IP via `X-Forwarded-For`.
+    /// Empty (the default) trusts nobody: header-derived IPs are ignored and
+    /// the peer address is used, so a spoofed header cannot dodge client IP
+    /// allowlists, rate limits, or audit trails.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 impl Config {
@@ -73,9 +80,21 @@ impl Config {
             bail!("SIGNET_ISSUER must not end with '/'");
         }
 
+        // An https issuer means browsers only ever reach the service over TLS;
+        // marking the session cookies Secure there is not something an operator
+        // should have to remember (and localhost dev keeps its http default).
         let cookie_secure = env::var("SIGNET_COOKIE_SECURE")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false);
+            .unwrap_or(false)
+            || issuer.starts_with("https://");
+
+        let trusted_proxies = match env::var("SIGNET_TRUSTED_PROXIES") {
+            Err(_) => Vec::new(),
+            Ok(raw) => parse_trusted_proxies(&raw)?,
+        };
+        // The extractors read the list from a process global, because they are
+        // free functions without state access on hot paths.
+        crate::http::extract::init_trusted_proxies(trusted_proxies.clone());
 
         let outbound_allow_private = env::var("SIGNET_OUTBOUND_ALLOW_PRIVATE")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
@@ -156,6 +175,29 @@ impl Config {
                         .map_err(|e| anyhow::anyhow!(e))?
                 }
             },
+            trusted_proxies,
         })
     }
+}
+
+/// Parses `SIGNET_TRUSTED_PROXIES`: comma-separated IPs or CIDRs. A malformed
+/// entry is a startup error, not a silent skip — a typo'd CIDR that quietly
+/// disappears would put the proxy address in audit trails instead of clients.
+fn parse_trusted_proxies(raw: &str) -> Result<Vec<IpNet>> {
+    let mut out = Vec::new();
+    for entry in raw.split(',') {
+        let t = entry.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let net = if let Ok(net) = IpNet::from_str(t) {
+            net
+        } else if let Ok(ip) = t.parse::<IpAddr>() {
+            IpNet::from(ip)
+        } else {
+            bail!("invalid SIGNET_TRUSTED_PROXIES entry: {t} (examples: 10.0.0.0/8, 172.17.0.5)");
+        };
+        out.push(net);
+    }
+    Ok(out)
 }
