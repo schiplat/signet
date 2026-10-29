@@ -8,17 +8,17 @@ use serde_json::Value;
 pub struct GenericOidc;
 
 /// Fetches `{issuer}/.well-known/openid-configuration`.
-async fn discovery(issuer: &str) -> Result<Value> {
+async fn discovery(issuer: &str, allow_private: bool) -> Result<Value> {
     let url = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     );
     let client = crate::outbound::client();
     // `issuer` is operator-supplied, so reject anything that is not a plain
-    // http(s) URL with a publicly routable literal host before making the call.
-    // `false` = strict: this path carries no deployment policy, and internal
-    // IdPs are reachable by name anyway (only *literal* private IPs are blocked).
-    crate::outbound::validate_shape(&url, false).map_err(|e| anyhow!(e.to_string()))?;
+    // http(s) URL before the call; whether literal private addresses are
+    // admitted is the deployment's SIGNET_OUTBOUND_ALLOW_PRIVATE decision,
+    // threaded through the provider config (internal IdPs are the point).
+    crate::outbound::validate_shape(&url, allow_private).map_err(|e| anyhow!(e.to_string()))?;
     let resp = client.get(&url).send().await?;
     let status = resp.status();
     let body = crate::outbound::read_body_capped(resp).await?;
@@ -34,12 +34,12 @@ async fn discovery(issuer: &str) -> Result<Value> {
 /// Resolve the authorization endpoint: if `issuer_url` already looks like an
 /// authorize path (ends with `/authorize` or `/auth`), use it directly so
 /// offline tests / advanced overrides work; otherwise run OIDC discovery.
-async fn authorization_endpoint(issuer: &str) -> Result<String> {
+async fn authorization_endpoint(issuer: &str, allow_private: bool) -> Result<String> {
     let trimmed = issuer.trim_end_matches('/');
     if trimmed.ends_with("/authorize") || trimmed.ends_with("/auth") {
         return Ok(trimmed.to_string());
     }
-    let doc = discovery(trimmed).await?;
+    let doc = discovery(trimmed, allow_private).await?;
     jstr(&doc, "authorization_endpoint")
         .ok_or_else(|| anyhow!("discovery missing authorization_endpoint"))
 }
@@ -55,23 +55,26 @@ impl UpstreamProvider for GenericOidc {
         redirect_uri: &'a str,
         state: &'a str,
         _nonce: &'a str,
+        code_challenge: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         Box::pin(async move {
             let issuer = cfg
                 .issuer_url
                 .as_deref()
                 .ok_or_else(|| anyhow!("oidc provider requires issuer_url"))?;
-            let auth = authorization_endpoint(issuer).await?;
+            let auth = authorization_endpoint(issuer, cfg.outbound_allow_private).await?;
             // No `nonce`: identity is resolved from userinfo over the
             // server-side token exchange, never from the id_token a nonce
             // would protect — sending an unverified one would only suggest
-            // protection that is not there.
+            // protection that is not there. PKCE S256, by contrast, is sent
+            // for real and verified on exchange: modern upstreams require it.
             let query = format!(
-                "client_id={}&redirect_uri={}&response_type=code&scope={}&state={}",
+                "client_id={}&redirect_uri={}&response_type=code&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
                 urlencoding::encode(&cfg.client_id),
                 urlencoding::encode(redirect_uri),
                 urlencoding::encode(&self.scopes(cfg)),
                 urlencoding::encode(state),
+                urlencoding::encode(code_challenge),
             );
             Ok(format!("{auth}?{query}"))
         })
@@ -82,6 +85,7 @@ impl UpstreamProvider for GenericOidc {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         code: &'a str,
+        code_verifier: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenSet>> + Send + 'a>> {
         Box::pin(async move {
             let issuer = cfg
@@ -94,7 +98,7 @@ impl UpstreamProvider for GenericOidc {
                 .trim_end_matches('/')
                 .trim_end_matches("/authorize")
                 .trim_end_matches("/auth");
-            let doc = discovery(discovery_root).await?;
+            let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let token_endpoint = jstr(&doc, "token_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing token_endpoint"))?;
             post_token_form(
@@ -105,6 +109,7 @@ impl UpstreamProvider for GenericOidc {
                     ("code", code),
                     ("redirect_uri", redirect_uri),
                     ("grant_type", "authorization_code"),
+                    ("code_verifier", code_verifier),
                 ],
             )
             .await
@@ -126,7 +131,7 @@ impl UpstreamProvider for GenericOidc {
                 .trim_end_matches('/')
                 .trim_end_matches("/authorize")
                 .trim_end_matches("/auth");
-            let doc = discovery(discovery_root).await?;
+            let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let userinfo = jstr(&doc, "userinfo_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing userinfo_endpoint"))?;
             let info = oauth2_profile(cfg, tokens, &userinfo).await?;

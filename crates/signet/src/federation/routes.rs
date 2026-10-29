@@ -36,7 +36,7 @@
 
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
-use crate::crypto::util::{random_token, sha256_hex};
+use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
@@ -307,6 +307,7 @@ async fn load_provider(state: &AppState, code: &str) -> Result<LoadedProvider, S
             scopes,
             jit_mode,
             email_trust,
+            outbound_allow_private: state.config.outbound_allow_private,
         },
     })
 }
@@ -398,6 +399,10 @@ async fn start(
     // 176 bits of entropy; the cookie carries the raw value while the DB
     // stores only its hash, so a database leak cannot forge a handshake.
     let state_value = random_token(22);
+    // PKCE for the upstream leg: the challenge goes out on the authorize URL,
+    // the verifier rides the challenge row and meets it again at the exchange.
+    let code_verifier = random_token(32);
+    let code_challenge = sha256_b64url(&code_verifier);
 
     sqlx::query("DELETE FROM identity_link_challenges WHERE expires_at < NOW()")
         .execute(&state.pool)
@@ -411,7 +416,7 @@ async fn start(
     .bind(uuid::Uuid::new_v4())
     .bind(hash_state(&state_value))
     .bind(&provider_code)
-    .bind(json!({ "return_to": safe_return_to(q.return_to.as_deref()) }))
+    .bind(json!({ "return_to": safe_return_to(q.return_to.as_deref()), "code_verifier": code_verifier }))
     .execute(&state.pool)
     .await
     .map_err(AppError::from)?;
@@ -422,7 +427,13 @@ async fn start(
     // nothing here needs to remember one either.
     let url = loaded
         .adapter
-        .authorize_url(&loaded.cfg, &redirect_uri, &state_value, "")
+        .authorize_url(
+            &loaded.cfg,
+            &redirect_uri,
+            &state_value,
+            "",
+            &code_challenge,
+        )
         .await
         .map_err(|e| {
             tracing::warn!(provider = %provider_code, error = %e, "sso authorize url failed");
@@ -551,9 +562,14 @@ async fn callback(
     // 3. Drive the provider adapter.
     let loaded = load_provider(&state, &provider_code).await?;
     let redirect_uri = super::callback_url(&state, &provider_code);
+    let code_verifier = challenge_meta
+        .get("code_verifier")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let tokens = loaded
         .adapter
-        .exchange(&loaded.cfg, &redirect_uri, code)
+        .exchange(&loaded.cfg, &redirect_uri, code, &code_verifier)
         .await
         .map_err(|e| {
             tracing::warn!(provider = %provider_code, error = %e, "sso token exchange failed");

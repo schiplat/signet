@@ -24,6 +24,7 @@ impl UpstreamProvider for GitHub {
         redirect_uri: &'a str,
         state: &'a str,
         _nonce: &'a str,
+        _code_challenge: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         let query = format!(
             "client_id={}&redirect_uri={}&response_type=code&state={}&scope={}",
@@ -40,6 +41,7 @@ impl UpstreamProvider for GitHub {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         code: &'a str,
+        _code_verifier: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenSet>> + Send + 'a>> {
         Box::pin(async move {
             post_token_form(

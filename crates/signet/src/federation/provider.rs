@@ -42,6 +42,11 @@ pub struct ProviderConfig {
     /// `inherit` | `any` | `verified` — how this provider's email assertion is
     /// read for auto-link/JIT. Resolved with [`effective_email_verified`].
     pub email_trust: String,
+    /// The deployment's `SIGNET_OUTBOUND_ALLOW_PRIVATE` opt-in, threaded to the
+    /// adapters: an intranet upstream IdP is exactly the deployment that opts
+    /// in, and a hardcoded `false` at the fetch site makes the flag a no-op
+    /// for generic OIDC discovery.
+    pub outbound_allow_private: bool,
 }
 
 impl ProviderConfig {
@@ -94,21 +99,26 @@ pub trait UpstreamProvider {
     /// Scope string sent to the provider (empty config → provider default).
     fn scopes(&self, cfg: &ProviderConfig) -> String;
 
-    /// Build the URL the browser is redirected to.
+    /// Build the URL the browser is redirected to. `code_challenge` is the
+    /// S256 PKCE challenge for this attempt — upstreams that mandate PKCE
+    /// (increasingly all of them) refuse the request without it.
     fn authorize_url<'a>(
         &'a self,
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         state: &'a str,
         nonce: &'a str,
+        code_challenge: &'a str,
     ) -> BoxFuture<'a, Result<String>>;
 
-    /// Exchange the callback `code` for tokens.
+    /// Exchange the callback `code` for tokens. `code_verifier` is this
+    /// attempt's PKCE verifier, matched to the challenge sent on authorize.
     fn exchange<'a>(
         &'a self,
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         code: &'a str,
+        code_verifier: &'a str,
     ) -> BoxFuture<'a, Result<TokenSet>>;
 
     /// Resolve the signed-in identity from the token set.

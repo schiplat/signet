@@ -19,6 +19,7 @@ fn cfg(provider_type: &str, scopes: Option<&str>, issuer: Option<&str>) -> Provi
         scopes: scopes.map(|s| s.into()),
         jit_mode: "inherit".into(),
         email_trust: "inherit".into(),
+        outbound_allow_private: false,
     }
 }
 
@@ -41,6 +42,7 @@ fn github_default_scopes_and_url() {
         "https://id.example.com/api/v1/auth/sso/acme/callback",
         "st at/e",
         "",
+        "",
     ))
     .unwrap();
     assert!(url.starts_with("https://github.com/login/oauth/authorize?"));
@@ -53,7 +55,7 @@ fn github_default_scopes_and_url() {
 fn empty_scopes_string_uses_defaults() {
     // Admin forms persist blank scopes as "" — must not send empty scope=.
     let c = cfg("github", Some(""), None);
-    let url = block_on_url(GitHub.authorize_url(&c, "https://x/cb", "s", "")).unwrap();
+    let url = block_on_url(GitHub.authorize_url(&c, "https://x/cb", "s", "", "")).unwrap();
     assert!(url.contains("scope=read%3Auser%20user%3Aemail"));
     assert_eq!(
         c.effective_scopes("read:user user:email"),
@@ -64,8 +66,9 @@ fn empty_scopes_string_uses_defaults() {
 #[test]
 fn google_sends_scope_but_no_nonce() {
     let c = cfg("google", None, None);
-    let url = block_on_url(Google.authorize_url(&c, "https://id.example.com/cb", "s2", "nonce-1"))
-        .unwrap();
+    let url =
+        block_on_url(Google.authorize_url(&c, "https://id.example.com/cb", "s2", "nonce-1", ""))
+            .unwrap();
     assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
     // No nonce on purpose: the flow never consumes the id_token it would
     // protect (identity comes from userinfo), so asserting its absence pins
@@ -78,7 +81,7 @@ fn google_sends_scope_but_no_nonce() {
 fn feishu_uses_app_id_param() {
     let c = cfg("feishu", None, None);
     let url =
-        block_on_url(Feishu.authorize_url(&c, "https://id.example.com/cb", "s3", "")).unwrap();
+        block_on_url(Feishu.authorize_url(&c, "https://id.example.com/cb", "s3", "", "")).unwrap();
     assert!(url.starts_with("https://accounts.feishu.cn/open-apis/authen/v1/authorize?"));
     assert!(url.contains("app_id=cid%26%3Dx"));
     assert!(!url.contains("scope=")); // feishu authorize does not take scope
@@ -88,7 +91,7 @@ fn feishu_uses_app_id_param() {
 fn wechat_uses_appid_snsapi_login_and_fragment() {
     let c = cfg("wechat", None, None);
     let url =
-        block_on_url(WeChat.authorize_url(&c, "https://id.example.com/cb", "s4", "")).unwrap();
+        block_on_url(WeChat.authorize_url(&c, "https://id.example.com/cb", "s4", "", "")).unwrap();
     assert!(url.starts_with("https://open.weixin.qq.com/connect/qrconnect?"));
     assert!(url.contains("appid=cid%26%3Dx"));
     assert!(url.contains("scope=snsapi_login"));
@@ -98,10 +101,14 @@ fn wechat_uses_appid_snsapi_login_and_fragment() {
 #[test]
 fn generic_oidc_requires_issuer() {
     let c = cfg("oidc", None, None);
-    assert!(
-        block_on_url(GenericOidc.authorize_url(&c, "https://id.example.com/cb", "s5", "n5"))
-            .is_err()
-    );
+    assert!(block_on_url(GenericOidc.authorize_url(
+        &c,
+        "https://id.example.com/cb",
+        "s5",
+        "n5",
+        ""
+    ))
+    .is_err());
 }
 
 #[test]
@@ -113,8 +120,9 @@ fn generic_oidc_direct_authorize_url_encodes_params() {
         Some("openid email"),
         Some("https://sso.acme.com/authorize"),
     );
-    let url = block_on_url(GenericOidc.authorize_url(&c, "https://id.example.com/cb", "s6", "n6"))
-        .unwrap();
+    let url =
+        block_on_url(GenericOidc.authorize_url(&c, "https://id.example.com/cb", "s6", "n6", ""))
+            .unwrap();
     assert!(url.starts_with("https://sso.acme.com/authorize?"));
     assert!(!url.contains("nonce="));
     assert!(url.contains("scope=openid%20email"));
@@ -123,6 +131,6 @@ fn generic_oidc_direct_authorize_url_encodes_params() {
 #[test]
 fn custom_scopes_override_defaults() {
     let c = cfg("github", Some("user:email"), None);
-    let url = block_on_url(GitHub.authorize_url(&c, "https://x/cb", "s", "")).unwrap();
+    let url = block_on_url(GitHub.authorize_url(&c, "https://x/cb", "s", "", "")).unwrap();
     assert!(url.contains("scope=user%3Aemail"));
 }

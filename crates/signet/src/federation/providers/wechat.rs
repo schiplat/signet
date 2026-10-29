@@ -22,6 +22,7 @@ impl UpstreamProvider for WeChat {
         redirect_uri: &'a str,
         state: &'a str,
         _nonce: &'a str,
+        _code_challenge: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         // WeChat website QR login requires the `#wechat_redirect` fragment.
         let query = format!(
@@ -39,6 +40,7 @@ impl UpstreamProvider for WeChat {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         code: &'a str,
+        _code_verifier: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenSet>> + Send + 'a>> {
         Box::pin(async move {
             let _ = redirect_uri;

@@ -23,6 +23,7 @@ impl UpstreamProvider for Google {
         redirect_uri: &'a str,
         state: &'a str,
         _nonce: &'a str,
+        _code_challenge: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
         let scope = self.scopes(cfg);
         // No `nonce`: this flow never consumes Google's id_token (identity is
@@ -43,6 +44,7 @@ impl UpstreamProvider for Google {
         cfg: &'a ProviderConfig,
         redirect_uri: &'a str,
         code: &'a str,
+        _code_verifier: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<TokenSet>> + Send + 'a>> {
         Box::pin(async move {
             post_token_form(
