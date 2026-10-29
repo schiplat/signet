@@ -78,6 +78,8 @@ tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
 - 生产挂载 Docker volume `signet_data` → `/app/data`；**丢失或轮换会使已发 token 失效、已存 TOTP 无法解密**。
 - 仓库里的 `./data/` 仅本地产物，不随镜像分发。详见 [security.md §7](./security.md#7-密钥与配置)。
 
+> **多实例共库必须共享同一把 `encryption.key`**：TOTP secret、webhook secret 都是按该 key 的 AES-GCM 密文落库。两个实例指向同一数据库但各持一把 key 时，会互相写出对方解不开的密文（症状：在实例 A 登记的 TOTP 在实例 B 报 base32 解码失败）。生产 compose 通过共享 `signet_data` volume 天然满足；自行分拆部署时务必让所有实例的 `SIGNET_ENCRYPTION_KEY_PATH` 指向同一份内容。启动时会把 key 指纹写入 `app_settings`（`crypto.encryption_key_fingerprint`）并校验，不一致直接拒绝启动——确属有意重新起 key 时，删除该行可重新武装检查（旧密文仍需自行处理）。`jwt_private.pem` 无此约束：各实例可用各自密钥签发（issuer 不同即可），JWKS 按 issuer 分发。
+
 ---
 
 ## 4. 容器内执行目录同步 CLI

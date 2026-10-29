@@ -753,7 +753,8 @@ async fn callback(
                 let user_id = if let Some(uid) = auto {
                     uid
                 } else if jit_enabled && email_verified && has_email {
-                    super::link::jit_create_user(&state, &provider_code, &profile).await?
+                    super::link::jit_create_user(&state, &provider_code, &profile, email_verified)
+                        .await?
                 } else {
                     tracing::info!(
                         provider = %provider_code,

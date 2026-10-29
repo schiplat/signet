@@ -186,6 +186,7 @@ pub(crate) async fn jit_create_user(
     state: &AppState,
     provider_code: &str,
     profile: &UpstreamProfile,
+    email_verified: bool,
 ) -> AppResult<Uuid> {
     let email = profile
         .email
@@ -194,7 +195,10 @@ pub(crate) async fn jit_create_user(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::bad_request("jit requires verified email"))?
         .to_lowercase();
-    if !profile.email_verified {
+    // `email_verified` is the caller's RESOLVED trust decision (the provider
+    // row's `email_trust` applied to the adapter flag) — not the raw adapter
+    // flag, which providers like the generic OIDC bridge never set.
+    if !email_verified {
         return Err(AppError::bad_request("jit requires verified email"));
     }
 

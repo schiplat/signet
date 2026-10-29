@@ -35,6 +35,7 @@
 - 读写点：enroll / rebind 写入时加密；verify / regenerate / rebind 读取时解密。
 - **向后兼容**：解密失败时按明文回退，旧明文行无需迁移，下次换绑/重绑自动转为密文。
 - 密钥与 JWT 私钥同等敏感，生产环境应纳入备份与权限管控。
+- **同一数据库的多实例必须共享同一把 key**：否则会互相写出解不开的密文（典型症状：实例 A 登记、实例 B 校验 TOTP 失败）。启动时以 `app_settings.crypto.encryption_key_fingerprint` 指纹校验，不一致拒绝启动；见 [deploy.md §3](./deploy.md#3-密钥目录-appdata)。
 
 > ⚠️ 历史数据迁移：已存在的明文 `totp_secret` 不会主动批量重加密（避免影响在线用户），会在下一次换绑/重绑时自然轮换为密文。如需强制全量迁移，可在维护窗口执行一次性脚本遍历 `users.totp_secret` 重新加密。
 

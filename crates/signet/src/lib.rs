@@ -42,6 +42,25 @@ pub const API_PREFIX: &str = "/api/v1";
 pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     let state = build_state(cfg).await?;
 
+    // Server startup only (the CLI and tests want build_state without policy):
+    // refuse to serve when this instance's encryption key is not the one the
+    // database was provisioned with. TOTP and webhook secrets are AES-GCM
+    // ciphertexts under that key — a second instance on the same database with
+    // a different key would silently break the other's rows (a TOTP enrolled
+    // via instance A fails base32 decoding on instance B). Fail-closed here is
+    // the loud version of that failure. Re-keying intentionally: delete the
+    // `crypto.encryption_key_fingerprint` row in app_settings.
+    {
+        use sha2::{Digest, Sha256};
+        let key = crypto::encryption::load_or_generate_key(&state.config.encryption_key_path)?;
+        let fingerprint = data_encoding::HEXLOWER
+            .encode(&Sha256::digest(key)[..])
+            .get(..16)
+            .unwrap_or_default()
+            .to_string();
+        bootstrap::ensure_encryption_key_fingerprint(&state.pool, &fingerprint).await?;
+    }
+
     // Started here rather than in `build_state`: the CLI and the tests want the
     // engine without a background loop firing syncs at them.
     directory::scheduler::spawn(state.clone());
