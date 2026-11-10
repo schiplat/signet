@@ -18,8 +18,8 @@
 
 ```bash
 # 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.3/signet-0.4.3-macos-arm64
-chmod +x signet-0.4.3-macos-arm64 && mv signet-0.4.3-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.6/signet-0.4.6-macos-arm64
+chmod +x signet-0.4.6-macos-arm64 && mv signet-0.4.6-macos-arm64 signet
 
 # 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
 docker run -d --name signet-db -p 5433:5432 \
@@ -209,7 +209,7 @@ cd .. && cargo build -p signet
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 
-发版示例：`git tag -a v0.4.3 -m v0.4.3 && git push origin v0.4.3`。
+发版示例：`git tag -a v0.4.6 -m v0.4.6 && git push origin v0.4.6`。
 
 构建与部署布局见 [`docs/deploy.md`](./docs/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。

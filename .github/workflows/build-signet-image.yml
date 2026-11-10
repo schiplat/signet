@@ -17,7 +17,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Image tag / GitHub Release version (e.g. 0.4.3 or v0.4.3)'
+        description: 'Image tag / GitHub Release version (e.g. 0.4.6 or v0.4.6)'
         required: true
         type: string
 

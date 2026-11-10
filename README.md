@@ -19,8 +19,8 @@ Three ways to get a server running. **The release binary is the recommended way*
 ```bash
 # 1. Download the asset for your platform from GitHub Releases (grab the
 #    latest tag there), e.g.:
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.3/signet-0.4.3-macos-arm64
-chmod +x signet-0.4.3-macos-arm64 && mv signet-0.4.3-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.4.6/signet-0.4.6-macos-arm64
+chmod +x signet-0.4.6-macos-arm64 && mv signet-0.4.6-macos-arm64 signet
 
 # 2. Start a PostgreSQL matching the built-in default connection string
 #    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
@@ -214,7 +214,7 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 
-Tag a release (example): `git tag -a v0.4.3 -m v0.4.3 && git push origin v0.4.3`.
+Tag a release (example): `git tag -a v0.4.6 -m v0.4.6 && git push origin v0.4.6`.
 
 Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).
