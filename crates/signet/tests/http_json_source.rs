@@ -223,6 +223,32 @@ fn basic_auth_needs_a_username_and_bearer_needs_a_credential() {
     assert!(cfg.auth.requires_credential());
 }
 
+/// A credential over plaintext http is a wire-readable secret: the LDAP
+/// connector is pinned to `ldaps://`, and this is the HTTP counterpart. An
+/// `auth: none` source may stay `http` — network policy is its only secret.
+#[test]
+fn a_credential_over_plaintext_http_is_refused() {
+    let mut raw = minimal_config();
+    raw["url"] = json!("http://hr.corp.example/employees");
+    raw["auth"] = json!("bearer");
+    let err = HttpJsonConfig::parse(&raw).unwrap_err().to_string();
+    assert!(err.contains("https://"), "{err}");
+
+    // Same refusal per auth scheme, and no refusal without a credential.
+    for auth in [json!({"basic": {"username": "svc"}}), json!("bearer")] {
+        let mut raw = minimal_config();
+        raw["url"] = json!("http://hr.corp.example/employees");
+        raw["auth"] = auth;
+        assert!(HttpJsonConfig::parse(&raw).is_err());
+    }
+    let mut raw = minimal_config();
+    raw["url"] = json!("http://hr.corp.example/employees");
+    assert!(
+        HttpJsonConfig::parse(&raw).is_ok(),
+        "an uncredentialed http source is allowed"
+    );
+}
+
 #[test]
 fn the_source_config_dispatch_refuses_kinds_without_a_connector() {
     // `scim` is accepted by the table's CHECK but has no pull connector yet, so
@@ -364,16 +390,17 @@ async fn cursor_pagination_follows_the_next_link_and_stops_at_the_end() {
 }
 
 #[tokio::test]
-async fn page_pagination_stops_at_max_pages_instead_of_looping() {
+async fn page_pagination_that_reaches_max_pages_with_more_data_is_an_error() {
     let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
         return;
     };
-    // Every response says "there is more" (no cursor, so Page mode never sees an
-    // end signal). The bound is the only thing that stops the walk, and without
-    // it this test would hang rather than fail.
+    // Every page is full and every page has a successor: the fourth body is what
+    // the completeness probe past the bound reads. The walk used to stop at
+    // `max_pages` silently, and reconciliation would then have disabled the
+    // users it never fetched — so this has to fail the run instead.
     let server = TestServer::start(vec![
         json!({"users": [{"id": "x", "email": "x@example.com"}]});
-        3
+        4
     ])
     .await;
 
@@ -387,6 +414,51 @@ async fn page_pagination_stops_at_max_pages_instead_of_looping() {
     }))
     .unwrap();
 
+    let err = signet::directory::http_json::fetch_users(
+        &cfg,
+        None,
+        state.config.outbound_allow_private,
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("max_pages"), "{err}");
+
+    let requested = server.requested_paths().await;
+    assert_eq!(
+        requested.len(),
+        4,
+        "three pages plus one probe past the bound: {requested:?}"
+    );
+    assert!(requested[2].contains("page=3"), "{:?}", requested[2]);
+    assert!(requested[3].contains("page=4"), "{:?}", requested[3]);
+}
+
+#[tokio::test]
+async fn page_pagination_on_a_short_page_stops_without_a_probe() {
+    let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
+        return;
+    };
+    // A short page mid-walk does not end the walk — a non-conformant upstream
+    // may return short pages with real pages behind them — so the walk runs to
+    // the bound. There the short page *is* the end signal: no probe, no error.
+    let mut bodies = vec![
+        json!({"users": [{"id": "x", "email": "x@example.com"}]}),
+        json!({"users": [{"id": "y", "email": "y@example.com"}]}),
+    ];
+    bodies.extend(vec![json!({"users": []}); 3]);
+    let server = TestServer::start(bodies).await;
+
+    let cfg = HttpJsonConfig::parse(&json!({
+        "url": server.url(),
+        "users_path": "users",
+        "external_id_path": "id",
+        "email_path": "email",
+        "pagination": {"mode": "page", "param": "page", "size": 1, "max_pages": 5},
+    }))
+    .unwrap();
+
     let users = signet::directory::http_json::fetch_users(
         &cfg,
         None,
@@ -394,17 +466,135 @@ async fn page_pagination_stops_at_max_pages_instead_of_looping() {
         None,
     )
     .await
+    .expect("a short page at the bound ends the listing");
+    assert_eq!(users.len(), 2);
+    assert_eq!(server.requested_paths().await.len(), 5);
+}
+
+#[tokio::test]
+async fn page_pagination_on_a_full_last_page_is_verified_with_one_extra_request() {
+    let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
+        return;
+    };
+    // A total that divides evenly (three entries, `size` 1, three pages) used
+    // to be indistinguishable from a truncated walk; the probe past the bound
+    // answers the question instead of guessing.
+    let mut bodies = vec![json!({"users": [{"id": "x", "email": "x@example.com"}]}); 3];
+    bodies.push(json!({"users": []}));
+    let server = TestServer::start(bodies).await;
+
+    let cfg = HttpJsonConfig::parse(&json!({
+        "url": server.url(),
+        "users_path": "users",
+        "external_id_path": "id",
+        "email_path": "email",
+        "pagination": {"mode": "page", "param": "page", "size": 1, "max_pages": 3},
+    }))
     .unwrap();
 
-    assert_eq!(users.len(), 3, "one entry per page, three pages");
-    let requested = server.requested_paths().await;
-    assert_eq!(
-        requested.len(),
-        3,
-        "max_pages must stop the walk: {requested:?}"
-    );
-    assert!(requested[2].contains("page=3"), "{:?}", requested[2]);
-    assert!(requested[2].contains("page_size=1"), "{:?}", requested[2]);
+    let users = signet::directory::http_json::fetch_users(
+        &cfg,
+        None,
+        state.config.outbound_allow_private,
+        None,
+    )
+    .await
+    .expect("an empty probe page proves the listing complete");
+    assert_eq!(users.len(), 3);
+    assert_eq!(server.requested_paths().await.len(), 4);
+}
+
+#[tokio::test]
+async fn cursor_pagination_that_reaches_max_pages_with_more_pages_is_an_error() {
+    let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
+        return;
+    };
+    // The last fetched page still carries a `next` cursor — proof of another
+    // page the bound refuses to read. No probe is needed; the cursor itself is
+    // the truncation evidence.
+    let server = TestServer::start(vec![
+        json!({
+            "users": [{"id": "a", "email": "a@example.com"}],
+            "paging": {"next": "c2"}
+        }),
+        json!({
+            "users": [{"id": "b", "email": "b@example.com"}],
+            "paging": {"next": "c3"}
+        }),
+    ])
+    .await;
+
+    let cfg = HttpJsonConfig::parse(&json!({
+        "url": server.url(),
+        "users_path": "users",
+        "external_id_path": "id",
+        "email_path": "email",
+        "pagination": {"mode": "cursor", "param": "cursor", "next_path": "paging.next",
+                       "max_pages": 2},
+    }))
+    .unwrap();
+
+    let err = signet::directory::http_json::fetch_users(
+        &cfg,
+        None,
+        state.config.outbound_allow_private,
+        None,
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("max_pages"), "{err}");
+    assert_eq!(server.requested_paths().await.len(), 2);
+}
+
+/// The engine-side circuit breaker behind the fetch guard: a *valid, empty*
+/// listing must not become "disable every user this source manages".
+#[tokio::test]
+async fn an_empty_but_valid_listing_refuses_to_mass_disable() {
+    use signet::directory::engine::{self, SyncOptions, Trigger};
+
+    let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
+        return;
+    };
+    let server = TestServer::start(vec![json!({"data": {"users": []}})]).await;
+    let source = common::create_http_json_source(&state.pool, &server.url()).await;
+    let user = common::create_user(&state.pool, "").await;
+    common::link_entry(&state.pool, source.id, "u1", user, None).await;
+
+    common::scoped(state, source, move |state, source| async move {
+        let err = engine::run_source(
+            &state,
+            &source.code,
+            Trigger::Manual,
+            None,
+            &SyncOptions::default(),
+        )
+        .await
+        .expect_err("an empty upstream must not disable its linked users");
+        assert!(err.to_string().contains("refusing to apply"), "{err}");
+
+        // The linked user is untouched: still active, still not claimed disabled.
+        let (status, directory_disabled): (String, bool) =
+            sqlx::query_as("SELECT status, directory_disabled FROM users WHERE id = $1")
+                .bind(user)
+                .fetch_one(&state.pool)
+                .await
+                .expect("the linked user must survive");
+        assert_eq!((status.as_str(), directory_disabled), ("active", false));
+
+        // The run row is closed as failed, so the source is not wedged and the
+        // history records why nothing was written.
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM directory_sync_runs WHERE source_id = $1 \
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(source.id)
+        .fetch_one(&state.pool)
+        .await
+        .expect("the run row");
+        assert_eq!(status, "failed");
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -445,15 +635,19 @@ async fn a_bearer_credential_is_sent_and_never_when_unset() {
     let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
         return;
     };
+    // Built, not parsed: the loopback test server is plaintext http, which
+    // config validation now refuses for credentialed sources (see the
+    // plaintext-credential test below). This test pins the header wiring, not
+    // the transport rule, so the config is assembled directly.
     let server = TestServer::start(vec![json!({ "users": [] }); 1]).await;
-    let cfg = HttpJsonConfig::parse(&json!({
+    let mut cfg = HttpJsonConfig::parse(&json!({
         "url": server.url(),
         "users_path": "users",
         "external_id_path": "id",
         "email_path": "email",
-        "auth": "bearer",
     }))
     .unwrap();
+    cfg.auth = signet::directory::source::HttpAuth::Bearer;
 
     signet::directory::http_json::fetch_users(
         &cfg,
@@ -470,15 +664,14 @@ async fn a_bearer_credential_is_sent_and_never_when_unset() {
     );
 
     let server = TestServer::start(vec![json!({ "users": [] }); 1]).await;
-    let mut raw = json!({
+    let mut cfg = HttpJsonConfig::parse(&json!({
         "url": server.url(),
         "users_path": "users",
         "external_id_path": "id",
         "email_path": "email",
-        "auth": "bearer",
-    });
-    raw["auth"] = json!("bearer");
-    let cfg = HttpJsonConfig::parse(&raw).unwrap();
+    }))
+    .unwrap();
+    cfg.auth = signet::directory::source::HttpAuth::Bearer;
     signet::directory::http_json::fetch_users(
         &cfg,
         None,

@@ -113,9 +113,12 @@ pub async fn bind_as(
 
 /// Parses one or more `CERTIFICATE` blocks. Exposed so the admin API can reject
 /// a bad certificate when it is saved rather than at the next sync.
+///
+/// Parsed through `rustls::pki_types`' own PEM reader: `rustls-pemfile` was
+/// retired upstream (RUSTSEC-2025-0134) and this was its only use here.
 pub fn parse_ca_pem(pem: &str) -> Result<Vec<CertificateDer<'static>>, String> {
-    let mut reader = std::io::BufReader::new(pem.as_bytes());
-    let certs = rustls_pemfile::certs(&mut reader)
+    use rustls::pki_types::pem::PemObject;
+    let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("cannot parse PEM data: {e}"))?;
     if certs.is_empty() {

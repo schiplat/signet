@@ -408,7 +408,6 @@ async fn login_finish(
         state.config.cookie_secure,
         state.config.session_ttl_hours,
     ));
-    let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
     crate::auth::login_alert::track_login(
         &state,

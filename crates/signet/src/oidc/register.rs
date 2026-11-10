@@ -35,23 +35,21 @@ pub async fn register(
         .ok_or_else(|| AppError::unauthorized("missing initial access token"))?;
     let token_hash = sha256_hex(&token);
 
-    let reg_id: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM registration_access_tokens WHERE token_hash = $1 AND expires_at > NOW()",
+    // Single-use: the DELETE ... RETURNING is the consume claim. A concurrent
+    // registration presenting the same token finds nothing left to delete and
+    // is refused, instead of two clients registering on one token.
+    let consumed = sqlx::query_scalar::<_, Uuid>(
+        "DELETE FROM registration_access_tokens \
+         WHERE token_hash = $1 AND expires_at > NOW() RETURNING id",
     )
     .bind(&token_hash)
     .fetch_optional(&state.pool)
     .await?;
-    let Some(reg_id) = reg_id else {
+    if consumed.is_none() {
         return Err(AppError::unauthorized(
             "invalid or expired registration token",
         ));
-    };
-
-    // Single-use: consume the token.
-    sqlx::query("DELETE FROM registration_access_tokens WHERE id = $1")
-        .bind(reg_id)
-        .execute(&state.pool)
-        .await?;
+    }
 
     let redirect_uris = normalize_uris(&body.redirect_uris)?;
     let scopes = normalize_scopes(

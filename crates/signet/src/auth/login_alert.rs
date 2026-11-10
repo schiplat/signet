@@ -56,6 +56,9 @@ pub async fn track_login(
             ip,
             user_agent.unwrap_or("unknown"),
         ),
+        // No one-time credentials in an alert body; keeping it visible in the
+        // logs is what makes the log mailer usable at all.
+        true,
     )
     .await;
 }

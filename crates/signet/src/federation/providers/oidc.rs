@@ -44,6 +44,28 @@ async fn authorization_endpoint(issuer: &str, allow_private: bool) -> Result<Str
         .ok_or_else(|| anyhow!("discovery missing authorization_endpoint"))
 }
 
+/// Applies the outbound policy to an endpoint URL read out of a discovery
+/// document.
+///
+/// The document comes from the operator's issuer, but its endpoint fields are
+/// *upstream data*, not operator data: an issuer that is compromised — or whose
+/// DNS has been re-pointed — can aim `token_endpoint` at an internal address,
+/// and the token POST carries the `client_secret`. Every endpoint this adapter
+/// hands to the HTTP client therefore passes the same guard the issuer URL did,
+/// re-checked at call time (§12: a check made when the provider was saved is
+/// worthless at fetch time).
+///
+/// The authorization endpoint is deliberately *not* guarded here: the browser
+/// visits it, so there is no server-side request to protect. The discovery
+/// root keeps its shape-only check because it carries no credentials and every
+/// server-fetched URL read out of the document is re-checked below anyway.
+async fn ensure_endpoint_allowed(url: &str, allow_private: bool) -> Result<()> {
+    crate::outbound::ensure_allowed(url, allow_private)
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow!(e.to_string()))
+}
+
 impl UpstreamProvider for GenericOidc {
     fn scopes(&self, cfg: &ProviderConfig) -> String {
         cfg.effective_scopes("openid email profile")
@@ -101,6 +123,7 @@ impl UpstreamProvider for GenericOidc {
             let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let token_endpoint = jstr(&doc, "token_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing token_endpoint"))?;
+            ensure_endpoint_allowed(&token_endpoint, cfg.outbound_allow_private).await?;
             post_token_form(
                 &token_endpoint,
                 &[
@@ -134,6 +157,7 @@ impl UpstreamProvider for GenericOidc {
             let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let userinfo = jstr(&doc, "userinfo_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing userinfo_endpoint"))?;
+            ensure_endpoint_allowed(&userinfo, cfg.outbound_allow_private).await?;
             let info = oauth2_profile(cfg, tokens, &userinfo).await?;
             Ok(UpstreamProfile {
                 subject: jstr(&info, "sub").ok_or_else(|| anyhow!("oidc profile missing sub"))?,

@@ -273,6 +273,9 @@ async fn home(State(state): State<std::sync::Arc<AppState>>, jar: CookieJar) -> 
 
 /// Kicks off the flow. Everything the callback will later verify is minted
 /// here: `state` (CSRF), `nonce` (replay), and the PKCE pair.
+// A `Response` is large enough that clippy would rather it be boxed; in a
+// quickstart example readability beats a `Box` on the error path.
+#[allow(clippy::result_large_err)]
 async fn login(
     State(state): State<std::sync::Arc<AppState>>,
     jar: CookieJar,
@@ -320,6 +323,8 @@ struct CallbackQuery {
     error_description: Option<String>,
 }
 
+// See `login`: same large-`Response` trade-off.
+#[allow(clippy::result_large_err)]
 async fn callback(
     State(state): State<std::sync::Arc<AppState>>,
     jar: CookieJar,

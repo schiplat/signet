@@ -297,6 +297,72 @@ async fn execute(
     // than no metric.
     crate::metrics::inc_directory_sync_run();
 
+    // ── Circuit breaker: refuse to reconcile against an empty upstream. ────
+    //
+    // Everything loud already failed by here: a wrong `users_path`, a failed
+    // search, a truncated page walk. What can still reach this point is a
+    // *valid, empty* listing — an HR API rollout that returns `{"users": []}`,
+    // a `base_dn` typo that still resolves, a `user_filter` that stopped
+    // matching — and the absent-upstream pass would turn it into "disable every
+    // user this source manages", revoking their sessions. Save-time validation
+    // cannot catch a filter that stops matching later, so this is the only
+    // remaining checkpoint, and it is deliberately conservative: zero entries
+    // read with disables planned is never a legitimate reconciliation, because
+    // a source that truly emptied out is retired by disabling the *source*
+    // (which releases its claims, §4.2), not by letting the next tick disable
+    // everyone. A dry run skips this on purpose: the plan itself is the
+    // diagnostic a operator needs to see.
+    if counts.disabled > 0 && plan.scanned == 0 {
+        let e = AppError::upstream(format!(
+            "the upstream returned no users but the plan would disable {} linked \
+             user(s); refusing to apply. If the directory really emptied out, \
+             disable or delete the source — that releases its claims without a \
+             mass disable",
+            counts.disabled
+        ));
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        if let Err(close_err) = model::finish_run(
+            &state.pool,
+            run_id,
+            "failed",
+            plan.scanned,
+            counts,
+            Some(&e.to_string()),
+            &json!({ "elapsed_ms": elapsed_ms, "dry_run": false }),
+        )
+        .await
+        {
+            tracing::error!(error = %close_err, %run_id, "failed to close directory sync run");
+        }
+        crate::metrics::record_directory_sync_outcome("failed", counts.conflicts);
+        audit(
+            state,
+            AUDIT_SYNC_FAILED,
+            "directory_source",
+            Some(row.code.clone()),
+            actor.as_ref(),
+            json!({
+                "source": row.code,
+                "run_id": run_id,
+                "trigger": trigger.as_str(),
+                "status": "failed",
+                "scanned": plan.scanned,
+                "disabled": counts.disabled,
+                "refused": "empty_upstream_mass_disable",
+                "error": e.to_string(),
+            }),
+        )
+        .await;
+        tracing::error!(
+            source = %row.code,
+            %run_id,
+            disabled = counts.disabled,
+            error = %e,
+            "directory sync refused: empty upstream would mass-disable"
+        );
+        return Err(e);
+    }
+
     let applied = apply_plan(state, row, run_id, &plan, actor.as_ref()).await;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -624,6 +690,16 @@ async fn apply_disables(
     }
     tx.commit().await?;
 
+    // Retire delegated refresh tokens with the sessions: a directory disable
+    // must not leave OAuth clients minting tokens for departed workers. A
+    // failure is logged, not fatal — the accounts are already `disabled`, so
+    // the tokens are dead in effect and the next sync retries.
+    for user_id in &ids {
+        if let Err(e) = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, *user_id).await {
+            tracing::error!(error = %e, user_id = %user_id, "failed to revoke refresh tokens on directory disable");
+        }
+    }
+
     let events: Vec<AuditEvent> = disabled
         .into_iter()
         .map(|user_id| {
@@ -721,6 +797,16 @@ async fn update_user(
     // `STATUS_FROM_FLAGS`: `SET` reads the old row, and this statement is the one
     // changing `directory_disabled`, so it substitutes the new value.
     //
+    // Attribute ownership: a user with `scim_managed` set has been taken over
+    // by the IdP's SCIM pushes (migration `027`). The managed attributes and
+    // groups therefore stay the IdP's here — writing them anyway made the two
+    // upstreams overwrite each other forever, each run flipping the values
+    // back. The directory still releases its *own* disable claim when the user
+    // is listed upstream: that claim is the directory's to give back, and
+    // leaving it stuck would lock a SCIM-managed account closed. The link's
+    // `source_hash` still advances, so the run after this one is a no-op
+    // instead of a permanent Update.
+    //
     // The `before` CTE carries the pre-update flag out through `RETURNING`, which
     // is the only way to see it: `RETURNING` reads the new row, so it cannot say
     // whether this update was the one that re-enabled the account. Without that
@@ -730,12 +816,13 @@ async fn update_user(
         r#"
         WITH before AS (SELECT directory_disabled AS was FROM users WHERE id = $1)
         UPDATE users
-        SET email = $2,
-            username = $3,
-            display_name = $4,
+        SET email = CASE WHEN scim_managed THEN email ELSE $2 END,
+            username = CASE WHEN scim_managed THEN username ELSE $3 END,
+            display_name = CASE WHEN scim_managed THEN display_name ELSE $4 END,
             directory_disabled = FALSE,
             status = CASE WHEN local_disabled OR scim_disabled THEN 'disabled' ELSE 'active' END,
-            directory_groups = COALESCE($5::text[], directory_groups),
+            directory_groups = CASE WHEN scim_managed THEN directory_groups
+                                    ELSE COALESCE($5::text[], directory_groups) END,
             updated_at = NOW()
         WHERE id = $1
         RETURNING (SELECT was FROM before), status

@@ -1,15 +1,20 @@
-//! Pending third-party identity binding after a local sign-in, and JIT
-//! provisioning of new local users from a verified upstream email.
+//! Pending third-party identity binding, and JIT provisioning of new local
+//! users from a verified upstream email.
 //!
-//! When SSO cannot auto-link (no verified email match), the callback either:
-//! - creates a `member` account (JIT, when enabled and email is verified), or
-//! - stashes a pending link cookie for the next local password / MFA / passkey
-//!   login to complete the bind.
+//! When SSO cannot auto-link (no verified email match) and cannot JIT, the
+//! callback stashes a pending link cookie. The bind itself is **explicit**:
+//! the dashboard surfaces the stashed identity after the next sign-in and the
+//! user confirms or discards it. It used to bind automatically at the end of
+//! the next login in the same browser — which made the bind follow the
+//! *browser* rather than the person, and on a shared machine an attacker's
+//! stashed identity would attach itself to whoever signed in next, handing
+//! them that account at their next SSO click.
 
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::models::User;
 use crate::state::AppState;
+use axum::http::HeaderMap;
 use axum_extra::extract::cookie::{Cookie as AxumCookie, SameSite};
 use axum_extra::extract::CookieJar;
 use serde_json::json;
@@ -81,33 +86,77 @@ pub(crate) async fn stash_pending_link(
     ))
 }
 
-/// If a pending SSO identity cookie is present, bind it to `user_id`.
-///
-/// Never fails the login: binding errors are logged and the cookie is cleared.
-pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User) -> CookieJar {
-    let Some(raw_state) = jar.get(PENDING_COOKIE).map(|c| c.value().to_owned()) else {
-        return jar;
-    };
-    let jar = jar.add(clear_pending_cookie(state.config.cookie_secure));
+/// A stashed pending upstream identity, as surfaced to the signed-in user.
+#[derive(Debug, serde::Serialize)]
+pub struct PendingIdentity {
+    pub provider: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+}
 
-    let row: Option<(String, String, Option<String>, serde_json::Value)> = match sqlx::query_as(
+/// Reads the pending identity the request's cookie points at, if any.
+///
+/// A peek consumes nothing: the cookie and row survive until the user confirms
+/// or discards, or the row's 15-minute TTL lapses.
+pub async fn peek_pending_link(state: &AppState, headers: &HeaderMap) -> Option<PendingIdentity> {
+    let raw_state = crate::auth::session::cookie_value(headers, PENDING_COOKIE)?;
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT provider_code, email, display_name \
+         FROM identity_link_challenges \
+         WHERE state = $1 AND expires_at > NOW() AND subject <> ''",
+    )
+    .bind(sha256_hex(&raw_state))
+    .fetch_optional(&state.pool)
+    .await
+    .ok()
+    .flatten();
+    row.map(|(provider, email, display_name)| PendingIdentity {
+        provider,
+        email,
+        display_name,
+    })
+}
+
+/// Binds the pending upstream identity to `user` — only on their explicit
+/// request.
+///
+/// Unlike the automatic bind it replaces, this is fallible and the errors are
+/// the user's to read: a refusal here is a decision they asked for, not noise
+/// a login should paper over.
+pub async fn confirm_pending_link(
+    state: &AppState,
+    jar: CookieJar,
+    user: &User,
+) -> AppResult<(serde_json::Value, CookieJar)> {
+    let Some(raw_state) = jar.get(PENDING_COOKIE).map(|c| c.value().to_owned()) else {
+        return Err(AppError::not_found("no pending sso identity"));
+    };
+
+    // Consume atomically: one confirmation per stashed identity, and a double
+    // click on "link" is one bind, not two attempts.
+    let row: Option<(String, String, Option<String>, serde_json::Value)> = sqlx::query_as(
         "DELETE FROM identity_link_challenges \
          WHERE state = $1 AND expires_at > NOW() AND subject <> '' \
          RETURNING provider_code, subject, email, raw",
     )
     .bind(sha256_hex(&raw_state))
     .fetch_optional(&state.pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to load pending sso link");
-            return jar;
-        }
-    };
+    .await?;
+    let jar = jar.add(clear_pending_cookie(state.config.cookie_secure));
     let Some((provider_code, subject, email, raw)) = row else {
-        return jar;
+        return Err(AppError::not_found("no pending sso identity"));
     };
+
+    // Admission at consume time. The checks ran when the identity was stashed,
+    // but the lists are editable: a provider narrowed or deleted in between
+    // must not retroactively admit an identity into a local account. The
+    // per-provider list is the check that governs this act — the local account
+    // itself already passed sign-in admission on its own credentials.
+    if !super::provider_allows(&state.pool, &provider_code, email.as_deref()).await? {
+        return Err(AppError::forbidden(
+            "this identity's email is no longer allowed for this provider",
+        ));
+    }
 
     // Subject already bound to someone else — do not steal the link.
     let existing: Option<Uuid> = sqlx::query_scalar(
@@ -126,12 +175,14 @@ pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User)
                 other_user_id = %other,
                 "pending sso subject already linked to another user"
             );
-            return jar;
+            return Err(AppError::conflict(
+                "this identity is already linked to another account",
+            ));
         }
-        return jar;
+        return Ok((json!({ "ok": true, "already_linked": true }), jar));
     }
 
-    if let Err(err) = sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO user_identities \
              (id, user_id, provider_code, subject, email, raw, last_login_at) \
          VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
@@ -144,15 +195,12 @@ pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User)
     .bind(email.as_deref())
     .bind(&raw)
     .execute(&state.pool)
-    .await
-    {
-        tracing::warn!(
-            error = %err,
-            provider = %provider_code,
-            user_id = %user.id,
-            "failed to bind pending sso identity"
-        );
-        return jar;
+    .await?;
+    if inserted.rows_affected() == 0 {
+        // Lost a race with a concurrent bind of the same subject.
+        return Err(AppError::conflict(
+            "this identity is already linked to another account",
+        ));
     }
 
     crate::audit::record(
@@ -162,7 +210,7 @@ pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User)
             action: "auth.identity.link",
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
-            detail: json!({ "provider": provider_code, "via": "pending_after_login" }),
+            detail: json!({ "provider": provider_code, "via": "pending_confirmed" }),
             ip: None,
             user_agent: None,
             client_id: None,
@@ -173,9 +221,21 @@ pub async fn consume_pending_link(state: &AppState, jar: CookieJar, user: &User)
     tracing::info!(
         provider = %provider_code,
         user_id = %user.id,
-        "bound pending sso identity after local login"
+        "bound pending sso identity on user confirmation"
     );
-    jar
+    Ok((json!({ "ok": true }), jar))
+}
+
+/// Drops the pending identity, binding nothing. Works without a session: a
+/// shared machine is exactly where "no" has to be easy.
+pub async fn discard_pending_link(state: &AppState, jar: CookieJar) -> CookieJar {
+    if let Some(raw_state) = jar.get(PENDING_COOKIE).map(|c| c.value().to_owned()) {
+        let _ = sqlx::query("DELETE FROM identity_link_challenges WHERE state = $1")
+            .bind(sha256_hex(&raw_state))
+            .execute(&state.pool)
+            .await;
+    }
+    jar.add(clear_pending_cookie(state.config.cookie_secure))
 }
 
 /// Create a local `member` from a verified upstream email and return its id.

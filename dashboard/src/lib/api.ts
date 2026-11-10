@@ -1070,6 +1070,35 @@ export async function fetchMyIdentities() {
   return parseJson<{ identities: LinkedIdentity[] }>(res);
 }
 
+/** A stashed SSO identity waiting for the user's explicit confirm/discard. */
+export type PendingSsoIdentity = {
+  provider: string;
+  email: string | null;
+  display_name: string | null;
+};
+
+/** Read after every sign-in: the banner asks "link this identity?" if present. */
+export async function fetchPendingSso() {
+  const res = await fetch("/api/v1/auth/sso/pending", { credentials: "include" });
+  return parseJson<{ pending: PendingSsoIdentity | null }>(res);
+}
+
+export async function confirmPendingSso() {
+  const res = await fetch("/api/v1/auth/sso/pending", {
+    method: "POST",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean; already_linked?: boolean }>(res);
+}
+
+export async function discardPendingSso() {
+  const res = await fetch("/api/v1/auth/sso/pending", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
 export async function unlinkIdentity(providerCode: string) {
   const res = await fetch(`/api/v1/auth/sso/identities/${encodeURIComponent(providerCode)}`, {
     method: "DELETE",

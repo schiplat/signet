@@ -12,6 +12,7 @@ pub mod email;
 pub mod error;
 pub mod federation;
 pub mod http;
+pub mod maintenance;
 pub mod metrics;
 pub mod mfa;
 pub mod models;
@@ -64,6 +65,11 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     // Started here rather than in `build_state`: the CLI and the tests want the
     // engine without a background loop firing syncs at them.
     directory::scheduler::spawn(state.clone());
+
+    // Hourly audit-retention prune plus the expired-credential sweeps (see the
+    // module docs). Boot-time only used to be the whole story for retention,
+    // which silently re-grew past the configured window between restarts.
+    maintenance::spawn(state.clone());
 
     let api_v1 = Router::new()
         .merge(auth::router())

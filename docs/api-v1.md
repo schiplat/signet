@@ -292,6 +292,8 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 - 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
 - **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。各平台差异速查：
 
+  ⚠️ **`any` 的前提是租户管控联系邮箱**：它信任"provider 断言了该邮箱"这件事本身。若上游允许用户自改联系邮箱（飞书个人版、自建 OIDC 等），攻击者可在受害者注册前以 `victim@corp.com` 完成自动绑定 / JIT 开户（预创建劫持）。保存 `email_trust=any` 时服务端会在日志输出警告；仅对管理员统一管控联系邮箱的租户启用。
+
   | provider_type | 邮箱验证标志 | 建议配置 | 说明 |
   |---------------|--------------|----------|------|
   | `github` | 上游如实返回（primary + verified） | `inherit` | 验证邮箱才自动绑定 / 开户 |
@@ -299,6 +301,8 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
   | `oidc` | 取决于上游，标准字段 | `inherit`；上游不可信时 `verified` 收紧 | 同上 |
   | `feishu` | **无验证标志**（adapter 如实上报「未验证」） | 自有企业租户 `email_trust=any` + `jit_mode=on`；否则保持 `inherit` | 迁移 033 已把存量飞书 provider 置为 `any` 保持行为；新建默认 `inherit`（只允许绑定，需显式选 `any` 才自动开户） |
   | `wechat` | **无邮箱 API** | 不适用（`email_trust` 无效果） | 依旧豁免邮箱要求，只能绑定已有账号 |
+
+  另：SSO 无法自动绑定 / 开户时暂存的 pending 身份，现在**只会在用户登录后于 Dashboard 显式确认时绑定**（`GET/POST/DELETE /api/v1/auth/sso/pending`，登录后顶部横幅），不再跟随"同一浏览器的下一次登录"自动绑定——共享机器上他人的暂存身份不会再落到你的账号上。确认时会按 provider 当前的邮箱域白名单重新校验。
 
   典型组合：企业飞书 / Google Workspace 租户 `jit_mode=on`（可信租户自动开户）；开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。
 - 第三方登录只证明上游身份：本地策略（强制改密、TOTP、全局/用户级强制 MFA）在会话签发前照常生效，与密码登录共用同一套 MFA 挑战（挑战行记录来源 `via=sso`）。

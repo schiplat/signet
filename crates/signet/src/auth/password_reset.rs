@@ -88,6 +88,9 @@ async fn request_reset(
             "{}/reset-password?token={token}",
             state.config.public_base()
         );
+        // The body carries the live token, so it is logged only behind the dev
+        // opt-in — a reset link in a log stream is a working account takeover
+        // for anyone who can read the logs.
         crate::email::send(
             &user.1,
             "Signet password reset",
@@ -95,12 +98,22 @@ async fn request_reset(
                 "A password reset was requested for {}. Use this link to set a new password:\n\n{link}\n\nThis link expires in 30 minutes.",
                 user.1
             ),
+            state.config.dev_log_links,
         )
         .await;
 
-        // Dev/test convenience: without a real mailer, surface the link once.
+        // Dev/test convenience: without a real mailer, surface the link once —
+        // same opt-in as the body above, and loudly absent otherwise so a dev
+        // wondering where the link went learns the flag's name.
         if state.config.smtp_host.is_none() {
-            tracing::info!(email = %user.1, link = %link, "password reset link (dev)");
+            if state.config.dev_log_links {
+                tracing::info!(email = %user.1, link = %link, "password reset link (dev)");
+            } else {
+                tracing::info!(
+                    email = %user.1,
+                    "password reset link generated but not logged (set SIGNET_DEV_LOG_LINKS=true in dev to print it)"
+                );
+            }
         }
     } else {
         // Still pretend we sent something.
@@ -145,6 +158,22 @@ async fn confirm_reset(
 
     let user_id = row.1;
 
+    // Consume the token atomically before any side effect: two concurrent
+    // confirmations must not both change the password. Burning the token first
+    // is the safe order — a failure after this leaves the token spent and the
+    // user requests a fresh one.
+    let consumed = sqlx::query(
+        "UPDATE password_reset_tokens SET consumed_at = NOW() \
+         WHERE id = $1 AND consumed_at IS NULL AND expires_at > NOW()",
+    )
+    .bind(row.0)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+    if consumed == 0 {
+        return Err(AppError::bad_request("invalid or expired reset token"));
+    }
+
     set_user_password(
         &state.pool,
         user_id,
@@ -154,12 +183,11 @@ async fn confirm_reset(
     )
     .await?;
 
-    // Consume token and force sign-out of all sessions.
-    sqlx::query("UPDATE password_reset_tokens SET consumed_at = NOW() WHERE id = $1")
-        .bind(row.0)
-        .execute(&state.pool)
-        .await?;
+    // Recovery must end everything the old credential authorized: the sessions
+    // (possibly the attacker's) and the refresh tokens delegated to OAuth
+    // clients, which outlive passwords unless revoked explicitly.
     revoke_all_sessions(&state.pool, user_id).await?;
+    crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user_id).await?;
 
     Ok(Json(json!({ "ok": true })))
 }

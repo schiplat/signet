@@ -17,10 +17,11 @@
 use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::models::User;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -93,10 +94,12 @@ struct PatchSsoSettings {
 async fn patch_sso_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<PatchSsoSettings>,
 ) -> AppResult<Json<Value>> {
     let actor = current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     set_sso_jit_provision(&state.pool, body.jit_provision).await?;
     record(
         &state,
@@ -106,7 +109,7 @@ async fn patch_sso_settings(
             resource_type: "settings",
             resource_id: Some("sso.jit_provision".into()),
             detail: json!({ "jit_provision": body.jit_provision }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -227,6 +230,27 @@ fn provider_policy(body: &ProviderBody) -> AppResult<(String, String)> {
     Ok((jit_mode.to_string(), email_trust.to_string()))
 }
 
+/// The risky half of the email-trust policy, said out loud at save time.
+///
+/// `any` makes auto-link — and, with `jit_mode=on`, account creation — follow
+/// whoever asserts an email at that provider. That is safe only while the
+/// tenant actually controls its users' contact emails (the assumption the
+/// Feishu pin in migration `033` makes for corporate tenants). A provider
+/// whose users can edit their own contact email lets a registrant claim
+/// `victim@corp.com` before the victim ever signs up, which is a
+/// pre-account hijack. Nothing is refused: a deployment may have exactly that
+/// tenant — this is the warning that makes the choice visible in the logs.
+fn warn_if_any_email_trust(code: &str, email_trust: &str) {
+    if email_trust == "any" {
+        tracing::warn!(
+            provider = %code,
+            "email_trust=any: auto-link (and JIT, if enabled) will trust any email this \
+             provider asserts — safe only for a tenant whose contact emails the admin \
+             controls"
+        );
+    }
+}
+
 /// The provider's domain list, checked and normalized.
 ///
 /// The same checks the global list applies, under a name that says which field
@@ -275,12 +299,15 @@ fn validate_body(body: &ProviderBody, allow_private: bool) -> AppResult<()> {
 async fn admin_create(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<ProviderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     validate_body(&body, state.config.outbound_allow_private)?;
     let allowed_email_domains = provider_domains(&body)?;
     let (jit_mode, email_trust) = provider_policy(&body)?;
+    warn_if_any_email_trust(&body.code, &email_trust);
     let secret = body
         .client_secret
         .as_deref()
@@ -343,7 +370,7 @@ async fn admin_create(
                 "jit_mode": jit_mode,
                 "email_trust": email_trust,
             }),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },
@@ -356,13 +383,16 @@ async fn admin_create(
 async fn admin_update(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
     Json(body): Json<ProviderBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     validate_body(&body, state.config.outbound_allow_private)?;
     let allowed_email_domains = provider_domains(&body)?;
     let (jit_mode, email_trust) = provider_policy(&body)?;
+    warn_if_any_email_trust(&body.code, &email_trust);
 
     // NOT NULL columns: empty form values become "" / code, never SQL NULL.
     let scopes_value = body
@@ -460,7 +490,7 @@ async fn admin_update(
                 "jit_mode": jit_mode,
                 "email_trust": email_trust,
             }),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },
@@ -473,9 +503,11 @@ async fn admin_update(
 async fn admin_delete(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let result = sqlx::query("DELETE FROM upstream_providers WHERE code = $1")
         .bind(&code)
         .execute(&state.pool)
@@ -492,7 +524,7 @@ async fn admin_delete(
             resource_type: "sso_provider",
             resource_id: Some(code.clone()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },
@@ -504,10 +536,12 @@ async fn admin_delete(
 async fn admin_set_enabled(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let enabled = body
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -530,7 +564,7 @@ async fn admin_set_enabled(
             resource_type: "sso_provider",
             resource_id: Some(code.clone()),
             detail: json!({ "enabled": enabled }),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },

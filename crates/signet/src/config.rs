@@ -48,6 +48,11 @@ pub struct Config {
     /// the peer address is used, so a spoofed header cannot dodge client IP
     /// allowlists, rate limits, or audit trails.
     pub trusted_proxies: Vec<IpNet>,
+    /// Dev-only opt-in (`SIGNET_DEV_LOG_LINKS`) that lets one-time credentials
+    /// reach the log stream: the password-reset link (a live 30-minute token)
+    /// and email bodies that carry it. Off by default — log aggregation makes
+    /// every log line a credential store — and never needed in production.
+    pub dev_log_links: bool,
 }
 
 impl Config {
@@ -136,10 +141,21 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3),
-            audit_retention_days: env::var("SIGNET_AUDIT_RETENTION_DAYS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(180),
+            audit_retention_days: {
+                let days: i64 = env::var("SIGNET_AUDIT_RETENTION_DAYS")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(180);
+                // 0 (or negative) would delete the entire audit trail on the
+                // first prune — the compliance record is exactly the thing a
+                // mistyped env var must not be able to erase. "Keep everything
+                // forever" is spelled by leaving the rows alone, not by a zero
+                // day window, so refuse the value instead of interpreting it.
+                if days < 1 {
+                    bail!("SIGNET_AUDIT_RETENTION_DAYS must be >= 1, got {days}");
+                }
+                days
+            },
             rate_limit_per_minute: env::var("SIGNET_RATE_LIMIT_PER_MINUTE")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -176,6 +192,9 @@ impl Config {
                 }
             },
             trusted_proxies,
+            dev_log_links: env::var("SIGNET_DEV_LOG_LINKS")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+                .unwrap_or(false),
         })
     }
 }

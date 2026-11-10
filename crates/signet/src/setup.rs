@@ -21,7 +21,26 @@ use crate::models::{insert_user, NewUser, PublicUser};
 use crate::state::AppState;
 
 /// Advisory lock key serializing concurrent first-run setups (hex for "Signet").
-const SETUP_LOCK_KEY: i64 = 0x5369_676E_6574;
+///
+/// `pub(crate)` because the admin-side last-admin guard
+/// ([`crate::admin::guard_last_admin`]) must hold the *same* lock: `/setup`
+/// re-arms the moment no active admin exists, so an admin demotion, disable or
+/// deletion has to be serialized against the setup probe as well as against
+/// other admin-lifecycle writes.
+pub(crate) const SETUP_LOCK_KEY: i64 = 0x5369_676E_6574;
+
+/// Takes the setup advisory lock on `executor` (expected to be a transaction,
+/// so the lock is held until that transaction commits or rolls back).
+pub(crate) async fn lock_setup<'c, E>(executor: E) -> Result<(), sqlx::Error>
+where
+    E: sqlx::PgExecutor<'c>,
+{
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SETUP_LOCK_KEY)
+        .execute(executor)
+        .await
+        .map(|_| ())
+}
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -73,10 +92,7 @@ async fn setup_admin(
     // Serialize concurrent setups and re-check inside the lock so only one
     // admin can be created even under a race.
     let mut tx = state.pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(SETUP_LOCK_KEY)
-        .execute(&mut *tx)
-        .await?;
+    lock_setup(&mut *tx).await?;
 
     if admin_exists(&mut *tx).await? {
         return Err(AppError::conflict("already configured"));

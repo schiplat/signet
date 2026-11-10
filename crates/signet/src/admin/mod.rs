@@ -8,13 +8,14 @@ use crate::auth::password::{
 use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::models::{
     insert_user, normalize_username, status_from_flags, user_by_id, NewUser, PublicUser, User,
     USER_COLS,
 };
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -78,8 +79,10 @@ async fn scim_token_configured(pool: &sqlx::PgPool) -> AppResult<bool> {
 async fn scim_generate_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let plaintext = random_token(32);
     let hash = sha256_hex(&plaintext);
 
@@ -101,7 +104,7 @@ async fn scim_generate_token(
             resource_type: "scim",
             resource_id: None,
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -115,8 +118,10 @@ async fn scim_generate_token(
 async fn scim_revoke_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     sqlx::query("UPDATE scim_config SET token_hash = NULL, updated_at = NOW() WHERE id = TRUE")
         .execute(&state.pool)
@@ -140,7 +145,7 @@ async fn scim_revoke_token(
             resource_type: "scim",
             resource_id: None,
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -932,9 +937,11 @@ struct CreateUserBody {
 async fn create_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<CreateUserBody>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     let email = body.email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {
@@ -1022,7 +1029,7 @@ async fn create_user(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email, "role": user.role }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1049,10 +1056,12 @@ struct UpdateUserBody {
 async fn update_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateUserBody>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
@@ -1090,7 +1099,16 @@ async fn update_user(
                 continue;
             }
             if let Some(msg) = authority.write_error(field) {
-                audit_managed_write_blocked(&state, &headers, &actor, id, &authority, field).await;
+                audit_managed_write_blocked(
+                    &state,
+                    &headers,
+                    &actor,
+                    id,
+                    &authority,
+                    field,
+                    ip.clone(),
+                )
+                .await;
                 return Err(AppError::forbidden(msg));
             }
         }
@@ -1189,6 +1207,16 @@ async fn update_user(
         return Err(AppError::bad_request("cannot disable yourself"));
     }
 
+    // The last-admin guard runs *before* any side effect (password history,
+    // session revocation) so a refused request leaves nothing half-applied.
+    // Demoting or disabling an admin can empty the active admin set and re-arm
+    // the public `/setup`, so the guard transaction below must still be held
+    // when the UPDATE at the bottom commits.
+    let mut admin_guard = None;
+    if target.role == "admin" && (role != "admin" || status == "disabled") {
+        admin_guard = Some(guard_last_admin(&state.pool, &[id]).await?);
+    }
+
     let mfa_required = body.mfa_required.unwrap_or(target.mfa_required);
     let must_change_password = body
         .must_change_password
@@ -1220,10 +1248,18 @@ async fn update_user(
                 state.config.password_history_size,
             )
             .await?;
+            // An admin-set password retires everything the old one authorized:
+            // the usual reason to reach for it is "this account is compromised",
+            // so the attacker's live session and any delegated refresh token
+            // must die with the old credential, not at the next login.
+            revoke_all_sessions(&state.pool, id).await?;
+            crate::oidc::revoke_refresh_tokens_for_user(&state.pool, id).await?;
         }
     }
 
-    let user = sqlx::query_as::<_, User>(&format!(
+    // Built as a query first so the one statement can run on either executor:
+    // the plain pool, or the last-admin guard's transaction.
+    let update_sql = format!(
         r#"
         UPDATE users
         SET email = $2, display_name = $3, role = $4,
@@ -1235,19 +1271,22 @@ async fn update_user(
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
-    ))
-    .bind(id)
-    .bind(&email)
-    .bind(&display_name)
-    .bind(&role)
-    .bind(mfa_required)
-    .bind(must_change_password)
-    .bind(groups)
-    .bind(phone)
-    .bind(&username)
-    .bind(local_disabled)
-    .fetch_one(&state.pool)
-    .await
+    );
+    let query = sqlx::query_as::<_, User>(&update_sql)
+        .bind(id)
+        .bind(&email)
+        .bind(&display_name)
+        .bind(&role)
+        .bind(mfa_required)
+        .bind(must_change_password)
+        .bind(groups)
+        .bind(phone)
+        .bind(&username)
+        .bind(local_disabled);
+    let user = match admin_guard.as_mut() {
+        Some(tx) => query.fetch_one(&mut **tx).await,
+        None => query.fetch_one(&state.pool).await,
+    }
     .map_err(|e| match e {
         sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
             AppError::bad_request("email already exists")
@@ -1260,6 +1299,9 @@ async fn update_user(
         }
         other => AppError::from(other),
     })?;
+    if let Some(tx) = admin_guard {
+        tx.commit().await?;
+    }
 
     if status == "disabled" {
         revoke_all_sessions(&state.pool, id).await?;
@@ -1279,7 +1321,7 @@ async fn update_user(
                 "mfa_required": user.mfa_required,
                 "must_change_password": user.must_change_password,
             }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1292,9 +1334,11 @@ async fn update_user(
 async fn delete_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if actor.id == id {
         return Err(AppError::bad_request("cannot delete yourself"));
     }
@@ -1302,13 +1346,24 @@ async fn delete_user(
     // Upstream deletions only disable (D3) and the same rule holds locally, so a
     // managed user is never hard-deleted — use the local disable intent instead.
     if let Some(authority) = crate::authority::managing_authority(&state.pool, id).await? {
-        audit_managed_write_blocked(&state, &headers, &actor, id, &authority, "delete").await;
+        audit_managed_write_blocked(&state, &headers, &actor, id, &authority, "delete", ip).await;
         return Err(AppError::forbidden(authority.delete_error()));
     }
-    let res = sqlx::query("DELETE FROM users WHERE id = $1")
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+    // Deleting an admin can empty the active admin set and re-arm the public
+    // `/setup`; the guard transaction must still be held when the DELETE
+    // commits (see `guard_last_admin`).
+    let mut admin_guard = None;
+    if target.role == "admin" {
+        admin_guard = Some(guard_last_admin(&state.pool, &[id]).await?);
+    }
+    let query = sqlx::query("DELETE FROM users WHERE id = $1").bind(id);
+    let res = match admin_guard.as_mut() {
+        Some(tx) => query.execute(&mut **tx).await?,
+        None => query.execute(&state.pool).await?,
+    };
+    if let Some(tx) = admin_guard {
+        tx.commit().await?;
+    }
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound("user not found".into()));
     }
@@ -1320,7 +1375,7 @@ async fn delete_user(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email, "role": target.role }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1332,9 +1387,11 @@ async fn delete_user(
 async fn disable_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if actor.id == id {
         return Err(AppError::bad_request("cannot disable yourself"));
     }
@@ -1351,7 +1408,7 @@ async fn disable_user(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1363,9 +1420,11 @@ async fn disable_user(
 async fn enable_user(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<PublicUser>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
@@ -1379,7 +1438,7 @@ async fn enable_user(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "email": user.email }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1396,9 +1455,11 @@ struct BatchDisableBody {
 async fn batch_disable_users(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<BatchDisableBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if body.ids.is_empty() {
         return Err(AppError::bad_request("ids required"));
     }
@@ -1435,7 +1496,7 @@ async fn batch_disable_users(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({ "email": email, "bulk": true }),
-            ip: None,
+            ip: ip.clone(),
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         })
@@ -1449,9 +1510,11 @@ async fn batch_disable_users(
 async fn revoke_user_sessions(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let target = user_by_id(&state.pool, id).await?;
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
@@ -1465,13 +1528,50 @@ async fn revoke_user_sessions(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email, "revoked": revoked }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
     .await;
     Ok(Json(json!({ "revoked": revoked })))
+}
+
+/// The transactional guard for every admin-API write that can shrink the active
+/// admin set: demotion and disable in [`update_user`], disable in
+/// [`set_user_access`] and [`disable_users`], delete in [`delete_user`].
+///
+/// `/setup` re-arms the moment no active `admin` row exists, and it accepts an
+/// unauthenticated body — that is its job on first boot — so an instance whose
+/// admin set reaches zero is takeover-able by anyone who can reach the API.
+/// The count below therefore runs inside the same transaction as the write it
+/// guards, under the setup advisory lock (`setup::lock_setup`): two admins
+/// demoting — or disabling, or deleting — each other concurrently must not both
+/// see "another admin remains", and the transition must not interleave with
+/// `/setup`'s own `admin_exists` re-check.
+///
+/// Returns the transaction the caller must run its write on and commit.
+/// Dropping it on an error path releases the lock and rolls the transaction
+/// back, which is what every refusal wants.
+async fn guard_last_admin<'a>(
+    pool: &'a sqlx::PgPool,
+    leaving: &[Uuid],
+) -> AppResult<sqlx::Transaction<'a, sqlx::Postgres>> {
+    let mut tx = pool.begin().await?;
+    crate::setup::lock_setup(&mut *tx).await?;
+    let others: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users \
+         WHERE role = 'admin' AND status = 'active' AND id <> ALL($1)",
+    )
+    .bind(leaving)
+    .fetch_one(&mut *tx)
+    .await?;
+    if others == 0 {
+        return Err(AppError::bad_request(
+            "this change would leave no active administrator; promote another admin first",
+        ));
+    }
+    Ok(tx)
 }
 
 /// The two states an admin can put an account in.
@@ -1520,7 +1620,22 @@ impl UserAccess {
 /// `Exposed for tests` — `crates/signet/tests/user_access.rs` pins the pairing
 /// and the revocation, which no HTTP-level test would reach.
 pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> AppResult<User> {
-    let user = sqlx::query_as::<_, User>(&format!(
+    // Disabling an admin can empty the active admin set and re-arm the public
+    // `/setup`, so the guard transaction must still be held when the UPDATE
+    // commits (see `guard_last_admin`). An enable only ever grows the set, so
+    // it skips the guard — and the extra role read with it.
+    let mut admin_guard = None;
+    if access == UserAccess::Disabled {
+        let role: Option<String> = sqlx::query_scalar("SELECT role FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.pool)
+            .await?;
+        if role.as_deref() == Some("admin") {
+            admin_guard = Some(guard_last_admin(&state.pool, &[id]).await?);
+        }
+    }
+
+    let update_sql = format!(
         r#"
         UPDATE users SET
             local_disabled = $2,
@@ -1530,15 +1645,24 @@ pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> 
         WHERE id = $1
         RETURNING {USER_COLS}
         "#
-    ))
-    .bind(id)
-    .bind(access.local_disabled())
-    .fetch_optional(&state.pool)
-    .await?
+    );
+    let query = sqlx::query_as::<_, User>(&update_sql)
+        .bind(id)
+        .bind(access.local_disabled());
+    let user = match admin_guard.as_mut() {
+        Some(tx) => query.fetch_optional(&mut **tx).await,
+        None => query.fetch_optional(&state.pool).await,
+    }?
     .ok_or_else(|| AppError::not_found("user not found"))?;
 
+    if let Some(tx) = admin_guard {
+        tx.commit().await?;
+    }
     if access == UserAccess::Disabled {
         revoke_all_sessions(&state.pool, id).await?;
+        // Same retirement rule as the password events: a disabled account's
+        // delegated refresh tokens must not survive into a later re-enable.
+        crate::oidc::revoke_refresh_tokens_for_user(&state.pool, id).await?;
     }
     Ok(user)
 }
@@ -1559,19 +1683,38 @@ pub async fn disable_users(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Uui
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let disabled: Vec<(Uuid, String)> = sqlx::query_as(
+    // Only a batch that removes an admin can empty the active admin set, so the
+    // roles decide whether the guarded (setup-serialized) path is needed at all.
+    let targets: Vec<(Uuid, String)> =
+        sqlx::query_as("SELECT id, role FROM users WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(&state.pool)
+            .await?;
+    let mut admin_guard = None;
+    if targets.iter().any(|(_, role)| role == "admin") {
+        admin_guard = Some(guard_last_admin(&state.pool, ids).await?);
+    }
+
+    let query = sqlx::query_as::<_, (Uuid, String)>(
         "UPDATE users SET local_disabled = TRUE, status = 'disabled', updated_at = NOW() \
          WHERE id = ANY($1::uuid[]) \
          RETURNING id, email",
     )
-    .bind(ids)
-    .fetch_all(&state.pool)
-    .await?;
-    crate::auth::session::revoke_sessions_for(
-        &state.pool,
-        &disabled.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-    )
-    .await?;
+    .bind(ids);
+    let disabled = match admin_guard.as_mut() {
+        Some(tx) => query.fetch_all(&mut **tx).await?,
+        None => query.fetch_all(&state.pool).await?,
+    };
+    if let Some(tx) = admin_guard {
+        tx.commit().await?;
+    }
+    let ids: Vec<Uuid> = disabled.iter().map(|(id, _)| *id).collect();
+    crate::auth::session::revoke_sessions_for(&state.pool, &ids).await?;
+    // Retire delegated refresh tokens along with the sessions, so a batch
+    // disable cannot leave OAuth clients minting tokens for frozen accounts.
+    for id in &ids {
+        crate::oidc::revoke_refresh_tokens_for_user(&state.pool, *id).await?;
+    }
     Ok(disabled)
 }
 
@@ -1586,6 +1729,7 @@ async fn audit_managed_write_blocked(
     user_id: Uuid,
     authority: &crate::authority::Authority,
     field: &str,
+    ip: Option<String>,
 ) {
     record(
         state,
@@ -1595,7 +1739,7 @@ async fn audit_managed_write_blocked(
             resource_type: "user",
             resource_id: Some(user_id.to_string()),
             detail: json!({ "source": authority.code(), "field": field }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(headers),
             client_id: None,
         },

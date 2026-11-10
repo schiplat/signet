@@ -1,8 +1,30 @@
 use axum::extract::ConnectInfo;
+use axum::extract::Extension;
 use axum::http::HeaderMap;
 use ipnet::IpNet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::OnceLock;
+
+/// The resolved client IP of the current request, as a request extension.
+///
+/// The access-log middleware computes the IP for every request anyway (same
+/// [`client_ip`] trust rules as everywhere else), so it inserts the value here
+/// and audit-recording handlers read it instead of re-deriving it — which they
+/// could not do without each taking a `ConnectInfo` extractor. Handlers take it
+/// as `Option<Extension<AuditIp>>`: absent when the route is driven without the
+/// middleware stack (tests), and `None` inside when the request has no
+/// determinable client IP.
+#[derive(Clone, Debug, Default)]
+pub struct AuditIp(pub Option<String>);
+
+/// Handler-side extraction of [`AuditIp`].
+///
+/// Handlers take the extension as `Option<Extension<AuditIp>>` and pass it
+/// here; named `audit_ip` so a handler can hold both the parameter and the
+/// result under their natural names (call it by full path).
+pub fn audit_ip(ext: Option<Extension<AuditIp>>) -> Option<String> {
+    ext.and_then(|e| e.0 .0)
+}
 
 /// Parsed `SIGNET_TRUSTED_PROXIES`. Empty (the default) trusts nobody, so
 /// `X-Forwarded-For` is ignored everywhere: the peer address is the client IP.

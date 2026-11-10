@@ -148,6 +148,24 @@ impl TokenSet {
     }
 }
 
+/// The URL as an error message may quote it: scheme, host and path only.
+///
+/// The query string is where credentials live on some upstreams — the WeChat
+/// token endpoint takes `secret=` as a query parameter — and these errors end
+/// up in the log stream via the callback's warn line, so the logged form must
+/// not be able to carry them.
+fn redact_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(u) => format!(
+            "{}://{}{}",
+            u.scheme(),
+            u.host_str().unwrap_or_default(),
+            u.path()
+        ),
+        Err(_) => "<unparseable url>".to_string(),
+    }
+}
+
 /// POSTs a form-encoded token request and parses the JSON response.
 pub async fn post_token_form(token_url: &str, form: &[(&str, &str)]) -> Result<TokenSet> {
     let resp = crate::outbound::client()
@@ -180,7 +198,8 @@ pub async fn get_json(url: &str, access_token: &str) -> Result<serde_json::Value
     let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
         return Err(anyhow!(
-            "GET {url} returned {status}: {}",
+            "GET {} returned {status}: {}",
+            redact_url(url),
             String::from_utf8_lossy(&body)
         ));
     }
@@ -198,7 +217,8 @@ pub async fn get_json_plain(url: &str) -> Result<serde_json::Value> {
     let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
         return Err(anyhow!(
-            "GET {url} returned {status}: {}",
+            "GET {} returned {status}: {}",
+            redact_url(url),
             String::from_utf8_lossy(&body)
         ));
     }

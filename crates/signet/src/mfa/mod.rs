@@ -9,7 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{user_by_id, PublicUser, User};
 use crate::roles::require_admin_role;
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -92,10 +92,12 @@ struct PatchMfaSettings {
 async fn patch_mfa_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<crate::http::extract::AuditIp>>,
     Json(body): Json<PatchMfaSettings>,
 ) -> AppResult<Json<Value>> {
     let actor = current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     set_global_mfa_required(&state.pool, body.required_globally).await?;
     record(
         &state,
@@ -105,7 +107,7 @@ async fn patch_mfa_settings(
             resource_type: "settings",
             resource_id: Some("mfa.required_globally".into()),
             detail: json!({ "required_globally": body.required_globally }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -126,6 +128,11 @@ struct MfaChallenge {
     /// `sso`); the session issued at the end of the continuation is attributed
     /// to the same path.
     via: String,
+    /// Failed verification attempts against this challenge. The throttle that
+    /// bounds second-factor guessing: a correct password never charges the
+    /// account lockout, so the challenge itself has to have a budget.
+    #[sqlx(default)]
+    failed_attempts: i32,
 }
 
 pub fn mfa_cookie(token: &str, secure: bool) -> Cookie<'static> {
@@ -191,7 +198,7 @@ async fn load_challenge(pool: &PgPool, headers: &HeaderMap) -> AppResult<MfaChal
     let token_hash = crate::crypto::util::sha256_hex(&token);
     sqlx::query_as::<_, MfaChallenge>(
         r#"
-        SELECT id, user_id, purpose, pending_secret, via
+        SELECT id, user_id, purpose, pending_secret, via, failed_attempts
         FROM mfa_challenges
         WHERE token_hash = $1 AND expires_at > NOW()
         "#,
@@ -245,7 +252,6 @@ async fn issue_session(
             state.config.session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
-    let jar = crate::federation::consume_pending_link(state, jar, &user).await;
 
     crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
 
@@ -406,7 +412,6 @@ pub async fn begin_login_mfa_flow(
         state.config.cookie_secure,
         state.config.session_ttl_hours,
     ));
-    let jar = crate::federation::consume_pending_link(state, jar, &user).await;
     crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
     record(
         state,
@@ -475,6 +480,14 @@ pub(crate) async fn force_password_change(
     )
     .await?;
 
+    // This is the forced-change path — the flag was usually set because the
+    // account (or its old password) is suspected compromised, and this request
+    // runs *before* the fresh sign-in session is created, so every existing
+    // session and delegated refresh token dies here: nothing of the old
+    // credential survives into the new one.
+    revoke_all_sessions(&state.pool, user.id).await?;
+    crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user.id).await?;
+
     sqlx::query("UPDATE users SET must_change_password = FALSE, updated_at = NOW() WHERE id = $1")
         .bind(user.id)
         .execute(&state.pool)
@@ -541,14 +554,60 @@ async fn verify_mfa(
     let method = body.method.as_str();
     match method {
         "totp" => {
+            // Second-factor budget. The global per-IP limiter is not an MFA
+            // control — a correct password never charges the account lockout,
+            // so a holder of a stolen password could otherwise hold a
+            // challenge, guess codes up to the IP budget, re-login for a fresh
+            // challenge, and keep going. A challenge that has burned its
+            // attempts is over; a fresh sign-in starts a new one.
+            const MAX_VERIFY_ATTEMPTS: i32 = 5;
+            if challenge.failed_attempts >= MAX_VERIFY_ATTEMPTS {
+                delete_challenge(&state.pool, challenge.id).await?;
+                crate::metrics::inc_mfa_verify_failure();
+                return Err(AppError::unauthorized("too many attempts; sign in again"));
+            }
+
             let secret = user
                 .totp_secret
                 .as_deref()
                 .ok_or_else(|| AppError::bad_request("totp not configured"))?;
             let secret = decrypt_totp_secret(&state, secret);
-            if !verify_totp_code(&secret, &body.code)? {
-                crate::metrics::inc_mfa_verify_failure();
-                return Err(AppError::unauthorized("invalid code"));
+            match crate::mfa::totp_util::verify_totp_code_step(&secret, &body.code)? {
+                None => {
+                    // Atomic increment: N concurrent guesses must charge N
+                    // attempts, not N reads of the same base value.
+                    let attempts: i32 = sqlx::query_scalar(
+                        "UPDATE mfa_challenges SET failed_attempts = failed_attempts + 1 \
+                         WHERE id = $1 RETURNING failed_attempts",
+                    )
+                    .bind(challenge.id)
+                    .fetch_one(&state.pool)
+                    .await?;
+                    if attempts >= MAX_VERIFY_ATTEMPTS {
+                        delete_challenge(&state.pool, challenge.id).await?;
+                    }
+                    crate::metrics::inc_mfa_verify_failure();
+                    return Err(AppError::unauthorized("invalid code"));
+                }
+                Some(step) => {
+                    // Replay protection: a code is single-use per timestep.
+                    // The conditional advance is the claim — two concurrent
+                    // verifications of one code cannot both move the
+                    // watermark, and the loser is a replay.
+                    let advanced = sqlx::query(
+                        "UPDATE users SET totp_last_step = $1 \
+                         WHERE id = $2 AND (totp_last_step IS NULL OR totp_last_step < $1)",
+                    )
+                    .bind(step as i64)
+                    .bind(user.id)
+                    .execute(&state.pool)
+                    .await?
+                    .rows_affected();
+                    if advanced == 0 {
+                        crate::metrics::inc_mfa_verify_failure();
+                        return Err(AppError::unauthorized("invalid code"));
+                    }
+                }
             }
             crate::metrics::inc_mfa_verify();
             record(
@@ -588,10 +647,20 @@ async fn verify_mfa(
                 return Err(AppError::unauthorized("invalid recovery code"));
             };
             crate::metrics::inc_mfa_verify();
-            sqlx::query("UPDATE totp_recovery_codes SET used_at = NOW() WHERE id = $1")
-                .bind(code_id)
-                .execute(&state.pool)
-                .await?;
+            // Single-use is the claim, not the read above: two concurrent
+            // submissions of the same code must not both pass, so the UPDATE
+            // is conditional and a loser is treated as a wrong code.
+            let consumed = sqlx::query(
+                "UPDATE totp_recovery_codes SET used_at = NOW() WHERE id = $1 AND used_at IS NULL",
+            )
+            .bind(code_id)
+            .execute(&state.pool)
+            .await?
+            .rows_affected();
+            if consumed == 0 {
+                crate::metrics::inc_mfa_verify_failure();
+                return Err(AppError::unauthorized("invalid recovery code"));
+            }
             record(
                 &state,
                 AuditEvent {
@@ -738,7 +807,6 @@ async fn enroll_confirm_challenge(
             state.config.session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
-    let jar = crate::federation::consume_pending_link(&state, jar, &user).await;
 
     crate::auth::login_alert::track_login(
         &state,
@@ -1087,10 +1155,12 @@ async fn rebind_confirm(
 async fn admin_reset_mfa(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<crate::http::extract::AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let actor = current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let target = user_by_id(&state.pool, id).await?;
     clear_user_mfa(&state.pool, id).await?;
     // Also kill sessions so they re-auth under policy
@@ -1103,7 +1173,7 @@ async fn admin_reset_mfa(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({ "email": target.email }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

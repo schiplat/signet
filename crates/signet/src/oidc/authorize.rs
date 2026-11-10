@@ -121,6 +121,24 @@ pub async fn authorize(
         source.as_deref(),
     )?;
 
+    // A pending forced password change blocks new authorizations: the flag was
+    // set because the credential behind this session is suspected compromised,
+    // so the RP gets the redirect error channel (validated `redirect_uri`
+    // above, `state` echoed) rather than a code. Silent renewal under
+    // `prompt=none` has no browser to land on, so it gets the JSON form.
+    if user.must_change_password {
+        if has_prompt("none") {
+            return Err(AppError::forbidden("password change required"));
+        }
+        let mut url =
+            url::Url::parse(redirect_uri).map_err(|_| AppError::bad_request("bad redirect_uri"))?;
+        url.query_pairs_mut()
+            .append_pair("error", "access_denied")
+            .append_pair("error_description", "password change required")
+            .append_pair("state", state_val);
+        return Ok(Redirect::to(url.as_str()).into_response());
+    }
+
     // prompt=login forces re-authentication: clear the session so the user must
     // sign in again, then redirect to login WITHOUT the login prompt (so it
     // isn't re-triggered after authentication).

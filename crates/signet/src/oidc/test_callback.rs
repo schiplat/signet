@@ -111,11 +111,20 @@ pub async fn test_callback(
         )));
     }
 
-    // Consume like the real token endpoint would: one drive per code.
-    sqlx::query("UPDATE auth_codes SET consumed_at = NOW() WHERE id = $1")
-        .bind(row.id)
-        .execute(&state.pool)
-        .await?;
+    // Consume like the real token endpoint would: one drive per code, claimed
+    // atomically so two concurrent renders of the page cannot both pass.
+    let consumed = sqlx::query(
+        "UPDATE auth_codes SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(row.id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+    if consumed == 0 {
+        return Ok(fail(
+            "the code was already used (codes are one-time)".into(),
+        ));
+    }
 
     let user: Option<(String, String)> =
         sqlx::query_as("SELECT email, display_name FROM users WHERE id = $1")

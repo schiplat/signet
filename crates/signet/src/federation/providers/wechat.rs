@@ -84,12 +84,21 @@ impl UpstreamProvider for WeChat {
             let subject = jstr_map(extra, "unionid")
                 .or_else(|| jstr_map(extra, "openid"))
                 .ok_or_else(|| anyhow!("wechat profile missing unionid/openid"))?;
+            // `raw` is persisted on `user_identities` and on the pending-link
+            // row, so the token material is stripped first: the WeChat
+            // access token is a 30-day-lived credential, and the sign-in flow
+            // never consumes it again after this point. Unlike the other
+            // adapters, WeChat's token response *is* the profile payload,
+            // which is why the credential fields ride along at all.
+            let mut raw = extra.clone();
+            raw.remove("access_token");
+            raw.remove("refresh_token");
             Ok(UpstreamProfile {
                 subject,
                 email: None,
                 email_verified: false,
                 display_name: jstr_map(extra, "nickname"),
-                raw: serde_json::to_value(extra.clone())?,
+                raw: serde_json::to_value(raw)?,
             })
         })
     }

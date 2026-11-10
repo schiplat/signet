@@ -598,6 +598,21 @@ async fn record_user_write(
     if before.scim_disabled == after.scim_disabled {
         return;
     }
+    if after.scim_disabled {
+        // The disable retires what was live under the enabled account. Sessions
+        // used to survive a SCIM disable (only a delete or an admin disable
+        // revoked), so every pre-disable cookie resurrected the moment the IdP
+        // sent `active: true` months later. Refresh tokens delegated to OAuth
+        // clients go with them — for a disabled user they are already dead in
+        // effect (the exchange re-checks status), the revocation is about the
+        // re-enable.
+        if let Err(e) = revoke_all_sessions(&state.pool, after.id).await {
+            tracing::error!(error = %e, user_id = %after.id, "failed to revoke sessions on scim disable");
+        }
+        if let Err(e) = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, after.id).await {
+            tracing::error!(error = %e, user_id = %after.id, "failed to revoke refresh tokens on scim disable");
+        }
+    }
     let action = if after.scim_disabled {
         AUDIT_USER_DISABLED
     } else {
@@ -919,6 +934,13 @@ async fn delete_user(
 
     if changed.is_some() {
         revoke_all_sessions(&state.pool, existing.id).await?;
+        // The delete deactivates, so the OAuth clients' refresh tokens go too —
+        // dead in effect while disabled, and the revocation is what keeps a
+        // later `active: true` from resurrecting them.
+        if let Err(e) = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, existing.id).await
+        {
+            tracing::error!(error = %e, user_id = %existing.id, "failed to revoke refresh tokens on scim delete");
+        }
     }
 
     // Says plainly that the request was a delete and the outcome was a

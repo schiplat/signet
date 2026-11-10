@@ -1,9 +1,9 @@
 use crate::audit::{record, AuditEvent};
 use crate::auth::password::{set_user_password, verify_password_offloaded};
 use crate::auth::session::{
-    clear_session_cookie, cookie_value, current_user, destroy_session, list_sessions,
-    revoke_all_sessions, revoke_other_sessions, revoke_session_by_id, session_id_for_token,
-    SESSION_COOKIE,
+    clear_session_cookie, cookie_value, current_user, current_user_unrestricted, destroy_session,
+    list_sessions, revoke_all_sessions, revoke_other_sessions, revoke_session_by_id,
+    session_id_for_token, SESSION_COOKIE,
 };
 use crate::directory;
 use crate::error::{AppError, AppResult};
@@ -61,11 +61,12 @@ async fn login(
     let email = body.email.trim().to_lowercase();
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
-    // The lockout columns ride along on the same row. They used to be a second
+    // The lockout stamp rides along on the same row. It used to be a second
     // query for the same row, which is one extra round trip on every login — the
-    // busiest write path there is — for two small integers.
+    // busiest write path there is. The failure counter itself is only meaningful
+    // as an atomic increment (below), so it is not read here at all.
     let row = sqlx::query(&format!(
-        "SELECT {USER_COLS}, failed_login_attempts, locked_until \
+        "SELECT {USER_COLS}, locked_until \
          FROM users WHERE email = $1 OR username = $1"
     ))
     .bind(&email)
@@ -73,7 +74,6 @@ async fn login(
     .await?
     .ok_or_else(|| AppError::unauthorized("invalid email/username or password"))?;
     let user = User::from_row(&row)?;
-    let failed_login_attempts: i32 = row.try_get("failed_login_attempts")?;
     let locked_until: Option<DateTime<Utc>> = row.try_get("locked_until")?;
 
     if user.status != "active" {
@@ -166,8 +166,18 @@ async fn login(
             return Err(AppError::unauthorized("invalid email or password"));
         }
 
-        let attempts = failed_login_attempts + 1;
-        if (attempts as i64) >= state.config.max_login_attempts {
+        // One atomic increment decides both the counter and the lockout. The
+        // read-modify-write it replaced computed `read + 1` per request, so N
+        // concurrent guesses all wrote the same small number and the counter
+        // never reached the threshold however many guesses landed.
+        let attempts: i32 = sqlx::query_scalar(
+            "UPDATE users SET failed_login_attempts = failed_login_attempts + 1, \
+             updated_at = NOW() WHERE id = $1 RETURNING failed_login_attempts",
+        )
+        .bind(user.id)
+        .fetch_one(&state.pool)
+        .await?;
+        if attempts as i64 >= state.config.max_login_attempts {
             let until = Utc::now() + Duration::minutes(state.config.lockout_minutes);
             sqlx::query(
                 "UPDATE users SET failed_login_attempts = 0, locked_until = $2, updated_at = NOW() WHERE id = $1",
@@ -180,11 +190,6 @@ async fn login(
                 "too many failed attempts, account locked",
             ));
         }
-        sqlx::query("UPDATE users SET failed_login_attempts = $2 WHERE id = $1")
-            .bind(user.id)
-            .bind(attempts)
-            .execute(&state.pool)
-            .await?;
         return Err(AppError::unauthorized("invalid email or password"));
     }
 
@@ -278,7 +283,10 @@ async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<serde_json::Value>> {
-    let user = current_user(&state, &headers).await?;
+    // Unrestricted on purpose: this is the identity read the UI needs to
+    // render the forced-password-change state and route the user to the one
+    // endpoint (the change below) that can clear it.
+    let user = current_user_unrestricted(&state, &headers).await?;
     Ok(Json(json!({ "user": PublicUser::from(user) })))
 }
 
@@ -608,7 +616,10 @@ async fn change_password(
     headers: HeaderMap,
     Json(body): Json<ChangePasswordBody>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let user = current_user(&state, &headers).await?;
+    // Unrestricted on purpose: this endpoint is what clears a pending
+    // `must_change_password`, so it cannot sit behind the gate it exists to
+    // lift (the current-password check is its own authentication).
+    let user = current_user_unrestricted(&state, &headers).await?;
     if !verify_password_offloaded(&body.current_password, &user.password_hash).await? {
         return Err(AppError::unauthorized("current password is incorrect"));
     }
@@ -621,6 +632,21 @@ async fn change_password(
     )
     .await?;
 
+    // A new password retires the credentials the old one authorized. The
+    // scenario this endpoint exists for is "the old one may be compromised",
+    // so every other session dies — the current one stays, because the user is
+    // using it right now — and the refresh tokens delegated to OAuth clients
+    // die with them: they outlive passwords unless revoked explicitly.
+    let session_id = match cookie_value(&headers, SESSION_COOKIE) {
+        Some(token) => session_id_for_token(&state.pool, &token).await?,
+        None => None,
+    };
+    let revoked_sessions = match session_id {
+        Some(id) => revoke_other_sessions(&state.pool, user.id, id).await?,
+        None => revoke_all_sessions(&state.pool, user.id).await?,
+    };
+    let revoked_tokens = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user.id).await?;
+
     record(
         &state,
         AuditEvent {
@@ -628,7 +654,10 @@ async fn change_password(
             action: "auth.password_change",
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
-            detail: json!({}),
+            detail: json!({
+                "revoked_sessions": revoked_sessions,
+                "revoked_refresh_tokens": revoked_tokens,
+            }),
             ip: None,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,

@@ -27,6 +27,13 @@ pub async fn track(req: Request, next: Next) -> Response {
         .map(|c| c.0);
     let ip = client_ip(req.headers(), peer).unwrap_or_else(|| "-".to_string());
 
+    // Share the resolved IP with the handlers: audit events read it from here
+    // instead of every admin handler taking a `ConnectInfo` extractor.
+    let audit_ip = client_ip(req.headers(), peer);
+    let mut req = req;
+    req.extensions_mut()
+        .insert(crate::http::extract::AuditIp(audit_ip));
+
     let start = Instant::now();
     let resp = next.run(req).await;
     let latency_ms = start.elapsed().as_millis() as u64;
@@ -68,15 +75,33 @@ pub async fn track(req: Request, next: Next) -> Response {
     resp
 }
 
-/// Percent-decodes a raw query string into a readable `k=v&k=v` form.
+/// Percent-decodes a raw query string into a readable `k=v&k=v` form, with
+/// credential-bearing parameters redacted.
+///
+/// Some credentials live in the URL by design — password-reset links carry a
+/// live one-time `token`, and OAuth callbacks carry the `code` (plus, on
+/// misconfigured clients, the PKCE `code_verifier`). The request that redeems
+/// them would otherwise log them verbatim, and log streams travel far beyond
+/// the process that wrote the line.
 fn decode_query(raw: &str) -> String {
     raw.split('&')
         .filter_map(|pair| {
             let (k, v) = pair.split_once('=')?;
             let k = urlencoding::decode(k).ok()?;
             let v = urlencoding::decode(v).ok()?;
-            Some(format!("{k}={v}"))
+            if REDACTED_QUERY_KEYS
+                .iter()
+                .any(|r| k.eq_ignore_ascii_case(r))
+            {
+                Some(format!("{k}=[redacted]"))
+            } else {
+                Some(format!("{k}={v}"))
+            }
         })
         .collect::<Vec<_>>()
         .join("&")
 }
+
+/// Query parameters whose values are one-time credentials; redacted in access
+/// logs. Matched case-insensitively.
+const REDACTED_QUERY_KEYS: &[&str] = &["token", "code", "code_verifier"];

@@ -226,7 +226,31 @@ pub fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     None
 }
 
+/// The session read enforcing the `must_change_password` gate.
+///
+/// A pending forced password change is not a next-login-only policy: the flag
+/// is set because the credential behind this very session is suspected
+/// compromised, so the session must not keep writing (profile, settings, MFA
+/// self-service) or minting authorizations (consent, OAuth grants) while it
+/// waits. Every authenticated endpoint resolves its user through here, so a
+/// new route cannot forget the gate — the few endpoints that must stay
+/// reachable so the user can actually clear the flag call
+/// [`current_user_unrestricted`] instead: reading who they are, the password
+/// change itself, and signing out (which needs no user at all).
 pub async fn current_user(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
+    let user = current_user_unrestricted(state, headers).await?;
+    if user.must_change_password {
+        return Err(AppError::forbidden("password change required"));
+    }
+    Ok(user)
+}
+
+/// The session read without the [`current_user`] gate.
+///
+/// Deliberately narrow: the change-password endpoint (which cannot run under
+/// the gate it exists to clear) and the identity read the UI needs to render
+/// that page. Anything else should use the gated [`current_user`].
+pub async fn current_user_unrestricted(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
     let token = cookie_value(headers, SESSION_COOKIE)
         .ok_or_else(|| AppError::unauthorized("not authenticated"))?;
     user_from_session_token(&state.pool, &token)

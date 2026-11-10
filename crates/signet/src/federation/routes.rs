@@ -75,6 +75,15 @@ pub fn router() -> Router<AppState> {
             "/auth/sso/identities/{provider_code}",
             axum::routing::delete(unlink_identity),
         )
+        // A stashed pending identity is bound only on the user's explicit
+        // confirm — never automatically at the end of the next login, which
+        // would make the bind follow the browser instead of the person.
+        .route(
+            "/auth/sso/pending",
+            axum::routing::get(pending_identity)
+                .post(confirm_pending)
+                .delete(discard_pending),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +143,38 @@ async fn list_my_identities(
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(json!({ "identities": rows })))
+}
+
+/// What the dashboard banner shows after a sign-in that stashed a pending
+/// identity. 200 with `pending: null` when there is nothing — the SPA polls
+/// this after every sign-in, so absence is the normal case, not an error.
+async fn pending_identity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Json<serde_json::Value> {
+    let pending = crate::federation::peek_pending_link(&state, &headers).await;
+    Json(json!({ "pending": pending }))
+}
+
+/// The user's explicit yes: bind the stashed identity to the session's user.
+async fn confirm_pending(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    jar: CookieJar,
+) -> AppResult<(CookieJar, Json<serde_json::Value>)> {
+    let user = current_user(&state, &headers).await?;
+    let (body, jar) = crate::federation::confirm_pending_link(&state, jar, &user).await?;
+    Ok((jar, Json(body)))
+}
+
+/// The user's no: drop the stashed identity. Session-less on purpose — a
+/// shared machine is where "no" has to be easy.
+async fn discard_pending(
+    State(state): State<AppState>,
+    jar: CookieJar,
+) -> (CookieJar, Json<serde_json::Value>) {
+    let jar = crate::federation::discard_pending_link(&state, jar).await;
+    (jar, Json(json!({ "ok": true })))
 }
 
 async fn unlink_identity(

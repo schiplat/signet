@@ -29,12 +29,35 @@ pub fn otpauth_uri(secret_b32: &str, issuer: &str, account: &str) -> AppResult<S
 }
 
 pub fn verify_totp_code(secret_b32: &str, code: &str) -> AppResult<bool> {
+    Ok(verify_totp_code_step(secret_b32, code)?.is_some())
+}
+
+/// Verifies `code` and returns the timestep that matched, if any.
+///
+/// The step — not just a boolean — is what replay protection needs: a code is
+/// single-use per timestep, so the login path records the accepted step and
+/// refuses everything at or below it later. The window is the same ±1 step
+/// `check_current` uses (skew 1), evaluated step by step so the *matching*
+/// step is known rather than merely that some step matched.
+pub fn verify_totp_code_step(secret_b32: &str, code: &str) -> AppResult<Option<u64>> {
     let code = code.trim().replace(' ', "");
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(false);
+        return Ok(None);
     }
     let totp = build_totp(secret_b32, "Signet", "verify")?;
-    Ok(totp.check_current(&code).unwrap_or(false))
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let current = now / 30;
+    for step in [current.saturating_sub(1), current, current + 1] {
+        // totp-rs takes the step number itself (seconds since the epoch are
+        // divided by the 30-second step internally by the caller, us).
+        if totp.generate(step) == code {
+            return Ok(Some(step));
+        }
+    }
+    Ok(None)
 }
 
 /// Generate recovery codes like `ABCD-EFGH`.

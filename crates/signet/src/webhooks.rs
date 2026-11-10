@@ -1,9 +1,10 @@
 use crate::audit::AuditEvent;
 use crate::crypto::util::{hmac_sha256_b64, hmac_sha256_hex};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -70,10 +71,12 @@ fn normalize_kind(kind: Option<String>) -> AppResult<String> {
 async fn create_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<CreateWebhookBody>,
 ) -> AppResult<Json<Webhook>> {
     let actor = crate::auth::current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     let url = body.url.trim().to_string();
     // Admin-supplied destination: must be http(s) and publicly routable, or the
@@ -110,7 +113,7 @@ async fn create_webhook(
             resource_type: "webhook",
             resource_id: Some(row.id.to_string()),
             detail: json!({ "url": row.url, "kind": row.kind }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -123,10 +126,12 @@ async fn create_webhook(
 async fn delete_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let actor = crate::auth::current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     sqlx::query("DELETE FROM webhooks WHERE id = $1")
         .bind(id)
@@ -141,7 +146,7 @@ async fn delete_webhook(
             resource_type: "webhook",
             resource_id: Some(id.to_string()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

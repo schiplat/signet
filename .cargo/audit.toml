@@ -1,0 +1,28 @@
+# cargo-audit policy. Every entry here is a decision, not an oversight: each
+# carries the reason it cannot be resolved today and the condition that ends
+# the exemption. Re-evaluate on any dependency refresh.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 (Marvin Attack, timing side channel on RSA decryption).
+    # signet uses the `rsa` crate only to parse private-key structures and to
+    # export public-key components for the JWKS endpoint (crypto/keys.rs):
+    # no RSA decryption or encryption is ever performed here, and the padding-
+    # oracle timing the attack depends on does not exist in that usage. Token
+    # signing and verification are done by ring. There is no fixed release to
+    # upgrade to (the crate has not published a patched version), so this is
+    # the upstream-unresolved case the advisory itself describes.
+    # Ends when `rsa` publishes a patched release.
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2026-0459 (CVE-2026-119375, bundled C SQLite). libsqlite3-sys is
+    # in the lockfile only as sqlx's optional `sqlite` backend; no sqlite
+    # feature is enabled anywhere in this workspace and the code never touches
+    # it (the database is PostgreSQL via sqlx-postgres). sqlx 0.8.6 pins
+    # `sqlx-sqlite =0.8.6`, which fixes the libsqlite3-sys range below 0.39,
+    # so resolving this needs a sqlx major upgrade — tracked, not a lockfile
+    # bump. Ends when the workspace upgrades to a sqlx release that allows
+    # libsqlite3-sys >= 0.39, or when sqlx's sqlite backend stops being pulled
+    # into the lockfile.
+    "RUSTSEC-2026-0459",
+]

@@ -11,9 +11,10 @@ use crate::directory::mapping;
 use crate::directory::model;
 use crate::directory::source::{self, SourceView, SOURCE_VIEW_COLS};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -114,9 +115,11 @@ async fn list_sources(
 async fn create_source(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<CreateSourceBody>,
 ) -> AppResult<Json<SourceView>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let code = body.code.trim().to_string();
     source::validate_payload(
         &code,
@@ -174,6 +177,7 @@ async fn create_source(
         "directory.source.created",
         &view.code,
         json!({ "kind": view.kind, "priority": view.priority }),
+        ip,
     )
     .await;
     Ok(Json(view))
@@ -182,10 +186,12 @@ async fn create_source(
 async fn update_source(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
     Json(body): Json<UpdateSourceBody>,
 ) -> AppResult<Json<SourceView>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let existing = source::get_by_code(&state.pool, &code).await?;
     if existing.kind != body.kind {
         // Changing the kind would reinterpret `config` and orphan every existing
@@ -265,6 +271,7 @@ async fn update_source(
             "enabled": view.enabled,
             "credential_rotated": body.credential.is_some(),
         }),
+        ip,
     )
     .await;
     Ok(Json(view))
@@ -273,9 +280,11 @@ async fn update_source(
 async fn delete_source(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
 ) -> AppResult<Json<Value>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let row = source::get_by_code(&state.pool, &code).await?;
 
     // Deleting a source cascades to its links, which would silently turn its
@@ -321,6 +330,7 @@ async fn delete_source(
         "directory.source.deleted",
         &code,
         json!({ "kind": row.kind }),
+        ip,
     )
     .await;
     Ok(Json(json!({ "ok": true })))
@@ -329,10 +339,12 @@ async fn delete_source(
 async fn set_enabled(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(code): Path<String>,
     Json(body): Json<EnabledBody>,
 ) -> AppResult<Json<SourceView>> {
     let actor = require_admin(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let view = sqlx::query_as::<_, SourceView>(&format!(
         "UPDATE directory_sources SET enabled = $2, updated_at = NOW() \
          WHERE code = $1 RETURNING {SOURCE_VIEW_COLS}"
@@ -369,6 +381,7 @@ async fn set_enabled(
         },
         &view.code,
         json!({}),
+        ip,
     )
     .await;
     Ok(Json(view))
@@ -442,6 +455,7 @@ async fn audit(
     action: &'static str,
     code: &str,
     detail: Value,
+    ip: Option<String>,
 ) {
     crate::audit::record(
         state,
@@ -451,7 +465,7 @@ async fn audit(
             resource_type: "directory_source",
             resource_id: Some(code.to_string()),
             detail,
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(headers),
             client_id: None,
         },

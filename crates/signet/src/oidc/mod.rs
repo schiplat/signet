@@ -21,8 +21,11 @@ pub(crate) fn scope_contains(scope: &str, wanted: &str) -> bool {
 
 /// Revoking a refresh family on reuse detection is the one token behavior tests
 /// pin directly (the family SQL outlives the handler plumbing around it), so it
-/// is re-exported past the private `token` module.
+/// is re-exported past the private `token` module. Its credential-event
+/// sibling rides along for the same reason: the password paths in `auth` and
+/// `admin` revoke it without importing the token plumbing.
 pub use token::revoke_refresh_family;
+pub use token::revoke_refresh_tokens_for_user;
 
 /// De-duplicates a space-separated scope list, preserving first-seen order.
 /// OIDC scopes form a set, so duplicates (e.g. a client that sends

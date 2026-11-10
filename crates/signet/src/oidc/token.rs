@@ -201,10 +201,21 @@ async fn issue_from_code(
         return Err(AppError::bad_request("invalid code_verifier"));
     }
 
-    sqlx::query("UPDATE auth_codes SET consumed_at = NOW() WHERE id = $1")
-        .bind(row.id)
-        .execute(&state.pool)
-        .await?;
+    // Consume atomically. The SELECT above cannot tell two concurrent
+    // exchanges apart, so this conditional UPDATE is the one-time-use claim:
+    // whoever's UPDATE finds the row already consumed loses, and RFC 6749
+    // §4.1.2 makes single use the mitigation for code interception — a lost
+    // race must not mint a second token set.
+    let consumed = sqlx::query(
+        "UPDATE auth_codes SET consumed_at = NOW() WHERE id = $1 AND consumed_at IS NULL",
+    )
+    .bind(row.id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+    if consumed == 0 {
+        return Err(AppError::bad_request("code already used"));
+    }
 
     let user = active_user_by_id(&state.pool, row.user_id).await?;
     // A code exchange starts a fresh family; rotation keeps the parent's.
@@ -218,6 +229,25 @@ pub async fn revoke_refresh_family(pool: &sqlx::PgPool, family: Uuid) -> AppResu
          WHERE COALESCE(family_id, id) = $1 AND revoked_at IS NULL",
     )
     .bind(family)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// Revokes every still-live refresh token issued to `user_id`, across clients.
+///
+/// The credential-event sibling of [`revoke_refresh_family`]: a password
+/// change or reset must retire the delegated credentials too, or a client —
+/// or whoever extracted its refresh token — keeps minting access tokens
+/// straight through the account's recovery. Callers are the password events
+/// (self change, admin reset, emailed reset, forced change); plain session
+/// events do not belong here.
+pub async fn revoke_refresh_tokens_for_user(pool: &sqlx::PgPool, user_id: Uuid) -> AppResult<u64> {
+    let res = sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = NOW() \
+         WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
     .execute(pool)
     .await?;
     Ok(res.rows_affected())
@@ -255,24 +285,7 @@ async fn issue_from_refresh(
         // BCP) is to kill the whole family, so the thief's newer token dies
         // with the legitimate client's. A client that merely lost its refresh
         // response re-authenticates; a leak would have forced that anyway.
-        let family = row.family_id.unwrap_or(row.id);
-        let revoked = revoke_refresh_family(&state.pool, family).await?;
-        tracing::warn!(client_id = %client.client_id, revoked, "refresh token reuse detected; family revoked");
-        record(
-            state,
-            AuditEvent {
-                actor: None,
-                action: "oauth.refresh_reuse",
-                resource_type: "user",
-                resource_id: Some(row.user_id.to_string()),
-                detail: json!({ "client_id": client.client_id, "revoked": revoked }),
-                ip,
-                user_agent,
-                client_id: Some(client.client_id.clone()),
-            },
-        )
-        .await;
-        return Err(AppError::bad_request("refresh_token expired or revoked"));
+        return Err(revoke_family_on_reuse(state, client, &row, ip, user_agent, "replayed").await);
     }
     if row.expires_at < Utc::now() {
         return Err(AppError::bad_request("refresh_token expired or revoked"));
@@ -281,14 +294,68 @@ async fn issue_from_refresh(
         return Err(AppError::bad_request("client mismatch"));
     }
 
-    // rotate
-    sqlx::query("UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1")
-        .bind(row.id)
-        .execute(&state.pool)
-        .await?;
+    // rotate — atomically. The SELECT above cannot tell two concurrent
+    // refreshes apart, so the conditional revocation is the rotation claim:
+    // a request whose UPDATE finds the row already revoked lost the race and
+    // goes through the same family-kill as a replay, which is exactly the
+    // BCP's answer to two holders of one token.
+    let rotated = sqlx::query(
+        "UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1 AND revoked_at IS NULL",
+    )
+    .bind(row.id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+    if rotated == 0 {
+        return Err(
+            revoke_family_on_reuse(state, client, &row, ip, user_agent, "concurrent").await,
+        );
+    }
 
     let user = active_user_by_id(&state.pool, row.user_id).await?;
     build_token_response(state, client, &user, &row.scope, None, row.family_id).await
+}
+
+/// The shared response to presenting — or losing the atomic rotation race on —
+/// an already-revoked refresh token: kill the whole family, so whichever
+/// request is not the legitimate client's walks away with nothing live, and
+/// leave the audit trail an operator needs to tell the two apart.
+async fn revoke_family_on_reuse(
+    state: &AppState,
+    client: &ClientApp,
+    row: &RefreshRow,
+    ip: Option<String>,
+    user_agent: Option<String>,
+    reason: &'static str,
+) -> AppError {
+    let family = row.family_id.unwrap_or(row.id);
+    let revoked = match revoke_refresh_family(&state.pool, family).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::error!(error = %e, %family, "failed to revoke refresh token family");
+            0
+        }
+    };
+    tracing::warn!(client_id = %client.client_id, revoked, reason, "refresh token reuse detected; family revoked");
+    record(
+        state,
+        AuditEvent {
+            actor: None,
+            action: "oauth.refresh_reuse",
+            resource_type: "user",
+            resource_id: Some(row.user_id.to_string()),
+            detail: json!({
+                "client_id": client.client_id,
+                "revoked": revoked,
+                "reason": reason,
+            }),
+            ip,
+            user_agent,
+            client_id: Some(client.client_id.clone()),
+        },
+    )
+    .await;
+    AppError::bad_request("refresh_token expired or revoked")
 }
 
 async fn build_token_response(

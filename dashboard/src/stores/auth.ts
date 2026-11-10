@@ -6,7 +6,11 @@ import {
   me,
   fetchSetupStatus,
   setupAdmin,
+  fetchPendingSso,
+  confirmPendingSso as apiConfirmPendingSso,
+  discardPendingSso as apiDiscardPendingSso,
   type LoginResult,
+  type PendingSsoIdentity,
   type PublicUser,
   type UserRole,
 } from "@/lib/api";
@@ -15,6 +19,8 @@ export const useAuthStore = defineStore("auth", () => {
   const user = ref<PublicUser | null>(null);
   const loaded = ref(false);
   const needsSetup = ref<boolean | null>(null);
+  /** A stashed SSO identity awaiting the user's explicit confirm/discard. */
+  const pendingSso = ref<PendingSsoIdentity | null>(null);
 
   const isAuthenticated = computed(() => !!user.value);
   const role = computed<UserRole>(() => user.value?.role ?? "member");
@@ -35,10 +41,39 @@ export const useAuthStore = defineStore("auth", () => {
     try {
       const res = await me();
       user.value = res.user;
+      void refreshPendingSso();
     } catch {
       user.value = null;
+      pendingSso.value = null;
     } finally {
       loaded.value = true;
+    }
+  }
+
+  /** A pending SSO bind must be a decision, not an automatic side effect:
+   *  the stash survives sign-in, and the shell banner asks the user. */
+  async function refreshPendingSso() {
+    if (!user.value) {
+      pendingSso.value = null;
+      return;
+    }
+    try {
+      pendingSso.value = (await fetchPendingSso()).pending;
+    } catch {
+      pendingSso.value = null;
+    }
+  }
+
+  async function confirmPendingSso() {
+    await apiConfirmPendingSso();
+    pendingSso.value = null;
+  }
+
+  async function discardPendingSso() {
+    try {
+      await apiDiscardPendingSso();
+    } finally {
+      pendingSso.value = null;
     }
   }
 
@@ -47,6 +82,7 @@ export const useAuthStore = defineStore("auth", () => {
     if (res.status === "ok") {
       user.value = res.user;
       loaded.value = true;
+      void refreshPendingSso();
     }
     return res;
   }
@@ -54,6 +90,7 @@ export const useAuthStore = defineStore("auth", () => {
   function completeLogin(u: PublicUser) {
     user.value = u;
     loaded.value = true;
+    void refreshPendingSso();
   }
 
   async function logout() {
@@ -61,6 +98,7 @@ export const useAuthStore = defineStore("auth", () => {
       await apiLogout();
     } finally {
       user.value = null;
+      pendingSso.value = null;
     }
   }
 
@@ -97,6 +135,7 @@ export const useAuthStore = defineStore("auth", () => {
     user,
     loaded,
     needsSetup,
+    pendingSso,
     isAuthenticated,
     role,
     isAdmin,
@@ -110,6 +149,9 @@ export const useAuthStore = defineStore("auth", () => {
     canManageSettings,
     displayName,
     fetchMe,
+    refreshPendingSso,
+    confirmPendingSso,
+    discardPendingSso,
     login,
     completeLogin,
     logout,

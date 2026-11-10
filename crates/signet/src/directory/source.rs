@@ -362,10 +362,14 @@ pub enum Pagination {
     #[default]
     None,
     /// `?{param}={start..}` (plus `&{size_param}={size}` when configured).
-    /// Stops at `max_pages`, or earlier when the response has no more entries —
-    /// but *not* on a short page, since a full page whose length happens to
-    /// divide evenly is indistinguishable from the last one, and one wasted
-    /// request is cheaper than a truncated directory.
+    /// A short page mid-walk does not end the walk: a non-conformant upstream
+    /// may return short pages with real pages behind them, and stopping there
+    /// would truncate the listing silently. At the `max_pages` bound a short
+    /// page *is* the end signal; a *full* page there is ambiguous — a total
+    /// that divides evenly looks identical to a truncated one — so the
+    /// connector probes one page past the bound: empty means the bound covered
+    /// the whole listing, anything else fails the run rather than reconcile
+    /// against a truncated directory.
     Page {
         param: String,
         #[serde(default = "default_page_start")]
@@ -485,6 +489,21 @@ impl HttpJsonConfig {
             if username.trim().is_empty() {
                 return Err("auth.username must not be empty for basic auth".into());
             }
+        }
+        // A credential over plaintext HTTP is a wire-readable secret. LDAP is
+        // pinned to `ldaps://` (D4); this is the HTTP counterpart. An endpoint
+        // reachable by network policy alone may stay `http` — but the moment
+        // the config names an Authorization scheme, the transport has to
+        // protect it. Checked at parse time too, so an existing source becomes
+        // a loud sync failure rather than a silent bearer-token broadcast.
+        if self.auth.requires_credential()
+            && !self.url.trim().to_lowercase().starts_with("https://")
+        {
+            return Err(
+                "url must use https:// when auth is configured — the credential would \
+                 travel in plaintext over http"
+                    .into(),
+            );
         }
         validate_scope(
             &self.email_domains,

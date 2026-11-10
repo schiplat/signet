@@ -13,9 +13,12 @@
 //!   per request — DNS rebinding means the check made when the source was saved
 //!   is worthless at fetch time — redirects are disabled, and the body is read
 //!   under a size cap.
-//! * **Every path is bounded.** Pagination stops at `max_pages`, and a path that
-//!   resolves to the wrong JSON type is an error naming the path, not a silent
-//!   empty result that would look like an empty directory and disable everyone.
+//! * **Every path is bounded.** Pagination stops at `max_pages` — and *loudly*:
+//!   a walk that reached the bound with evidence of more pages is an error, not
+//!   a truncated listing that would look like those users left the directory
+//!   and disable them. A path that resolves to the wrong JSON type is likewise
+//!   an error naming the path, not a silent empty result that would look like
+//!   an empty directory and disable everyone.
 
 use crate::directory::plan::UpstreamUser;
 use crate::directory::source::{HttpAuth, HttpJsonConfig, Pagination};
@@ -45,7 +48,8 @@ pub async fn fetch_users(
         let body = get_json(&url, cfg, credential, allow_private).await?;
         pages += 1;
 
-        for entry in entries_at(&body, &cfg.users_path)? {
+        let entries = entries_at(&body, &cfg.users_path)?;
+        for entry in entries {
             // A single malformed entry is skipped rather than failing the run:
             // an upstream that adds one odd record should not stop 100k users
             // from syncing. An entry with no email is still reported, as a
@@ -58,8 +62,11 @@ pub async fn fetch_users(
             }
         }
 
-        // Paging advance. All three arms fall through to `break` when there is
-        // nothing left to fetch or the configured bound is reached.
+        // Paging advance. Every arm ends the walk only once the listing is
+        // known (or verified) to be complete: stopping on the `max_pages` bound
+        // alone would hand the planner a truncated directory, and the absent
+        // pass would then disable the users the walk never fetched — the same
+        // failure shape as a bad mapping, just quieter.
         match &cfg.pagination {
             Pagination::None => break,
             Pagination::Cursor {
@@ -68,20 +75,70 @@ pub async fn fetch_users(
                 ..
             } => {
                 cursor = string_at(&body, next_path).filter(|s| !s.trim().is_empty());
-                if cursor.is_none() || pages >= *max_pages {
+                if cursor.is_none() {
                     break;
+                }
+                // The upstream named a next page and the bound says not to fetch
+                // it: that is truncation by definition, so fail the run rather
+                // than reconcile against a partial listing.
+                if pages >= *max_pages {
+                    return Err(truncated_at_max_pages(*max_pages));
                 }
             }
-            Pagination::Page { max_pages, .. } => {
-                if pages >= *max_pages {
+            Pagination::Page {
+                max_pages, size, ..
+            } => {
+                if pages < *max_pages {
+                    page_number = page_number.saturating_add(1);
+                    continue;
+                }
+                // Bound reached. A short page is the end of the listing — the
+                // one end signal a page-number API gives. A *full* page is
+                // ambiguous (a total that divides evenly looks identical to a
+                // truncated one), so probe one page past the bound: the wasted
+                // request is cheaper than a mass disable.
+                if entries.len() < *size as usize {
                     break;
                 }
-                page_number += 1;
+                let probe_url = page_url(cfg, &None, page_number.saturating_add(1))?;
+                match get_json(&probe_url, cfg, credential, allow_private).await {
+                    Ok(probe_body) => {
+                        let probe = entries_at(&probe_body, &cfg.users_path)?;
+                        if probe.iter().any(|entry| to_upstream(cfg, entry).is_some()) {
+                            return Err(truncated_at_max_pages(*max_pages));
+                        }
+                        // Verified empty: the bound covered the whole listing.
+                    }
+                    // The next page could not be read, so completeness cannot
+                    // be verified either way — refuse rather than guess.
+                    Err(e) => {
+                        return Err(AppError::upstream(format!(
+                            "http_json source stopped at pagination.max_pages ({max_pages}) \
+                             on a full page and the next page could not be read ({e}); \
+                             raise max_pages and re-run"
+                        )));
+                    }
+                }
+                break;
             }
         }
     }
 
     Ok(out)
+}
+
+/// The error for a walk that reached `max_pages` with more pages known to exist.
+///
+/// Reconciliation is what makes truncation destructive rather than merely
+/// incomplete: the absent-upstream pass treats "not fetched" as "left the
+/// directory" and disables those users (D3). Failing the run names the knob
+/// that fixes it instead of letting that pass run.
+fn truncated_at_max_pages(max_pages: u32) -> AppError {
+    AppError::upstream(format!(
+        "http_json source has more than pagination.max_pages ({max_pages}) pages; \
+         raise max_pages so the run reads the whole directory — reconciling a \
+         truncated listing would disable the users it did not fetch"
+    ))
 }
 
 /// Builds the URL for one page, adding the paging parameter the config asks for.

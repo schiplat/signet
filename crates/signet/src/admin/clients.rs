@@ -2,9 +2,10 @@ use crate::admin::{require_admin_user, require_staff_user};
 use crate::audit::{record, AuditEvent};
 use crate::crypto::util::random_token;
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::http::source_ip::normalize_cidrs;
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -96,9 +97,11 @@ async fn list_clients(
 async fn create_client(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<CreateClientBody>,
 ) -> AppResult<Json<ClientCreated>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     let client_id = normalize_client_id(&body.client_id)?;
     let redirect_uris = normalize_uris(&body.redirect_uris)?;
@@ -181,7 +184,7 @@ async fn create_client(
                 "ip_allowlist_enabled": client.ip_allowlist_enabled,
                 "allowed_cidrs": client.allowed_cidrs,
             }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -197,10 +200,12 @@ async fn create_client(
 async fn update_client(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateClientBody>,
 ) -> AppResult<Json<AdminClient>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let existing = load_admin_client(&state, id).await?;
 
     let redirect_uris = if let Some(u) = body.redirect_uris {
@@ -279,11 +284,19 @@ async fn update_client(
             action: "client.update",
             resource_type: "client",
             resource_id: Some(client.client_id.clone()),
+            // On an IdP, the redirect URIs are the takeover surface: an update
+            // that points a client at an attacker-controlled callback is the
+            // step before every code-interception scheme, so the change is
+            // recorded as before → after, not just the resulting state.
             detail: json!({
+                "redirect_uris": { "before": existing.redirect_uris, "after": client.redirect_uris },
+                "post_logout_redirect_uris": { "before": existing.post_logout_redirect_uris, "after": client.post_logout_redirect_uris },
+                "scopes": { "before": existing.scopes, "after": client.scopes },
+                "pkce_required": { "before": existing.pkce_required, "after": client.pkce_required },
                 "ip_allowlist_enabled": client.ip_allowlist_enabled,
                 "allowed_cidrs": client.allowed_cidrs,
             }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -296,9 +309,11 @@ async fn update_client(
 async fn delete_client(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let existing = load_admin_client(&state, id).await?;
 
     sqlx::query("DELETE FROM client_apps WHERE id = $1")
@@ -314,7 +329,7 @@ async fn delete_client(
             resource_type: "client",
             resource_id: Some(existing.client_id),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -327,9 +342,11 @@ async fn delete_client(
 async fn disable_client(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<AdminClient>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let client = set_enabled(&state, id, false).await?;
     record(
         &state,
@@ -339,7 +356,7 @@ async fn disable_client(
             resource_type: "client",
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -351,9 +368,11 @@ async fn disable_client(
 async fn enable_client(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<AdminClient>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let client = set_enabled(&state, id, true).await?;
     record(
         &state,
@@ -363,7 +382,7 @@ async fn enable_client(
             resource_type: "client",
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -375,9 +394,11 @@ async fn enable_client(
 async fn rotate_secret(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<ClientCreated>> {
     let actor = require_staff_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let plaintext = random_token(32);
     let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &plaintext);
 
@@ -403,7 +424,7 @@ async fn rotate_secret(
             resource_type: "client",
             resource_id: Some(client.client_id.clone()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -420,8 +441,10 @@ async fn rotate_secret(
 async fn create_registration_token(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let plaintext = random_token(32);
     let token_hash = crate::crypto::util::sha256_hex(&plaintext);
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
@@ -447,7 +470,7 @@ async fn create_registration_token(
             resource_type: "client",
             resource_id: None,
             detail: json!({ "expires_at": expires_at.to_rfc3339() }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
