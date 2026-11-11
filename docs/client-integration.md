@@ -255,11 +255,14 @@ Authorization: Bearer {access_token}
 2. 需要**全局统一登出**时，走 **RP-Initiated Logout**（OIDC RP-Initiated Logout 1.0）：
 
 ```http
-GET {issuer}/oauth/end_session?client_id=cella&post_logout_redirect_uri={uri}&state=...
+GET  {issuer}/oauth/end_session?id_token_hint={id_token}&post_logout_redirect_uri={uri}&state=...
+POST {issuer}/oauth/end_session            （表单：client_id/post_logout_redirect_uri/state）
 ```
 
+- **GET 必须带 `id_token_hint`**（登录时签发的 id_token）：顶层 GET 导航会带上 Lax 会话 cookie，没有签名的 hint 就无法区分"用户自己点的登出"和"攻击者页面上的链接"。hint 会验签、验 `iss`/`exp`，其 `sub` 必须与当前会话一致；`client_id` 可省略，省略时取 hint 的 `aud`
+- **POST 不需要 hint**：跨站表单 POST 带不上 Lax cookie，CSRF 面已经关闭。前端如果拿不到 id_token，用自动提交的表单即可
 - Signet 清除 `signet_session` 会话
-- 仅当 `post_logout_redirect_uri` 登记在该客户端的 `post_logout_redirect_uris` 白名单内才回跳，可带 `state`
+- 仅当 `post_logout_redirect_uri` 登记在该客户端的 `post_logout_redirect_uris` 白名单内才回跳，可带 `state`；请求里的 `client_id` 与 hint 的 `aud` 都出现时必须一致
 - 用户也可在 Signet 账户菜单「Active sessions」自行撤销单设备会话
 
 ### 8.2 完整链路

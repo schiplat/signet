@@ -40,6 +40,14 @@ SIGNET_COOKIE_SECURE=true
 # No env vars required: the dashboard redirects to /setup on first boot (when
 # no admin exists) to create the first administrator.
 
+# ── Outbound email (password reset, new-device alerts) ──
+# Without SMTP the reset endpoint refuses with 503 instead of pretending.
+# SIGNET_EMAIL_FROM=${vars.SIGNET_EMAIL_FROM:-signet@localhost}
+# SIGNET_SMTP_HOST=${vars.SIGNET_SMTP_HOST}
+# SIGNET_SMTP_PORT=${vars.SIGNET_SMTP_PORT:-587}
+# SIGNET_SMTP_USERNAME=${secrets.SIGNET_SMTP_USERNAME}
+# SIGNET_SMTP_PASSWORD=${secrets.SIGNET_SMTP_PASSWORD}
+
 # ── WebAuthn (override for production) ──
 # RP_ID must be a domain suffix of RP_ORIGIN, and production requires HTTPS.
 SIGNET_WEBAUTHN_RP_ID=${vars.SIGNET_WEBAUTHN_RP_ID}

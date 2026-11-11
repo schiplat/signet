@@ -160,6 +160,54 @@ pub async fn ensure_allowed(raw: &str, allow_private: bool) -> AppResult<Url> {
     Ok(url)
 }
 
+/// A client bound to the addresses that were validated, for requests that
+/// carry credentials.
+///
+/// [`ensure_allowed`] resolves the host and then hands the URL to `reqwest`,
+/// which resolves it *again* at connect time — a DNS name with a short TTL can
+/// answer "public" to the check and "127.0.0.1" to the connection (the classic
+/// rebinding race). This variant resolves once, validates every address, and
+/// pins them with `Client::resolve`, so the request can only reach an address
+/// the policy saw. A new client is built per call: the pinned set belongs to
+/// this request, and caching it would re-create the staleness problem.
+pub async fn pinned_client(raw: &str, allow_private: bool) -> AppResult<(reqwest::Client, Url)> {
+    let url = validate_shape(raw, allow_private)?;
+    // Literal addresses were checked by `validate_shape`; the operator opted
+    // out of the private-address policy; nothing to pin either way.
+    if allow_private || matches!(url.host(), Some(Host::Ipv4(_) | Host::Ipv6(_))) {
+        return Ok((client().clone(), url));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| AppError::bad_request("url is missing a host"))?
+        .to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+        .await
+        .map_err(|e| AppError::bad_request(format!("url host did not resolve: {e}")))?
+        .collect();
+    if resolved.is_empty() {
+        return Err(AppError::bad_request("url host did not resolve"));
+    }
+    if resolved.iter().any(|addr| !is_public_ip(addr.ip())) {
+        return Err(AppError::bad_request(
+            "url host resolves to a non-public address",
+        ));
+    }
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent("signet");
+    for addr in &resolved {
+        builder = builder.resolve(&host, *addr);
+    }
+    let pinned = builder
+        .build()
+        .map_err(|e| AppError::Anyhow(anyhow::anyhow!("build pinned HTTP client: {e}")))?;
+    Ok((pinned, url))
+}
+
 static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 
 /// Shared outbound client: bounded timeouts, an identifying user agent, and

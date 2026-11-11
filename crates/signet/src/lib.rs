@@ -72,6 +72,26 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     // which silently re-grew past the configured window between restarts.
     maintenance::spawn(state.clone());
 
+    // Metrics get their own listener. They used to be an unauthenticated route
+    // on the public API: token-issuance, login-failure and lockout counters are
+    // reconnaissance, and a scrape endpoint has no business being reachable by
+    // every client that can reach the IdP. The default binds loopback; a
+    // scraper on another host sets SIGNET_METRICS_BIND explicitly (or scrapes
+    // through a proxy that is allowed to reach it). `SIGNET_METRICS_BIND=off`
+    // disables the listener.
+    if let Some(bind) = state.config.metrics_bind {
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .with_context(|| format!("bind metrics listener on {bind}"))?;
+        tracing::info!(%bind, "metrics listening (health + metrics only)");
+        let metrics_app = metrics::router(state.clone());
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, metrics_app).await {
+                tracing::error!(error = %e, "metrics listener stopped");
+            }
+        });
+    }
+
     let api_v1 = Router::new()
         .merge(auth::router())
         .merge(mfa::router())
@@ -88,8 +108,9 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(setup::router());
 
     let api = Router::new()
+        // `/health` stays on the main listener: the container healthcheck and
+        // any load balancer need it, and it exposes only database liveness.
         .route("/health", get(metrics::health))
-        .route("/metrics", get(metrics::metrics))
         .nest(API_PREFIX, api_v1)
         .merge(scim::router())
         .merge(oidc::router())
@@ -100,6 +121,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         ))
         .layer(axum::middleware::from_fn(metrics::track))
         .layer(axum::middleware::from_fn(http::access_log::track))
+        .layer(axum::middleware::from_fn(http::headers::security))
         .layer(axum::middleware::from_fn(http::request_id::track))
         .with_state(state);
 

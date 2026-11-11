@@ -36,6 +36,10 @@ pub struct Config {
     pub email_from: String,
     pub smtp_host: Option<String>,
     pub smtp_port: u16,
+    /// SMTP AUTH credentials. Optional: a relay that trusts this host by
+    /// network policy needs none (`SIGNET_SMTP_USERNAME`/`SIGNET_SMTP_PASSWORD`).
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
     pub public_base_url: Option<String>,
     pub scim_bearer_token: Option<String>,
     pub webauthn_rp_id: String,
@@ -48,6 +52,12 @@ pub struct Config {
     /// `app_settings.auth.allowed_email_domains` is absent. Empty means no
     /// restriction; see [`crate::admission`].
     pub allowed_email_domains: Vec<String>,
+    /// Where the metrics listener binds (`SIGNET_METRICS_BIND`).
+    ///
+    /// Defaults to loopback: the counters are reconnaissance for anyone who can
+    /// reach them. Set it to `0.0.0.0:9464` (or an internal interface) when the
+    /// scraper runs on another host, or to `off` to disable the listener.
+    pub metrics_bind: Option<SocketAddr>,
     /// Reverse proxies allowed to assert the client IP via `X-Forwarded-For`.
     /// Empty (the default) trusts nobody: header-derived IPs are ignored and
     /// the peer address is used, so a spoofed header cannot dodge client IP
@@ -175,6 +185,8 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(587),
+            smtp_username: env::var("SIGNET_SMTP_USERNAME").ok(),
+            smtp_password: env::var("SIGNET_SMTP_PASSWORD").ok(),
             public_base_url: env::var("SIGNET_PUBLIC_BASE_URL").ok(),
             scim_bearer_token: env::var("SIGNET_SCIM_BEARER_TOKEN").ok(),
             webauthn_rp_id: env::var("SIGNET_WEBAUTHN_RP_ID")
@@ -199,6 +211,22 @@ impl Config {
                     crate::admission::validate_domains(&entries, "SIGNET_ALLOWED_EMAIL_DOMAINS")
                         .map_err(|e| anyhow::anyhow!(e))?
                 }
+            },
+            metrics_bind: match env::var("SIGNET_METRICS_BIND") {
+                Ok(raw)
+                    if matches!(
+                        raw.trim().to_ascii_lowercase().as_str(),
+                        "" | "off" | "none" | "false"
+                    ) =>
+                {
+                    None
+                }
+                Ok(raw) => Some(
+                    raw.trim()
+                        .parse()
+                        .context("invalid SIGNET_METRICS_BIND (expected host:port or off)")?,
+                ),
+                Err(_) => Some("127.0.0.1:9464".parse().expect("static metrics address")),
             },
             trusted_proxies,
             dev_log_links: env::var("SIGNET_DEV_LOG_LINKS")

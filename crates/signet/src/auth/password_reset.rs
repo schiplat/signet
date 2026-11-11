@@ -29,6 +29,16 @@ async fn request_reset(
     State(state): State<AppState>,
     Json(body): Json<RequestBody>,
 ) -> AppResult<Json<Value>> {
+    // Fail before looking at the address: with no transport, every request
+    // would generate a token nothing delivers. A uniform 503 keeps the
+    // always-200 anti-enumeration property (it says nothing about the account)
+    // while refusing to pretend the mail went out.
+    if !crate::email::configured(&state) && !state.config.dev_log_links {
+        return Err(AppError::unavailable(
+            "password reset by email is not configured on this instance; \
+             ask an administrator to set SIGNET_SMTP_HOST",
+        ));
+    }
     let email = body.email.trim().to_lowercase();
 
     if let Some(user) = find_user_by_email(&state, &email).await? {
@@ -92,6 +102,7 @@ async fn request_reset(
         // opt-in — a reset link in a log stream is a working account takeover
         // for anyone who can read the logs.
         crate::email::send(
+            &state,
             &user.1,
             "Signet password reset",
             &format!(
@@ -100,7 +111,13 @@ async fn request_reset(
             ),
             state.config.dev_log_links,
         )
-        .await;
+        .await
+        .map_err(|e| {
+            // The token is already stored, so a retry of this request still
+            // works; the caller gets a 502 rather than a silent no-op.
+            tracing::error!(error = %e, email = %user.1, "password reset email failed");
+            AppError::upstream("the reset email could not be delivered; try again later")
+        })?;
 
         // Dev/test convenience: without a real mailer, surface the link once —
         // same opt-in as the body above, and loudly absent otherwise so a dev

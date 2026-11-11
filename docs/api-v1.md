@@ -197,7 +197,7 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 ### OIDC 附加端点
 
 - `GET/POST /oauth/consent`：同意页提交（`allow` 为 `true`/`false`）。显式请求的 scope 在 `allow` 时整体授予；客户端允许列表内未请求的 scope 作为可选，由用户在授权页勾选，经 body `optional_scopes`（空格分隔）提交。允许则写 `oauth_consents` 并回跳 authorize（回跳只带原本请求的 scope）。
-- `GET/POST /oauth/end_session`：统一登出；`post_logout_redirect_uri` 须在该客户端的白名单内才回跳。
+- `GET/POST /oauth/end_session`：统一登出。GET 必须携带 `id_token_hint`（验签、`sub` 与会话一致）；POST 不需要（Lax cookie 不随跨站表单发送）。`post_logout_redirect_uri` 须在该客户端的白名单内才回跳，`client_id` 与 hint 的 `aud` 同时出现时须一致。
 - `POST /oauth/revoke`：RFC 7009 吊销端点。表单字段 `token`、可选 `token_type_hint`；客户端须以 Basic 或 `client_id`+`client_secret` 认证。仅吊销 refresh token（access token 为无状态 JWT，无法服务端吊销）。无论 token 是否存在均返回 200。
 - `POST /oauth/register`：RFC 7591 动态客户端注册。需 `Authorization: Bearer <token>` 或表单 `initial_access_token`（单次使用，由管理员签发）。返回 `client_id`/`client_secret`。
 

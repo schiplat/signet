@@ -264,7 +264,7 @@ pub async fn fail_stale_runs(
         SET status = 'failed', finished_at = NOW(), error = $2
         WHERE source_id = $1
           AND status = 'running'
-          AND started_at < NOW() - ($3 || ' minutes')::interval
+          AND COALESCE(heartbeat_at, started_at) < NOW() - ($3 || ' minutes')::interval
         "#,
     )
     .bind(source_id)
@@ -273,6 +273,22 @@ pub async fn fail_stale_runs(
     .execute(pool)
     .await?;
     Ok(res.rows_affected())
+}
+
+/// Records that a running sync is still alive.
+///
+/// Called at the start of the fetch and after each applied chunk, so the
+/// staleness sweep measures progress rather than elapsed time. Best-effort by
+/// design: a missed beat shortens the fuse, it does not fail the run.
+pub async fn heartbeat(pool: &PgPool, run_id: Uuid) -> sqlx::Result<()> {
+    sqlx::query(
+        "UPDATE directory_sync_runs SET heartbeat_at = NOW() \
+         WHERE id = $1 AND status = 'running'",
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .map(|_| ())
 }
 
 /// Sources the scheduler should run now (§10).
@@ -310,7 +326,7 @@ pub async fn due_sources(pool: &PgPool, stale_minutes: i64) -> AppResult<Vec<Sou
               SELECT 1 FROM directory_sync_runs r
               WHERE r.source_id = s.id
                 AND r.status = 'running'
-                AND r.started_at >= NOW() - ($1 || ' minutes')::interval
+                AND COALESCE(r.heartbeat_at, r.started_at) >= NOW() - ($1 || ' minutes')::interval
           )
           AND COALESCE(
                   (SELECT MAX(r.started_at) FROM directory_sync_runs r WHERE r.source_id = s.id),

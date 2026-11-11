@@ -166,7 +166,23 @@ async fn record_scim(
     .await;
 }
 
-fn user_resource(u: &ScimUserRow) -> Value {
+/// Live SCIM groups as `display_name -> id`, for [`user_resource`].
+async fn group_id_map(state: &AppState) -> AppResult<HashMap<String, String>> {
+    let rows: Vec<(String, Uuid)> =
+        sqlx::query_as("SELECT display_name, id FROM scim_groups WHERE deleted_at IS NULL")
+            .fetch_all(&state.pool)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, id)| (name, id.to_string()))
+        .collect())
+}
+
+/// Group references carry the Group resource's `id`, not its display name: a
+/// client correlating `groups[].value` against `GET /Groups` matches by id, and
+/// a name never would. A membership whose group has no live SCIM resource (a
+/// local group an admin created outside SCIM) is omitted rather than guessed.
+fn user_resource(u: &ScimUserRow, group_ids: &HashMap<String, String>) -> Value {
     json!({
         "schemas": [USER_SCHEMA],
         "id": u.id.to_string(),
@@ -176,7 +192,15 @@ fn user_resource(u: &ScimUserRow) -> Value {
         "name": { "formatted": u.display_name },
         "active": u.status == "active",
         "emails": [{ "value": u.email, "primary": true }],
-        "groups": u.groups.iter().map(|g| json!({ "value": g, "display": g })).collect::<Vec<_>>(),
+        "groups": u
+            .groups
+            .iter()
+            .filter_map(|g| {
+                group_ids
+                    .get(g)
+                    .map(|id| json!({ "value": id, "display": g }))
+            })
+            .collect::<Vec<_>>(),
         "meta": {
             "resourceType": "User",
             "created": u.created_at.to_rfc3339(),
@@ -242,12 +266,16 @@ async fn list_users(
     .fetch_all(&state.pool)
     .await?;
 
+    let group_ids = group_id_map(&state).await?;
     Ok(Json(json!({
         "schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],
         "totalResults": total,
         "itemsPerPage": rows.len(),
         "startIndex": q.start_index.unwrap_or(1),
-        "Resources": rows.iter().map(user_resource).collect::<Vec<_>>(),
+        "Resources": rows
+            .iter()
+            .map(|u| user_resource(u, &group_ids))
+            .collect::<Vec<_>>(),
     })))
 }
 
@@ -399,7 +427,7 @@ async fn create_user(
     )
     .await;
 
-    Ok(Json(user_resource(&row)))
+    Ok(Json(user_resource(&row, &group_id_map(&state).await?)))
 }
 
 async fn get_user(
@@ -409,7 +437,7 @@ async fn get_user(
 ) -> AppResult<Json<Value>> {
     authorize(&state, &headers).await?;
     let row = find_user(&state, &id).await?;
-    Ok(Json(user_resource(&row)))
+    Ok(Json(user_resource(&row, &group_id_map(&state).await?)))
 }
 
 async fn find_user(state: &AppState, id: &str) -> AppResult<ScimUserRow> {
@@ -556,7 +584,7 @@ async fn put_user(
 
     record_user_write(&state, &headers, "put", &existing, &row).await;
 
-    Ok(Json(user_resource(&row)))
+    Ok(Json(user_resource(&row, &group_id_map(&state).await?)))
 }
 
 /// Names the managed attributes a write actually moved.
@@ -911,7 +939,7 @@ async fn patch_user(
     )
     .await;
 
-    Ok(Json(user_resource(&row)))
+    Ok(Json(user_resource(&row, &group_id_map(&state).await?)))
 }
 
 async fn delete_user(

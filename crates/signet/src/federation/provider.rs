@@ -166,6 +166,65 @@ fn redact_url(url: &str) -> String {
     }
 }
 
+/// POSTs a token request over a client pinned to validated addresses.
+///
+/// Used by the generic OIDC adapter, whose endpoints come from a discovery
+/// document and whose body carries the client secret: the destination must be
+/// the address the outbound policy checked, not whatever DNS answers at connect
+/// time.
+pub async fn post_token_form_pinned(
+    token_url: &str,
+    form: &[(&str, &str)],
+    allow_private: bool,
+) -> Result<TokenSet> {
+    let (client, url) = crate::outbound::pinned_client(token_url, allow_private)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
+    let resp = client
+        .post(url)
+        .form(form)
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = crate::outbound::read_body_capped(resp).await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "token endpoint returned {status}: {}",
+            String::from_utf8_lossy(&body)
+        ));
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+/// GETs a userinfo endpoint over a pinned client (bearer token attached).
+pub async fn get_json_pinned(
+    url: &str,
+    access_token: &str,
+    allow_private: bool,
+) -> Result<serde_json::Value> {
+    let (client, url) = crate::outbound::pinned_client(url, allow_private)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
+    let resp = client
+        .get(url.clone())
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .header("User-Agent", "signet-sso")
+        .send()
+        .await?;
+    let status = resp.status();
+    let body = crate::outbound::read_body_capped(resp).await?;
+    if !status.is_success() {
+        return Err(anyhow!(
+            "GET {} returned {status}: {}",
+            redact_url(url.as_str()),
+            String::from_utf8_lossy(&body)
+        ));
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
 /// POSTs a form-encoded token request and parses the JSON response.
 pub async fn post_token_form(token_url: &str, form: &[(&str, &str)]) -> Result<TokenSet> {
     let resp = crate::outbound::client()

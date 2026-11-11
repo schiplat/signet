@@ -158,6 +158,18 @@ pub async fn track(req: Request, next: Next) -> Response {
     resp
 }
 
+/// The metrics listener: `GET /health` and `GET /metrics`, nothing else.
+///
+/// Served on its own socket (see `build_app`), so the counters are reachable
+/// from the scrape network and not from every client that can reach the IdP.
+pub fn router(state: AppState) -> axum::Router {
+    use axum::routing::get;
+    axum::Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics))
+        .with_state(state)
+}
+
 /// Liveness/readiness: probes the database and reports dependency health.
 pub async fn health(State(state): State<AppState>) -> Response {
     let db_ok = sqlx::query_scalar::<_, i32>("SELECT 1")

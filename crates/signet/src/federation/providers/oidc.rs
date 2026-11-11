@@ -1,6 +1,7 @@
-use super::{jbool, jstr, oauth2_profile};
+use super::{jbool, jstr};
 use crate::federation::provider::{
-    post_token_form, ProviderConfig, TokenSet, UpstreamProfile, UpstreamProvider,
+    get_json_pinned, post_token_form_pinned, ProviderConfig, TokenSet, UpstreamProfile,
+    UpstreamProvider,
 };
 use anyhow::{anyhow, Result};
 use serde_json::Value;
@@ -35,13 +36,15 @@ async fn discovery(issuer: &str, allow_private: bool) -> Result<Value> {
     }
 
     let url = format!("{key}/.well-known/openid-configuration");
-    let client = crate::outbound::client();
-    // `issuer` is operator-supplied, so reject anything that is not a plain
-    // http(s) URL before the call; whether literal private addresses are
+    // Validated and pinned in one step: the document is fetched from an address
+    // the outbound policy saw, not from whatever DNS answers at connect time.
+    // `issuer` is operator-supplied; whether literal private addresses are
     // admitted is the deployment's SIGNET_OUTBOUND_ALLOW_PRIVATE decision,
     // threaded through the provider config (internal IdPs are the point).
-    crate::outbound::validate_shape(&url, allow_private).map_err(|e| anyhow!(e.to_string()))?;
-    let resp = client.get(&url).send().await?;
+    let (client, url) = crate::outbound::pinned_client(&url, allow_private)
+        .await
+        .map_err(|e| anyhow!(e.to_string()))?;
+    let resp = client.get(url.clone()).send().await?;
     let status = resp.status();
     let body = crate::outbound::read_body_capped(resp).await?;
     if !status.is_success() {
@@ -71,28 +74,14 @@ async fn authorization_endpoint(issuer: &str, allow_private: bool) -> Result<Str
         .ok_or_else(|| anyhow!("discovery missing authorization_endpoint"))
 }
 
-/// Applies the outbound policy to an endpoint URL read out of a discovery
-/// document.
-///
-/// The document comes from the operator's issuer, but its endpoint fields are
-/// *upstream data*, not operator data: an issuer that is compromised — or whose
-/// DNS has been re-pointed — can aim `token_endpoint` at an internal address,
-/// and the token POST carries the `client_secret`. Every endpoint this adapter
-/// hands to the HTTP client therefore passes the same guard the issuer URL did,
-/// re-checked at call time (§12: a check made when the provider was saved is
-/// worthless at fetch time).
-///
-/// The authorization endpoint is deliberately *not* guarded here: the browser
-/// visits it, so there is no server-side request to protect. The discovery
-/// root keeps its shape-only check because it carries no credentials and every
-/// server-fetched URL read out of the document is re-checked below anyway.
-async fn ensure_endpoint_allowed(url: &str, allow_private: bool) -> Result<()> {
-    crate::outbound::ensure_allowed(url, allow_private)
-        .await
-        .map(|_| ())
-        .map_err(|e| anyhow!(e.to_string()))
-}
-
+// Endpoint URLs read out of the discovery document are *upstream data*, not
+// operator data: an issuer that is compromised — or whose DNS has been
+// re-pointed — can aim `token_endpoint` at an internal address, and the token
+// POST carries the `client_secret`. Every server-side request below therefore
+// goes through `outbound::pinned_client`, which validates the URL *and* pins
+// the addresses it resolved, so the request cannot be re-pointed between the
+// check and the connection. (The authorization endpoint is not fetched by this
+// server; the browser visits it.)
 impl UpstreamProvider for GenericOidc {
     fn scopes(&self, cfg: &ProviderConfig) -> String {
         cfg.effective_scopes("openid email profile")
@@ -150,8 +139,7 @@ impl UpstreamProvider for GenericOidc {
             let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let token_endpoint = jstr(&doc, "token_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing token_endpoint"))?;
-            ensure_endpoint_allowed(&token_endpoint, cfg.outbound_allow_private).await?;
-            post_token_form(
+            post_token_form_pinned(
                 &token_endpoint,
                 &[
                     ("client_id", &cfg.client_id),
@@ -161,6 +149,7 @@ impl UpstreamProvider for GenericOidc {
                     ("grant_type", "authorization_code"),
                     ("code_verifier", code_verifier),
                 ],
+                cfg.outbound_allow_private,
             )
             .await
         })
@@ -184,8 +173,10 @@ impl UpstreamProvider for GenericOidc {
             let doc = discovery(discovery_root, cfg.outbound_allow_private).await?;
             let userinfo = jstr(&doc, "userinfo_endpoint")
                 .ok_or_else(|| anyhow!("discovery missing userinfo_endpoint"))?;
-            ensure_endpoint_allowed(&userinfo, cfg.outbound_allow_private).await?;
-            let info = oauth2_profile(cfg, tokens, &userinfo).await?;
+            // Pinned client as well: the bearer token in this request must go
+            // to the address the policy checked, not a re-resolved one.
+            let access = tokens.require_access()?;
+            let info = get_json_pinned(&userinfo, access, cfg.outbound_allow_private).await?;
             Ok(UpstreamProfile {
                 subject: jstr(&info, "sub").ok_or_else(|| anyhow!("oidc profile missing sub"))?,
                 email: jstr(&info, "email"),

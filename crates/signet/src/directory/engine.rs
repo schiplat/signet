@@ -194,6 +194,50 @@ pub async fn spawn_source(
     Ok(run_id)
 }
 
+/// Keeps a running sync's `heartbeat_at` fresh, for as long as this value lives.
+///
+/// A guard rather than explicit calls: `execute` has several early-return paths
+/// (fetch failure, circuit breaker), and every one of them must stop the beat.
+/// The interval covers the fetch as well as the apply, which a per-chunk beat
+/// did not — a paginated walk over a slow upstream is the long phase that made
+/// the old `started_at` sweep mark live runs failed.
+struct Heartbeat {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Heartbeat {
+    fn spawn(state: AppState, run_id: Uuid) -> Self {
+        const BEAT: std::time::Duration = std::time::Duration::from_secs(60);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                if let Err(e) = model::heartbeat(&state.pool, run_id).await {
+                    tracing::warn!(error = %e, %run_id, "failed to record sync heartbeat");
+                }
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                tokio::time::sleep(BEAT).await;
+            }
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// The shared body: audit, fetch, plan, apply, close.
 #[allow(clippy::too_many_arguments)]
 async fn execute(
@@ -234,6 +278,7 @@ async fn execute(
     .await;
 
     // ── Fetch + plan. Nothing is written until the plan is complete. ────
+    let _heartbeat = run_id.map(|id| Heartbeat::spawn(state.clone(), id));
     let started = std::time::Instant::now();
     let planned = fetch_and_plan(state, row, cfg, opts).await;
 

@@ -47,7 +47,9 @@ pub async fn track_login(
     )
     .await;
 
-    email::send(
+    // Best effort: a failed alert must never fail the sign-in it describes.
+    if let Err(e) = email::send(
+        state,
         &user.email,
         "Signet new sign-in device",
         &format!(
@@ -57,10 +59,13 @@ pub async fn track_login(
             user_agent.unwrap_or("unknown"),
         ),
         // No one-time credentials in an alert body; keeping it visible in the
-        // logs is what makes the log mailer usable at all.
+        // logs is what makes the log fallback usable at all.
         true,
     )
-    .await;
+    .await
+    {
+        tracing::warn!(error = %e, email = %user.email, "new-device alert email failed");
+    }
 }
 
 /// Returns `true` when this (user, ip) pair was seen for the first time.

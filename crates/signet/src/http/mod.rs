@@ -15,6 +15,7 @@
 
 pub mod access_log;
 pub mod extract;
+pub mod headers;
 pub mod ratelimit;
 pub mod request_id;
 pub mod source_ip;

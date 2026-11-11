@@ -26,11 +26,28 @@ fn try_file(path: &str) -> Option<Response> {
     Some(
         (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, mime)],
+            [
+                (header::CONTENT_TYPE, mime),
+                (header::CACHE_CONTROL, cache_control(path).to_string()),
+            ],
             file.data.to_vec(),
         )
             .into_response(),
     )
+}
+
+/// `index.html` must be revalidated on every load: it names the hashed asset
+/// bundles, so a cached copy after an upgrade asks for files that no longer
+/// exist and the SPA dies inside a stale shell. Everything under `assets/` is
+/// content-hashed by Vite and can be cached forever.
+fn cache_control(path: &str) -> &'static str {
+    if path == "index.html" {
+        "no-cache"
+    } else if path.starts_with("assets/") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=3600"
+    }
 }
 
 fn serve_file(path: &str) -> Response {
