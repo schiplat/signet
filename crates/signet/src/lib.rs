@@ -80,16 +80,27 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     // through a proxy that is allowed to reach it). `SIGNET_METRICS_BIND=off`
     // disables the listener.
     if let Some(bind) = state.config.metrics_bind {
-        let listener = tokio::net::TcpListener::bind(bind)
-            .await
-            .with_context(|| format!("bind metrics listener on {bind}"))?;
-        tracing::info!(%bind, "metrics listening (health + metrics only)");
-        let metrics_app = metrics::router(state.clone());
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, metrics_app).await {
-                tracing::error!(error = %e, "metrics listener stopped");
+        // Metrics are optional telemetry: a second instance on the same host
+        // (or a stale process holding the port) must not keep the IdP from
+        // starting. The warning names the setting, so the operator can move it
+        // or set SIGNET_METRICS_BIND=off deliberately.
+        match tokio::net::TcpListener::bind(bind).await {
+            Ok(listener) => {
+                tracing::info!(%bind, "metrics listening (health + metrics only)");
+                let metrics_app = metrics::router(state.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, metrics_app).await {
+                        tracing::error!(error = %e, "metrics listener stopped");
+                    }
+                });
             }
-        });
+            Err(e) => tracing::warn!(
+                %bind,
+                error = %e,
+                "metrics listener unavailable (port in use?); serving without /metrics — \
+                 set SIGNET_METRICS_BIND to another address or off"
+            ),
+        }
     }
 
     let api_v1 = Router::new()

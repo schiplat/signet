@@ -50,14 +50,26 @@ pub fn verify_totp_code_step(secret_b32: &str, code: &str) -> AppResult<Option<u
         .unwrap_or_default()
         .as_secs();
     let current = now / 30;
-    for step in [current.saturating_sub(1), current, current + 1] {
-        // totp-rs takes the step number itself (seconds since the epoch are
-        // divided by the 30-second step internally by the caller, us).
-        if totp.generate(step) == code {
+    for offset in [-1i64, 0, 1] {
+        let step = (current as i64 + offset).max(0) as u64;
+        // `TOTP::generate` takes the Unix timestamp in *seconds* and divides by
+        // the step internally (totp-rs `check` does `time / self.step`).
+        // Passing the step number produces codes from 1970 — a mistake e2e
+        // caught, because nothing else exercises a real authenticator.
+        if totp.generate(step * 30) == code {
             return Ok(Some(step));
         }
     }
     Ok(None)
+}
+
+/// The code an authenticator app would show for `step`.
+///
+/// **Exposed for tests**: the server only ever verifies, but a test needs a way
+/// to produce a code that is valid *now* without re-implementing TOTP. Keep the
+/// surface here minimal; nothing in production calls this.
+pub fn code_for_step(secret_b32: &str, step: u64) -> AppResult<String> {
+    Ok(build_totp(secret_b32, "Signet", "verify")?.generate(step * 30))
 }
 
 /// Generate recovery codes like `ABCD-EFGH`.

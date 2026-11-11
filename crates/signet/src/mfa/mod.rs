@@ -1,5 +1,13 @@
 mod totp_util;
 
+/// TOTP primitives reachable from integration tests. Both exist for
+/// `tests/totp_verify.rs` — the server only generates a secret at enrollment
+/// shape and verifies codes afterwards; the alias avoids colliding with the
+/// internal import above.
+pub use totp_util::{
+    code_for_step, generate_totp_secret as new_totp_secret_for_tests, verify_totp_code_step,
+};
+
 use crate::audit::{record, AuditEvent};
 use crate::auth::password::set_user_password;
 use crate::auth::session::{
