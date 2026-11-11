@@ -16,6 +16,12 @@ use serde_json::{json, Value};
 use sqlx::PgPool;
 use tower::ServiceExt;
 
+/// The overrides live in one global `app_settings` table, so the tests that
+/// write them serialize here: a count assertion in one must not see a row the
+/// other is mid-way through adding.
+static LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 async fn call(
     state: &signet::state::AppState,
     cookie: &str,
@@ -59,6 +65,7 @@ async fn clear_overrides(pool: &PgPool) {
 
 #[tokio::test]
 async fn a_saved_value_overrides_the_environment_and_applies_live() {
+    let _guard = LOCK.lock().await;
     let Some(state) = common::state().await else {
         return;
     };
@@ -127,6 +134,7 @@ async fn a_saved_value_overrides_the_environment_and_applies_live() {
 
 #[tokio::test]
 async fn an_out_of_range_value_is_refused_and_nothing_is_written() {
+    let _guard = LOCK.lock().await;
     let Some(state) = common::state().await else {
         return;
     };

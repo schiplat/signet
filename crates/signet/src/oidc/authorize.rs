@@ -69,23 +69,27 @@ pub async fn authorize(
     if method != "S256" {
         return Err(AppError::bad_request("code_challenge_method must be S256"));
     }
+    // A state value is echoed into the redirect; cap it rather than storing an
+    // unbounded string on the code row. (Malformed beyond this is a client bug,
+    // and there is nothing useful to redirect with.)
+    crate::oidc::validate_param_len("state", state_val, 512)?;
+    if let Some(nonce) = q.nonce.as_deref() {
+        crate::oidc::validate_param_len("nonce", nonce, 512)?;
+    }
 
     let prompt = q.prompt.as_deref().unwrap_or("");
     let has_prompt = |p: &str| prompt.split_whitespace().any(|s| s == p);
 
-    // Authenticate first (no client lookup until the caller is authenticated).
-    let token = cookie_value(&headers, SESSION_COOKIE);
-    let user = match &token {
-        Some(t) => user_from_session_token(&state.pool, t).await?,
-        None => None,
-    };
-    let Some(user) = user else {
-        if has_prompt("none") {
-            return Err(AppError::bad_request("login_required"));
-        }
-        return Ok(redirect_to_login(&q, q.prompt.as_deref()));
-    };
-
+    // Client and redirect target first, then the caller's session.
+    //
+    // This deliberately looks the client up before authenticating: once the
+    // pair is known-good, every later failure — including `login_required` and
+    // `consent_required` under `prompt=none` — can use the OAuth error
+    // redirect (RFC 6749 §4.1.2.1 / OIDC Core 3.1.2.1) instead of a JSON page
+    // the RP cannot read. The cost is that an unauthenticated caller learns
+    // whether a client_id/redirect_uri pair is registered; that pair belongs
+    // to the RP, and there is no spec-compliant way to report errors to it
+    // without knowing it.
     let client = sqlx::query_as::<_, ClientApp>(
         r#"
         SELECT id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
@@ -113,30 +117,75 @@ pub async fn authorize(
     if !client.redirect_uris.iter().any(|u| u == redirect_uri) && redirect_uri != test_redirect {
         return Err(AppError::bad_request("redirect_uri not allowed"));
     }
-    crate::oidc::validate_client_scope(&scope, &client.scopes)?;
+
+    // From here the error channel is the redirect.
+    if let Err(e) = crate::oidc::validate_pkce_param("code_challenge", code_challenge) {
+        return Ok(redirect_error(
+            redirect_uri,
+            state_val,
+            "invalid_request",
+            &e.to_string(),
+        ));
+    }
     let source = client_ip(&headers, Some(addr));
-    check_client_source_ip(
+    if let Err(e) = check_client_source_ip(
         client.ip_allowlist_enabled,
         &client.allowed_cidrs,
         source.as_deref(),
-    )?;
+    ) {
+        return Ok(redirect_error(
+            redirect_uri,
+            state_val,
+            "access_denied",
+            &e.to_string(),
+        ));
+    }
+    if !client.grant_types.iter().any(|g| g == "authorization_code") {
+        return Ok(redirect_error(
+            redirect_uri,
+            state_val,
+            "unauthorized_client",
+            "client is not registered for the authorization_code grant",
+        ));
+    }
+    if let Err(e) = crate::oidc::validate_client_scope(&scope, &client.scopes) {
+        return Ok(redirect_error(
+            redirect_uri,
+            state_val,
+            "invalid_scope",
+            &e.to_string(),
+        ));
+    }
+
+    let token = cookie_value(&headers, SESSION_COOKIE);
+    let user = match &token {
+        Some(t) => user_from_session_token(&state.pool, t).await?,
+        None => None,
+    };
+    let Some(user) = user else {
+        if has_prompt("none") {
+            // Silent renewal has no browser to land on; the RP reads the error
+            // from the redirect, which is exactly how OIDC expects this case.
+            return Ok(redirect_error(
+                redirect_uri,
+                state_val,
+                "login_required",
+                "no active session",
+            ));
+        }
+        return Ok(redirect_to_login(&q, q.prompt.as_deref()));
+    };
 
     // A pending forced password change blocks new authorizations: the flag was
-    // set because the credential behind this session is suspected compromised,
-    // so the RP gets the redirect error channel (validated `redirect_uri`
-    // above, `state` echoed) rather than a code. Silent renewal under
-    // `prompt=none` has no browser to land on, so it gets the JSON form.
+    // set because the credential behind this session is suspected
+    // compromised, so the RP gets an error instead of a code.
     if user.must_change_password {
-        if has_prompt("none") {
-            return Err(AppError::forbidden("password change required"));
-        }
-        let mut url =
-            url::Url::parse(redirect_uri).map_err(|_| AppError::bad_request("bad redirect_uri"))?;
-        url.query_pairs_mut()
-            .append_pair("error", "access_denied")
-            .append_pair("error_description", "password change required")
-            .append_pair("state", state_val);
-        return Ok(Redirect::to(url.as_str()).into_response());
+        return Ok(redirect_error(
+            redirect_uri,
+            state_val,
+            "access_denied",
+            "password change required",
+        ));
     }
 
     // prompt=login forces re-authentication: clear the session so the user must
@@ -166,7 +215,12 @@ pub async fn authorize(
         .is_some_and(|g| crate::oidc::scope_covered(g, &scope));
     if !fully_consented || has_prompt("consent") {
         if has_prompt("none") {
-            return Err(AppError::bad_request("consent_required"));
+            return Ok(redirect_error(
+                redirect_uri,
+                state_val,
+                "consent_required",
+                "the user has not granted the requested scopes",
+            ));
         }
         return Ok(redirect_to_consent(&q, &client.scopes, &scope));
     }
@@ -203,6 +257,28 @@ pub async fn authorize(
         .append_pair("state", state_val);
 
     Ok(Redirect::to(url.as_str()).into_response())
+}
+
+/// Redirects to the (already validated) `redirect_uri` carrying an OAuth error.
+///
+/// RFC 6749 §4.1.2.1 requires this channel once the redirect target is known:
+/// an RP that asked for `prompt=none` reads the outcome from the redirect, so a
+/// JSON 400 is a dead end for every standard client library. `state` is echoed
+/// because the RP needs it to match the response to its request.
+fn redirect_error(redirect_uri: &str, state: &str, code: &str, description: &str) -> Response {
+    match url::Url::parse(redirect_uri) {
+        Ok(mut url) => {
+            url.query_pairs_mut()
+                .append_pair("error", code)
+                .append_pair("error_description", description)
+                .append_pair("state", state);
+            Redirect::to(url.as_str()).into_response()
+        }
+        // Validated against the client's registered list, which only checks the
+        // scheme prefix, so an unparseable value can still exist here. There is
+        // nowhere safe to send the browser.
+        Err(_) => AppError::bad_request("bad redirect_uri").into_response(),
+    }
 }
 
 fn redirect_to_login(q: &AuthorizeQuery, prompt: Option<&str>) -> Response {

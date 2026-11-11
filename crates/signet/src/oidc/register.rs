@@ -110,14 +110,16 @@ pub async fn register(
     )
     .await;
 
-    let issuer = &state.config.issuer;
     Ok(Json(json!({
         "client_id": client_id,
         "client_secret": secret,
         "client_id_issued_at": issued_at,
         "client_secret_expires_at": 0,
-        "registration_access_token": random_token(32),
-        "registration_client_uri": format!("{issuer}/oauth/register/{client_id}"),
+        // No `registration_access_token` / `registration_client_uri`: RFC 7591
+        // §5.1/§5.3 make those a promise of a client-management API, and there
+        // is no `GET/PUT /oauth/register/{client_id}` here. Advertising them
+        // sent conformant clients to a 404 with a token that could never
+        // authenticate. Managing a registered client is a dashboard operation.
         "redirect_uris": redirect_uris,
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -143,6 +145,14 @@ fn normalize_uris(uris: &[String]) -> AppResult<Vec<String>> {
         if !(t.starts_with("http://") || t.starts_with("https://")) {
             return Err(AppError::bad_request(format!(
                 "redirect_uri must be http(s): {t}"
+            )));
+        }
+        // RFC 6749 §3.1.2: a registered redirect URI must not carry a fragment.
+        // The exact-match comparison at authorize makes it harmless today, but
+        // accepting one stores a value no conformant client will ever send.
+        if t.contains('#') {
+            return Err(AppError::bad_request(format!(
+                "redirect_uri must not contain a fragment: {t}"
             )));
         }
         out.push(t.to_string());

@@ -4,15 +4,37 @@ use crate::federation::provider::{
 };
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 pub struct GenericOidc;
 
-/// Fetches `{issuer}/.well-known/openid-configuration`.
+/// Discovery documents, cached briefly per issuer.
+///
+/// One sign-in used to fetch the document three times (authorize, exchange,
+/// profile) — three round trips to the upstream IdP, and no guarantee the
+/// `token_endpoint` used for the exchange was the one shown by the document
+/// that produced the authorize URL. A short TTL keeps the endpoints consistent
+/// across the legs while still picking up an upstream change within minutes.
+/// Failures are never cached: a transient outage must not pin an error.
+static DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, (Instant, Value)>>> = OnceLock::new();
+const DISCOVERY_TTL: Duration = Duration::from_secs(300);
+
+/// Fetches `{issuer}/.well-known/openid-configuration`, or the cached copy.
 async fn discovery(issuer: &str, allow_private: bool) -> Result<Value> {
-    let url = format!(
-        "{}/.well-known/openid-configuration",
-        issuer.trim_end_matches('/')
-    );
+    let key = issuer.trim_end_matches('/').to_string();
+    let cache = DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .and_then(|(at, doc)| (at.elapsed() < DISCOVERY_TTL).then(|| doc.clone()));
+    if let Some(doc) = cached {
+        return Ok(doc);
+    }
+
+    let url = format!("{key}/.well-known/openid-configuration");
     let client = crate::outbound::client();
     // `issuer` is operator-supplied, so reject anything that is not a plain
     // http(s) URL before the call; whether literal private addresses are
@@ -28,7 +50,12 @@ async fn discovery(issuer: &str, allow_private: bool) -> Result<Value> {
             String::from_utf8_lossy(&body)
         ));
     }
-    Ok(serde_json::from_slice(&body)?)
+    let doc: Value = serde_json::from_slice(&body)?;
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, (Instant::now(), doc.clone()));
+    Ok(doc)
 }
 
 /// Resolve the authorization endpoint: if `issuer_url` already looks like an

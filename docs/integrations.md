@@ -55,8 +55,6 @@ curl -s -X POST "$ISSUER/oauth/register" \
   "client_secret": "5k...",
   "client_id_issued_at": 1755057600,
   "client_secret_expires_at": 0,
-  "registration_access_token": "reg...",
-  "registration_client_uri": "http://localhost:8443/oauth/register/cl_abc123...",
   "redirect_uris": ["http://localhost:3000/auth/callback"],
   "grant_types": ["authorization_code", "refresh_token"],
   "response_types": ["code"],
@@ -68,12 +66,14 @@ curl -s -X POST "$ISSUER/oauth/register" \
 
 | 字段 | 规则 |
 |------|------|
-| `redirect_uris` | 必填，至少 1 条；必须 `http(s)://` 开头；去重排序 |
+| `redirect_uris` | 必填，至少 1 条；必须 `http(s)://` 开头；**不得含 `#` 片段**；去重排序 |
 | `scopes` | 可选；若提供必须包含 `openid` |
 | `client_name` | 可选展示名 |
 | `grant_types` | 当前忽略，固定 `authorization_code` + `refresh_token` |
 
-注册出的客户端默认：`pkce_required=true`、`ip_allowlist_enabled=false`（不限制源 IP）。后续仍可在 Dashboard → Clients 管理。
+响应中**不返回** `registration_access_token` / `registration_client_uri`：本服务没有 RFC 7591 的客户端管理端点（`GET/PUT /oauth/register/{client_id}`），返回它们只会让标准客户端去请求一个 404。注册后的客户端在 Dashboard → Clients 管理。
+
+注册出的客户端默认：`pkce_required=true`、`ip_allowlist_enabled=false`（不限制源 IP）。
 
 ### 1.4 错误码
 

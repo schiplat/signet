@@ -61,6 +61,39 @@ pub(crate) fn validate_client_scope(requested: &str, allowed: &[String]) -> AppR
     Ok(())
 }
 
+/// RFC 7636 §4.1/§4.2: a PKCE verifier and its S256 challenge are 43–128
+/// characters from the unreserved set. Nothing exploits a violation — the
+/// exchange still hashes what it received — but an unbounded value is stored in
+/// the code row and echoed into requests, so the bound belongs at the edge.
+pub(crate) fn validate_pkce_param(name: &str, value: &str) -> AppResult<()> {
+    if !(43..=128).contains(&value.len()) {
+        return Err(crate::error::AppError::bad_request(format!(
+            "{name} must be 43-128 characters"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~'))
+    {
+        return Err(crate::error::AppError::bad_request(format!(
+            "{name} contains characters outside the unreserved set"
+        )));
+    }
+    Ok(())
+}
+
+/// Caps a caller-supplied value that is otherwise echoed back (state into the
+/// redirect, nonce into the id_token). OIDC sets no limit; a megabyte of state
+/// is a client bug, and storing it makes the code row and redirect unbounded.
+pub(crate) fn validate_param_len(name: &str, value: &str, max: usize) -> AppResult<()> {
+    if value.len() > max {
+        return Err(crate::error::AppError::bad_request(format!(
+            "{name} exceeds {max} characters"
+        )));
+    }
+    Ok(())
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(

@@ -74,7 +74,10 @@ pub async fn token(
     )
     .await?
     {
-        return Err(AppError::unauthorized("invalid client credentials"));
+        return Err(AppError::oauth_unauthorized(
+            "invalid_client",
+            "invalid client credentials",
+        ));
     }
     let source = client_ip(&headers, Some(addr));
     check_client_source_ip(
@@ -82,6 +85,17 @@ pub async fn token(
         &client.allowed_cidrs,
         source.as_deref(),
     )?;
+
+    // The registered grant list is the client's own declaration of what it may
+    // do; honouring it is what stops an admin's "disable refresh for this
+    // client" from being a no-op. Checked before dispatch so both grants get
+    // the same answer.
+    if !client.grant_types.iter().any(|g| g == &form.grant_type) {
+        return Err(AppError::oauth(
+            "unsupported_grant_type",
+            format!("client is not registered for the {} grant", form.grant_type),
+        ));
+    }
 
     let body = match form.grant_type.as_str() {
         "authorization_code" => issue_from_code(&state, &client, &form).await?,
@@ -95,7 +109,12 @@ pub async fn token(
             )
             .await?
         }
-        _ => return Err(AppError::bad_request("unsupported grant_type")),
+        _ => {
+            return Err(AppError::oauth(
+                "unsupported_grant_type",
+                "unsupported grant_type",
+            ))
+        }
     };
     Ok((StatusCode::OK, axum::Json(body)))
 }
@@ -130,9 +149,10 @@ pub(crate) fn resolve_client_credentials_parts(
         }
     }
 
-    let id = form_client_id.ok_or_else(|| AppError::unauthorized("missing client_id"))?;
-    let secret =
-        form_client_secret.ok_or_else(|| AppError::unauthorized("missing client_secret"))?;
+    let id = form_client_id
+        .ok_or_else(|| AppError::oauth_unauthorized("invalid_client", "missing client_id"))?;
+    let secret = form_client_secret
+        .ok_or_else(|| AppError::oauth_unauthorized("invalid_client", "missing client_secret"))?;
     Ok((id.to_string(), secret.to_string()))
 }
 
@@ -149,7 +169,7 @@ pub(crate) async fn load_client(state: &AppState, client_id: &str) -> AppResult<
     .bind(client_id)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| AppError::unauthorized("unknown client"))
+    .ok_or_else(|| AppError::oauth_unauthorized("invalid_client", "unknown client"))
 }
 
 async fn issue_from_code(
@@ -160,15 +180,20 @@ async fn issue_from_code(
     let code = form
         .code
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("missing code"))?;
+        .ok_or_else(|| AppError::oauth("invalid_request", "missing code"))?;
     let redirect_uri = form
         .redirect_uri
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("missing redirect_uri"))?;
+        .ok_or_else(|| AppError::oauth("invalid_request", "missing redirect_uri"))?;
     let code_verifier = form
         .code_verifier
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("missing code_verifier"))?;
+        .ok_or_else(|| AppError::oauth("invalid_request", "missing code_verifier"))?;
+    // RFC 7636 §4.1: the verifier has the same 43–128 unreserved-character
+    // bound as the challenge. The exchange still hashes what arrived, so this
+    // is a protocol check, not a security boundary.
+    crate::oidc::validate_pkce_param("code_verifier", code_verifier)
+        .map_err(|e| AppError::oauth("invalid_request", e.to_string()))?;
 
     let code_hash = sha256_hex(code);
     let row = sqlx::query_as::<_, AuthCodeRow>(
@@ -181,24 +206,24 @@ async fn issue_from_code(
     .bind(code_hash)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| AppError::bad_request("invalid code"))?;
+    .ok_or_else(|| AppError::oauth("invalid_grant", "invalid code"))?;
 
     if row.consumed_at.is_some() {
-        return Err(AppError::bad_request("code already used"));
+        return Err(AppError::oauth("invalid_grant", "code already used"));
     }
     if row.expires_at < Utc::now() {
-        return Err(AppError::bad_request("code expired"));
+        return Err(AppError::oauth("invalid_grant", "code expired"));
     }
     if row.client_id != client.client_id {
-        return Err(AppError::bad_request("client mismatch"));
+        return Err(AppError::oauth("invalid_grant", "client mismatch"));
     }
     if row.redirect_uri != redirect_uri {
-        return Err(AppError::bad_request("redirect_uri mismatch"));
+        return Err(AppError::oauth("invalid_grant", "redirect_uri mismatch"));
     }
 
     let expected = sha256_b64url(code_verifier);
     if expected != row.code_challenge {
-        return Err(AppError::bad_request("invalid code_verifier"));
+        return Err(AppError::oauth("invalid_grant", "invalid code_verifier"));
     }
 
     // Consume atomically. The SELECT above cannot tell two concurrent
@@ -214,7 +239,7 @@ async fn issue_from_code(
     .await?
     .rows_affected();
     if consumed == 0 {
-        return Err(AppError::bad_request("code already used"));
+        return Err(AppError::oauth("invalid_grant", "code already used"));
     }
 
     let user = active_user_by_id(&state.pool, row.user_id).await?;
@@ -263,7 +288,7 @@ async fn issue_from_refresh(
     let refresh = form
         .refresh_token
         .as_deref()
-        .ok_or_else(|| AppError::bad_request("missing refresh_token"))?;
+        .ok_or_else(|| AppError::oauth("invalid_request", "missing refresh_token"))?;
     let token_hash = sha256_hex(refresh);
 
     let row = sqlx::query_as::<_, RefreshRow>(
@@ -276,7 +301,7 @@ async fn issue_from_refresh(
     .bind(token_hash)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or_else(|| AppError::bad_request("invalid refresh_token"))?;
+    .ok_or_else(|| AppError::oauth("invalid_grant", "invalid refresh_token"))?;
 
     if row.revoked_at.is_some() {
         // A refresh token is single-use: it was revoked by its own rotation.
@@ -288,10 +313,13 @@ async fn issue_from_refresh(
         return Err(revoke_family_on_reuse(state, client, &row, ip, user_agent, "replayed").await);
     }
     if row.expires_at < Utc::now() {
-        return Err(AppError::bad_request("refresh_token expired or revoked"));
+        return Err(AppError::oauth(
+            "invalid_grant",
+            "refresh_token expired or revoked",
+        ));
     }
     if row.client_id != client.client_id {
-        return Err(AppError::bad_request("client mismatch"));
+        return Err(AppError::oauth("invalid_grant", "client mismatch"));
     }
 
     // rotate — atomically. The SELECT above cannot tell two concurrent
@@ -355,7 +383,7 @@ async fn revoke_family_on_reuse(
         },
     )
     .await;
-    AppError::bad_request("refresh_token expired or revoked")
+    AppError::oauth("invalid_grant", "refresh_token expired or revoked")
 }
 
 async fn build_token_response(

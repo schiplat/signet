@@ -711,7 +711,18 @@ async fn callback(
             // own address is too.
             if session_user_id.is_none() {
                 let upstream_email = profile.email.as_deref().filter(|e| !e.trim().is_empty());
-                if !super::provider_allows(&state.pool, &provider_code, upstream_email).await? {
+                // An email-domain list is not applicable to a provider that has
+                // no email API at all (WeChat): there is nothing to compare, and
+                // the identity can only bind to an existing local account whose
+                // own address the session-creation check already vetted. Testing
+                // `""` against the list refused every first WeChat sign-in while
+                // the module docs claimed the opposite — this is the documented
+                // behavior, made real. (Every other provider without an email was
+                // already refused above, so this exemption covers only WeChat.)
+                let provider_has_no_email = loaded.cfg.provider_type == "wechat";
+                if !provider_has_no_email
+                    && !super::provider_allows(&state.pool, &provider_code, upstream_email).await?
+                {
                     return Ok(sso_fail_redirect(
                         &state,
                         jar,
@@ -732,7 +743,9 @@ async fn callback(
                     &state.config.allowed_email_domains,
                 )
                 .await?;
-                if !crate::admission::allows(&domains, upstream_email.unwrap_or("")) {
+                if !provider_has_no_email
+                    && !crate::admission::allows(&domains, upstream_email.unwrap_or(""))
+                {
                     return Ok(sso_fail_redirect(
                         &state,
                         jar,

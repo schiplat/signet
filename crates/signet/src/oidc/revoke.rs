@@ -1,12 +1,15 @@
 use crate::crypto::util::sha256_hex;
 use crate::error::AppResult;
+use crate::http::extract::client_ip;
+use crate::http::source_ip::check_client_source_ip;
 use crate::oidc::token::{load_client, resolve_client_credentials_parts};
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::Form;
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 /// RFC 7009 — Token Revocation.
 ///
@@ -24,6 +27,7 @@ pub struct RevokeForm {
 
 pub async fn revoke(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<RevokeForm>,
 ) -> AppResult<impl IntoResponse> {
@@ -42,10 +46,20 @@ pub async fn revoke(
     )
     .await?
     {
-        return Err(crate::error::AppError::unauthorized(
+        return Err(crate::error::AppError::oauth_unauthorized(
+            "invalid_client",
             "invalid client credentials",
         ));
     }
+
+    // Same source restriction as authorize and token: an IP allowlist bounds
+    // where the client's credentials may be used, and revocation is a use.
+    let source = client_ip(&headers, Some(addr));
+    check_client_source_ip(
+        client.ip_allowlist_enabled,
+        &client.allowed_cidrs,
+        source.as_deref(),
+    )?;
 
     let token_hash = sha256_hex(&form.token);
     sqlx::query(

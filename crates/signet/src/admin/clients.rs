@@ -225,6 +225,11 @@ async fn update_client(
                     "redirect_uri must be http(s): {t}"
                 )));
             }
+            if t.contains('#') {
+                return Err(AppError::bad_request(format!(
+                    "redirect_uri must not contain a fragment: {t}"
+                )));
+            }
             out.push(t.to_string());
         }
         out.sort();
@@ -536,6 +541,12 @@ fn normalize_uris(uris: &[String]) -> AppResult<Vec<String>> {
         if !(t.starts_with("http://") || t.starts_with("https://")) {
             return Err(AppError::bad_request(format!(
                 "redirect_uri must be http(s): {t}"
+            )));
+        }
+        // RFC 6749 §3.1.2: no fragment on a registered redirect URI.
+        if t.contains('#') {
+            return Err(AppError::bad_request(format!(
+                "redirect_uri must not contain a fragment: {t}"
             )));
         }
         out.push(t.to_string());
