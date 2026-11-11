@@ -112,6 +112,25 @@ docker compose -f deploy/docker-compose.yml exec -T signet \
 
 ---
 
+## 4.5 签名密钥轮换
+
+`signet keys rotate` 生成新密钥、把旧密钥的**公钥**写入 `SIGNET_JWT_RETIRED_KEY_DIR`（默认 `./data/retired_keys`），并原子替换 `SIGNET_JWT_PRIVATE_KEY_PATH`。重启后：
+
+- 新签发的 access/id token 用新 `kid` 签名；
+- 旧密钥签发的 token 仍能验签，直到自然过期（JWKS 同时发布两把公钥，客户端按 `kid` 跟随）；
+- 旧私钥不再保留（只写公钥），轮换后的私钥暴露面不增加。
+
+```bash
+# 容器内（数据卷 /app/data 持久化两处路径）
+docker compose -f deploy/docker-compose.yml exec -T signet signet keys rotate
+docker compose -f deploy/docker-compose.yml restart signet
+curl -s https://<issuer>/.well-known/jwks.json | jq '.keys[].kid'   # 应看到新旧两把
+```
+
+可以重复执行：每次都会把当前密钥退役、生成新密钥；退役目录按 `kid` 命名，重复轮换的旧公钥幂等覆盖。确认所有旧 token 过期后可清理退役目录。
+
+---
+
 ## 5. 和日常开发的关系
 
 | 场景 | 推荐方式 |

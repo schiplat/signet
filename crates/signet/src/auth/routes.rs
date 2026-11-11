@@ -1,5 +1,5 @@
 use crate::audit::{record, AuditEvent};
-use crate::auth::password::{set_user_password, verify_password_offloaded};
+use crate::auth::password::{set_user_password, verify_password_dummy, verify_password_offloaded};
 use crate::auth::session::{
     clear_session_cookie, cookie_value, current_user, current_user_unrestricted, destroy_session,
     list_sessions, revoke_all_sessions, revoke_other_sessions, revoke_session_by_id,
@@ -65,32 +65,34 @@ async fn login(
     // query for the same row, which is one extra round trip on every login — the
     // busiest write path there is. The failure counter itself is only meaningful
     // as an atomic increment (below), so it is not read here at all.
+    // One message for every credential-stage failure. The unknown-address text
+    // used to differ from the wrong-password text ("email/username" versus
+    // "email"), which alone answered "does this account exist?".
+    const LOGIN_FAILED: &str = "invalid email or password";
+
     let row = sqlx::query(&format!(
         "SELECT {USER_COLS}, locked_until \
          FROM users WHERE email = $1 OR username = $1"
     ))
     .bind(&email)
     .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| AppError::unauthorized("invalid email/username or password"))?;
+    .await?;
+    let Some(row) = row else {
+        // Spend the same Argon2 round a real account would, so response time
+        // does not distinguish the two cases.
+        verify_password_dummy(&body.password).await?;
+        return Err(AppError::unauthorized(LOGIN_FAILED));
+    };
     let user = User::from_row(&row)?;
     let locked_until: Option<DateTime<Utc>> = row.try_get("locked_until")?;
 
-    if user.status != "active" {
-        return Err(AppError::unauthorized("account disabled"));
-    }
-
     let ip = client_ip(&headers, Some(addr));
 
-    if let Some(locked_until) = locked_until {
-        if locked_until > Utc::now() {
-            let secs = (locked_until - Utc::now()).num_seconds().max(1);
-            let mins = (secs as f64 / 60.0).ceil() as i64;
-            return Err(AppError::unauthorized(format!(
-                "account locked, try again in ~{mins} minute(s)"
-            )));
-        }
-    }
+    // Account state is *not* checked here. "disabled" and "locked" before the
+    // credential check answered existence and status to anyone who typed an
+    // address; both gates now speak only after a correct password (see the
+    // success path below). A wrong password on a disabled or locked account
+    // takes the ordinary failure branch.
 
     // ── Credential check: local (argon2) or bind-through (LDAP) ─────────
     //
@@ -163,7 +165,7 @@ async fn login(
         if !counts_toward_lockout {
             // §8.4: the rejection is recorded (above) but not charged against the
             // local counter, because the directory's own lockout policy owns it.
-            return Err(AppError::unauthorized("invalid email or password"));
+            return Err(AppError::unauthorized(LOGIN_FAILED));
         }
 
         // One atomic increment decides both the counter and the lockout. The
@@ -190,7 +192,20 @@ async fn login(
                 "too many failed attempts, account locked",
             ));
         }
-        return Err(AppError::unauthorized("invalid email or password"));
+        return Err(AppError::unauthorized(LOGIN_FAILED));
+    }
+
+    // The credential is correct, so the account-state gates can speak without
+    // answering questions for someone who has not proved they own the account.
+    if user.status != "active" {
+        return Err(AppError::unauthorized("account disabled"));
+    }
+    if let Some(until) = locked_until.filter(|t| *t > Utc::now()) {
+        let secs = (until - Utc::now()).num_seconds().max(1);
+        let mins = (secs as f64 / 60.0).ceil() as i64;
+        return Err(AppError::unauthorized(format!(
+            "account locked, try again in ~{mins} minute(s)"
+        )));
     }
 
     sqlx::query("UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1")

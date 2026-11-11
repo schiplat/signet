@@ -140,7 +140,9 @@ fn verify_hint(state: &AppState, hint: &str) -> AppResult<HintClaims> {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(std::slice::from_ref(&state.config.issuer));
     validation.validate_aud = false;
-    let data = jsonwebtoken::decode::<Value>(hint, state.keys.decoding(), &validation)
+    let data = state
+        .keys
+        .verify::<Value>(hint, &validation)
         .map_err(|_| AppError::bad_request("invalid id_token_hint"))?;
     let sub = data
         .claims

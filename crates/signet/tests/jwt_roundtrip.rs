@@ -40,3 +40,54 @@ fn a_token_the_instance_signs_passes_its_own_decoding_key() {
 
     std::fs::remove_file(&path).ok();
 }
+
+/// Rotation must not invalidate tokens already issued.
+///
+/// `signet keys rotate` writes the old key as a public PEM into the retired
+/// directory and replaces the active file. A restarted instance loads both:
+/// it signs with the new key and still verifies tokens whose `kid` names the
+/// old one, and JWKS publishes both so clients can do the same.
+#[test]
+fn rotation_keeps_old_tokens_verifiable() {
+    let dir = std::env::temp_dir().join(format!("signet-keys-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("jwt_private.pem");
+    let retired = dir.join("retired_keys");
+
+    let original = JwtKeys::load_or_generate(&path).expect("initial keys");
+    let now = chrono::Utc::now().timestamp();
+    let old_token = original
+        .encode(&serde_json::json!({
+            "sub": "before-rotation",
+            "iss": "https://sso.example.com",
+            "aud": "some-client",
+            "exp": now + 3600,
+            "iat": now,
+        }))
+        .expect("sign jwt");
+    let old_kid = original.kid.clone();
+
+    let new_kid = signet::crypto::keys::rotate(&path, &retired).expect("rotate");
+    assert_ne!(new_kid, old_kid, "rotation must produce a new kid");
+
+    let rotated = JwtKeys::load_or_generate_with_retired(&path, Some(&retired))
+        .expect("reload after rotation");
+    assert_eq!(rotated.kid, new_kid);
+
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&["https://sso.example.com"]);
+    validation.validate_aud = false;
+    let data = rotated
+        .verify::<Claims>(&old_token, &validation)
+        .expect("a token signed before the rotation must still verify");
+    assert_eq!(data.claims.sub, "before-rotation");
+
+    // JWKS carries both, so a client can follow the same rule.
+    let jwks = rotated.jwks();
+    let kids: Vec<&str> = jwks.keys.iter().map(|k| k.kid.as_str()).collect();
+    assert_eq!(kids.len(), 2, "active plus one retired key");
+    assert!(kids.contains(&new_kid.as_str()));
+    assert!(kids.contains(&old_kid.as_str()));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

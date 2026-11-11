@@ -113,7 +113,7 @@ fn read_existing(path: &Path) -> anyhow::Result<String> {
 }
 
 #[cfg(unix)]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -128,7 +128,7 @@ fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::write(path, contents)
 }
 

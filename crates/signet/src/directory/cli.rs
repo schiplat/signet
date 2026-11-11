@@ -34,6 +34,21 @@ pub enum Command {
         #[command(subcommand)]
         command: SyncCommand,
     },
+    /// Signing-key operations.
+    Keys {
+        #[command(subcommand)]
+        command: KeysCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum KeysCommand {
+    /// Generate a new signing key and retire the current one.
+    ///
+    /// The old key's public half is written to the retired-key directory (it
+    /// keeps verifying tokens already issued); the new key replaces the active
+    /// PEM. Restart the server to start signing with it. Safe to repeat.
+    Rotate,
 }
 
 #[derive(Debug, Subcommand)]

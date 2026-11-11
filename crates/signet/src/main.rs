@@ -122,5 +122,25 @@ async fn main() -> anyhow::Result<()> {
             let state = signet::build_state(cfg).await?;
             signet::directory::cli::run(command, &state).await
         }
+        Some(SignetCommand::Keys { command }) => {
+            match command {
+                signet::directory::cli::KeysCommand::Rotate => {
+                    let kid = signet::crypto::keys::rotate(
+                        &cfg.jwt_private_key_path,
+                        &cfg.jwt_retired_key_dir,
+                    )?;
+                    // Printed as well as logged: this is a CLI, and the kid is
+                    // what the operator checks in /jwks afterwards.
+                    println!("new signing key: {kid}");
+                    println!(
+                        "retired key written to {}",
+                        cfg.jwt_retired_key_dir.display()
+                    );
+                    println!("restart signet to sign with the new key");
+                    tracing::info!(%kid, "signing key rotated");
+                }
+            }
+            Ok(())
+        }
     }
 }

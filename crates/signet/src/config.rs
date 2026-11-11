@@ -21,6 +21,10 @@ pub struct Config {
     /// default: the server would otherwise be an SSRF proxy into its own network.
     pub outbound_allow_private: bool,
     pub jwt_private_key_path: PathBuf,
+    /// Retired signing keys (public PEMs written by `signet keys rotate`).
+    /// Loaded at boot so tokens signed before a rotation keep verifying until
+    /// they expire. Missing directory = never rotated, which is normal.
+    pub jwt_retired_key_dir: PathBuf,
     pub encryption_key_path: PathBuf,
     pub session_ttl_hours: i64,
     pub auth_code_ttl_secs: i64,
@@ -123,6 +127,9 @@ impl Config {
         let jwt_private_key_path = env::var("SIGNET_JWT_PRIVATE_KEY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/jwt_private.pem"));
+        let jwt_retired_key_dir = env::var("SIGNET_JWT_RETIRED_KEY_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("./data/retired_keys"));
         let encryption_key_path = env::var("SIGNET_ENCRYPTION_KEY_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("./data/encryption.key"));
@@ -138,6 +145,7 @@ impl Config {
             cookie_secure,
             outbound_allow_private,
             jwt_private_key_path,
+            jwt_retired_key_dir,
             encryption_key_path,
             session_ttl_hours: 12,
             auth_code_ttl_secs: 300,

@@ -955,6 +955,7 @@ async fn create_user(
         &email,
         crate::admission::via::ADMIN,
         crate::http::extract::user_agent(&headers),
+        ip.as_deref(),
     )
     .await?;
     let email_exists: i64 =
@@ -1134,6 +1135,7 @@ async fn update_user(
             &email,
             crate::admission::via::ADMIN,
             crate::http::extract::user_agent(&headers),
+            ip.as_deref(),
         )
         .await?;
         let email_exists: i64 = sqlx::query_scalar(

@@ -173,7 +173,10 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         "runtime settings in effect (change these in Dashboard -> Settings)"
     );
 
-    let keys = crypto::keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
+    let keys = crypto::keys::JwtKeys::load_or_generate_with_retired(
+        &cfg.jwt_private_key_path,
+        Some(&cfg.jwt_retired_key_dir),
+    )?;
     let encryption_key = crypto::encryption::load_or_generate_key(&cfg.encryption_key_path)?;
     let encryptor = crypto::encryption::Encryptor::new(&encryption_key);
     let client_secret_key = Arc::new(crypto::encryption::client_secret_key(&encryption_key));

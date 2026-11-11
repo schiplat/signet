@@ -291,6 +291,14 @@ struct LoginStartBody {
     email: String,
 }
 
+/// Starts a passkey authentication ceremony.
+///
+/// Residual oracle, accepted and documented: "no passkeys for this account" is
+/// the same answer for an unknown address and for an account without passkeys,
+/// but an account *with* passkeys returns a challenge, so an attacker learns
+/// that much. Hiding it needs discoverable (resident) credentials — an empty
+/// allow-list for everyone — which changes the client contract and requires
+/// every passkey to be resident. Not done here.
 async fn login_start(
     State(state): State<AppState>,
     Json(body): Json<LoginStartBody>,

@@ -31,7 +31,9 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
     validation.set_issuer(std::slice::from_ref(&state.config.issuer));
     validation.validate_aud = false;
 
-    let data = jsonwebtoken::decode::<AccessClaims>(token, state.keys.decoding(), &validation)
+    let data = state
+        .keys
+        .verify::<AccessClaims>(token, &validation)
         .map_err(|_| AppError::unauthorized("invalid access_token"))?;
     if data.claims.token_use.as_deref() != Some("access") {
         return Err(AppError::unauthorized("not an access token"));

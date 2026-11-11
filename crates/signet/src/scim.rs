@@ -340,6 +340,10 @@ async fn create_user(
         &email,
         crate::admission::via::SCIM,
         crate::http::extract::user_agent(&headers),
+        // SCIM handlers authenticate a shared bearer token and carry no
+        // client-IP plumbing of their own; the user agent is the only
+        // attribution this machine-to-machine surface has.
+        None,
     )
     .await?;
 
@@ -494,6 +498,7 @@ async fn put_user(
             &email,
             crate::admission::via::SCIM,
             crate::http::extract::user_agent(&headers),
+            None,
         )
         .await?;
     }

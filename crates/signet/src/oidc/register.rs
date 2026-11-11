@@ -1,12 +1,13 @@
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 /// RFC 7591 — OAuth 2.0 Dynamic Client Registration.
@@ -27,6 +28,7 @@ pub struct RegisterBody {
 
 pub async fn register(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(body): Json<RegisterBody>,
 ) -> AppResult<impl IntoResponse> {
@@ -103,7 +105,7 @@ pub async fn register(
                 "client_name": body.client_name,
                 "via": "rfc7591",
             }),
-            ip: None,
+            ip: crate::http::extract::client_ip(&headers, Some(addr)),
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

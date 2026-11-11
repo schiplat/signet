@@ -25,6 +25,27 @@ pub fn verify_password(password: &str, password_hash: &str) -> Result<bool> {
         .is_ok())
 }
 
+/// Burns one Argon2 verification against a throwaway hash.
+///
+/// The unknown-account path in `login` calls this so an address that does not
+/// exist costs the same Argon2 round as one that does. Without it the fastest
+/// response is the one that says "no such account", which is a ready-made
+/// enumeration oracle for anyone with a stopwatch.
+pub async fn verify_password_dummy(password: &str) -> AppResult<()> {
+    static DUMMY: OnceLock<String> = OnceLock::new();
+    let hash = match DUMMY.get() {
+        Some(hash) => hash.clone(),
+        None => {
+            let hash = hash_password_offloaded("signet-dummy-password").await?;
+            let _ = DUMMY.set(hash.clone());
+            hash
+        }
+    };
+    // The result is irrelevant: the point is the work, not the match.
+    let _ = verify_password_offloaded(password, &hash).await?;
+    Ok(())
+}
+
 /// Bounds how many hashes are being computed at any one moment.
 ///
 /// Argon2 is memory-hard by design: the defaults below spend 19 MiB and tens of

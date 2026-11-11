@@ -35,7 +35,7 @@ pub async fn create_sign_in_session(
     ip: Option<&str>,
     user_agent: Option<&str>,
 ) -> AppResult<String> {
-    crate::admission::ensure_sign_in_allowed(state, user, via, user_agent.map(str::to_string))
+    crate::admission::ensure_sign_in_allowed(state, user, via, user_agent.map(str::to_string), ip)
         .await?;
 
     create_session(

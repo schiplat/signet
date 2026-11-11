@@ -39,7 +39,7 @@ use crate::http::extract::user_agent;
 use crate::models::User;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Extension, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
 use axum::{Json, Router};
@@ -246,6 +246,7 @@ pub async fn ensure_sign_in_allowed(
     user: &User,
     via: &str,
     user_agent: Option<String>,
+    ip: Option<&str>,
 ) -> AppResult<()> {
     let domains = allowed_domains(&state.pool, &state.config.allowed_email_domains).await?;
     if allows(&domains, &user.email) {
@@ -261,7 +262,7 @@ pub async fn ensure_sign_in_allowed(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "via": via, "email_domain": domain }),
-            ip: None,
+            ip: ip.map(str::to_string),
             user_agent,
             client_id: None,
         },
@@ -285,6 +286,7 @@ pub async fn ensure_provision_allowed(
     email: &str,
     via: &str,
     user_agent: Option<String>,
+    ip: Option<&str>,
 ) -> AppResult<()> {
     let domains = allowed_domains(&state.pool, &state.config.allowed_email_domains).await?;
     if allows(&domains, email) {
@@ -300,7 +302,7 @@ pub async fn ensure_provision_allowed(
             resource_type: "user",
             resource_id: None,
             detail: json!({ "via": via, "email_domain": domain }),
-            ip: None,
+            ip: ip.map(str::to_string),
             user_agent,
             client_id: None,
         },
@@ -343,10 +345,12 @@ struct PatchSignInSettings {
 async fn patch_sign_in_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<crate::http::extract::AuditIp>>,
     Json(body): Json<PatchSignInSettings>,
 ) -> AppResult<Json<Value>> {
     let actor = current_user(&state, &headers).await?;
     require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     let normalized = match &body.allowed_email_domains {
         Some(domains) => Some(
@@ -396,7 +400,7 @@ async fn patch_sign_in_settings(
                 "origin": effective["origin"],
                 "excluded_admins": excluded_admins,
             }),
-            ip: None,
+            ip,
             user_agent: user_agent(&headers),
             client_id: None,
         },

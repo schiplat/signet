@@ -266,6 +266,7 @@ pub(crate) async fn jit_create_user(
     provider_code: &str,
     profile: &UpstreamProfile,
     email_verified: bool,
+    ip: Option<&str>,
 ) -> AppResult<Uuid> {
     let email = profile
         .email
@@ -286,8 +287,14 @@ pub(crate) async fn jit_create_user(
     // with a reason. This one is here so that a future caller of this function
     // cannot create an account the allowlist excludes by simply not knowing about
     // it — the check belongs to the act of creating the account.
-    crate::admission::ensure_provision_allowed(state, &email, crate::admission::via::SSO_JIT, None)
-        .await?;
+    crate::admission::ensure_provision_allowed(
+        state,
+        &email,
+        crate::admission::via::SSO_JIT,
+        None,
+        ip,
+    )
+    .await?;
 
     let id = Uuid::new_v4();
     let sub = id.to_string();
@@ -330,7 +337,7 @@ pub(crate) async fn jit_create_user(
                     "provider": provider_code,
                     "email": email,
                 }),
-                ip: None,
+                ip: ip.map(str::to_string),
                 user_agent: None,
                 client_id: None,
             },
