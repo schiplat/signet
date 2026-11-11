@@ -53,7 +53,7 @@ pub async fn state_with(adjust: impl FnOnce(&mut Config)) -> Option<AppState> {
     // not a defect in the code under test. This probe is what tells the two
     // apart, and it has to be a *separate* connection from `build_state`'s, so
     // that "the server answered" is known before anything else can fail.
-    if let Err(e) = signet::db::connect(&cfg.database_url).await {
+    if let Err(e) = signet::db::connect(&cfg.database_url, cfg.db_max_connections).await {
         eprintln!(
             "skipping DB-backed tests: no database at {}: {e}",
             cfg.database_url

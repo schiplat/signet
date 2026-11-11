@@ -4,12 +4,15 @@ import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import {
   fetchMfaSettings,
+  fetchRuntimeSettings,
   fetchSignInSettings,
   fetchSsoSettings,
   me,
   updateMfaSettings,
+  updateRuntimeSettings,
   updateSignInSettings,
   updateSsoSettings,
+  type RuntimeSettings,
 } from "@/lib/api";
 import { joinList, splitList } from "@/lib/directoryMapping";
 
@@ -23,6 +26,34 @@ const requiredGlobally = ref(false);
 const ssoSaving = ref(false);
 const ssoSaved = ref(false);
 const jitProvision = ref(false);
+
+/**
+ * Operational policy. Values here take effect on the next request — no
+ * redeploy — and the environment only applies to fields nobody has saved here.
+ */
+const runtime = ref<RuntimeSettings | null>(null);
+const runtimeOverridden = ref<(keyof RuntimeSettings)[]>([]);
+const runtimeSaving = ref(false);
+const runtimeSaved = ref(false);
+const runtimeRows: {
+  key: keyof RuntimeSettings;
+  label: string;
+  hint: string;
+  min: number;
+  max: number;
+}[] = [
+  { key: "session_ttl_hours", label: "Session lifetime", hint: "hours a dashboard session stays valid", min: 1, max: 720 },
+  { key: "auth_code_ttl_secs", label: "Authorization code lifetime", hint: "seconds an OIDC code can be exchanged", min: 30, max: 3600 },
+  { key: "access_token_ttl_secs", label: "Access token lifetime", hint: "seconds an access token is accepted", min: 60, max: 86400 },
+  { key: "id_token_ttl_secs", label: "ID token lifetime", hint: "seconds an ID token is accepted", min: 60, max: 86400 },
+  { key: "refresh_token_ttl_days", label: "Refresh token lifetime", hint: "days a refresh token lives before re-auth", min: 1, max: 365 },
+  { key: "max_login_attempts", label: "Login attempts before lockout", hint: "failed passwords charged to the account", min: 1, max: 100 },
+  { key: "lockout_minutes", label: "Lockout duration", hint: "minutes the account stays locked", min: 1, max: 1440 },
+  { key: "password_min_length", label: "Minimum password length", hint: "characters required for a new password", min: 8, max: 128 },
+  { key: "password_history_size", label: "Password history", hint: "previous passwords that cannot be reused (0 = off)", min: 0, max: 24 },
+  { key: "audit_retention_days", label: "Audit retention", hint: "days audit rows are kept before the hourly sweep", min: 1, max: 3650 },
+  { key: "rate_limit_per_minute", label: "Rate limit", hint: "requests per minute per client IP", min: 1, max: 100000 },
+];
 
 const allowlistSaving = ref(false);
 const allowlistSaved = ref(false);
@@ -58,17 +89,20 @@ const allowlistLocksMeOut = computed(() => {
 
 onMounted(async () => {
   try {
-    const [mfa, sso, signIn, who] = await Promise.all([
+    const [mfa, sso, signIn, who, runtimeRes] = await Promise.all([
       fetchMfaSettings(),
       fetchSsoSettings(),
       fetchSignInSettings(),
       me(),
+      fetchRuntimeSettings(),
     ]);
     requiredGlobally.value = mfa.required_globally;
     jitProvision.value = sso.jit_provision;
     allowlistInput.value = joinList(signIn.allowed_email_domains);
     allowlistOrigin.value = signIn.origin;
     ownEmail.value = who.user.email;
+    runtime.value = runtimeRes.settings;
+    runtimeOverridden.value = runtimeRes.overridden;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load settings";
   } finally {
@@ -108,6 +142,23 @@ async function onSaveMfa() {
     error.value = e instanceof Error ? e.message : "Save failed";
   } finally {
     mfaSaving.value = false;
+  }
+}
+
+async function onSaveRuntime() {
+  if (!runtime.value) return;
+  error.value = "";
+  runtimeSaved.value = false;
+  runtimeSaving.value = true;
+  try {
+    const res = await updateRuntimeSettings({ ...runtime.value });
+    runtime.value = res.settings;
+    runtimeOverridden.value = res.overridden;
+    runtimeSaved.value = true;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Save failed";
+  } finally {
+    runtimeSaving.value = false;
   }
 }
 
@@ -219,6 +270,49 @@ async function onSaveSso() {
             {{ allowlistSaving ? "Saving…" : "Save" }}
           </UiButton>
           <span v-if="allowlistSaved" class="text-xs text-muted-foreground">Saved</span>
+        </div>
+      </section>
+
+      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">Runtime policies</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            Token lifetimes, lockout and password policy, audit retention and the global rate
+            limit. Changes apply immediately; a field shows <em>env</em> when nothing has been
+            saved here and the environment value is in force.
+          </p>
+        </div>
+
+        <div v-if="runtime" class="space-y-3">
+          <label
+            v-for="row in runtimeRows"
+            :key="row.key"
+            class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3"
+          >
+            <span class="flex-1">
+              <span class="block text-sm font-medium">{{ row.label }}</span>
+              <span class="mt-0.5 block text-xs text-muted-foreground">
+                {{ row.hint }} · {{ runtime[row.key] }}
+                <template v-if="!runtimeOverridden.includes(row.key)">
+                  (from <code class="text-[11px]">env</code>)
+                </template>
+              </span>
+            </span>
+            <input
+              v-model.number="runtime[row.key]"
+              type="number"
+              :min="row.min"
+              :max="row.max"
+              class="field-input w-28 text-right font-mono text-[12px]"
+            />
+          </label>
+        </div>
+
+        <div class="flex items-center gap-3">
+          <UiButton size="sm" :disabled="runtimeSaving || !runtime" @click="onSaveRuntime">
+            {{ runtimeSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <span v-if="runtimeSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
       </section>
 

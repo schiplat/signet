@@ -78,6 +78,8 @@ SIGNET_ISSUER=http://localhost:8443
 | `SIGNET_TRUSTED_PROXIES` | Only behind a reverse proxy: comma-separated proxy IPs/CIDRs allowed to assert `X-Forwarded-For` |
 | Keys | `./data/jwt_private.pem` and `./data/encryption.key` are auto-generated on first boot — **back them up**: losing or rotating them invalidates issued tokens and stored TOTP secrets |
 
+Operational policy — session and token lifetimes, login attempts and lockout, password length/history, audit retention, the global rate limit — can be changed at runtime under **Dashboard → Settings → Runtime policies**; no restart or `.env` edit. The matching `SIGNET_*` variables are only fallbacks for fields nobody has saved there (the UI marks which ones are still inherited).
+
 The first administrator is **not** configured via the file: on first boot the dashboard redirects to `/setup` to create it.
 
 ### First run

@@ -20,6 +20,7 @@ pub mod oidc;
 pub mod outbound;
 pub mod roles;
 pub mod scim;
+pub mod settings;
 pub mod setup;
 pub mod state;
 pub mod webhooks;
@@ -83,6 +84,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(webhooks::router())
         .merge(directory::api::router())
         .merge(admission::router())
+        .merge(settings::router())
         .merge(setup::router());
 
     let api = Router::new()
@@ -113,18 +115,41 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         // Security-relevant downshift: make it loud in the logs.
         tracing::warn!("outbound private-address blocking is disabled");
     }
-    let pool = db::connect(&cfg.database_url).await?;
+    let pool = db::connect(&cfg.database_url, cfg.db_max_connections).await?;
     db::migrate(&pool).await?;
-    bootstrap::ensure_scim_token(&pool, &cfg).await?;
 
-    if let Err(e) = audit::prune_audit_logs(&pool, cfg.audit_retention_days).await {
-        tracing::warn!(error = %e, "failed to prune old audit logs");
-    }
+    // Operational policy: DB overrides layered over the environment. Loaded
+    // once here so boot-time decisions (the rate limiter's initial budget, the
+    // startup summary) agree with the first request.
+    let (runtime, overridden) = settings::load(&pool, &cfg).await;
+    let rate_limit_per_minute = runtime.rate_limit_per_minute;
+
+    // Audit pruning deliberately does NOT run at boot any more: it was a
+    // synchronous DELETE that could hold up startup on a large table, and the
+    // hourly sweeper (maintenance) now owns retention. Boot-time work stays to
+    // what must be true before the first request.
+    bootstrap::ensure_scim_token(&pool, &cfg).await?;
 
     // An allowlist that excludes every admin cannot be fixed from inside the
     // product — the dashboard needs a sign-in it refuses — so say so at startup,
     // where the operator can still reach the environment.
     admission::warn_if_all_admins_excluded(&pool, &cfg.allowed_email_domains).await;
+
+    tracing::info!(
+        session_ttl_hours = runtime.session_ttl_hours,
+        auth_code_ttl_secs = runtime.auth_code_ttl_secs,
+        access_token_ttl_secs = runtime.access_token_ttl_secs,
+        id_token_ttl_secs = runtime.id_token_ttl_secs,
+        refresh_token_ttl_days = runtime.refresh_token_ttl_days,
+        max_login_attempts = runtime.max_login_attempts,
+        lockout_minutes = runtime.lockout_minutes,
+        password_min_length = runtime.password_min_length,
+        password_history_size = runtime.password_history_size,
+        audit_retention_days = runtime.audit_retention_days,
+        rate_limit_per_minute = runtime.rate_limit_per_minute,
+        db_overrides = ?overridden,
+        "runtime settings in effect (change these in Dashboard -> Settings)"
+    );
 
     let keys = crypto::keys::JwtKeys::load_or_generate(&cfg.jwt_private_key_path)?;
     let encryption_key = crypto::encryption::load_or_generate_key(&cfg.encryption_key_path)?;
@@ -134,7 +159,6 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     // Deliberately fatal: carrying on would leave `secret_enc` NULL and
     // silently downgrade webhook deliveries to unsigned.
     bootstrap::encrypt_webhook_secrets(&pool, &encryptor).await?;
-    let rate_limit_per_minute = cfg.rate_limit_per_minute;
     let webauthn = {
         let origin = url::Url::parse(&cfg.webauthn_rp_origin)
             .context("invalid SIGNET_WEBAUTHN_RP_ORIGIN")?;
@@ -146,6 +170,8 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     Ok(AppState {
         pool,
         config: Arc::new(cfg),
+        settings: Arc::new(std::sync::RwLock::new(runtime)),
+        runtime_overridden: Arc::new(std::sync::RwLock::new(overridden)),
         keys: Arc::new(keys),
         encryptor: Arc::new(encryptor),
         client_secret_key,

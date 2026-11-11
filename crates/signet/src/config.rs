@@ -8,6 +8,11 @@ use std::str::FromStr;
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    /// Connection pool ceiling. Not a dashboard setting: it is a capacity
+    /// decision tied to the database server, not an operational policy, and a
+    /// value too small for the process's own query fan-out is a deployment
+    /// error rather than something to tune live.
+    pub db_max_connections: u32,
     pub http_bind: SocketAddr,
     pub issuer: String,
     pub cookie_secure: bool,
@@ -114,6 +119,10 @@ impl Config {
 
         Ok(Self {
             database_url,
+            db_max_connections: env::var("SIGNET_DB_MAX_CONNECTIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(20),
             http_bind,
             issuer,
             cookie_secure,

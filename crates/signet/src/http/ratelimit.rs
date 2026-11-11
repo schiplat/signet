@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -14,7 +15,11 @@ use crate::state::AppState;
 /// In-memory sliding-window rate limiter keyed by client IP.
 pub struct RateLimiter {
     window: Duration,
-    limit: usize,
+    /// Requests per window. Atomic because the limit is a runtime setting: an
+    /// administrator can change it from the dashboard and the next request must
+    /// honour the new value without a restart. Existing buckets are kept — the
+    /// new limit applies to them at the next admission decision.
+    limit: AtomicUsize,
     state: Mutex<HashMap<String, VecDeque<Instant>>>,
 }
 
@@ -22,9 +27,13 @@ impl RateLimiter {
     pub fn new(per_minute: usize) -> Self {
         Self {
             window: Duration::from_secs(60),
-            limit: per_minute,
+            limit: AtomicUsize::new(per_minute),
             state: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn set_limit(&self, per_minute: usize) {
+        self.limit.store(per_minute, Ordering::Relaxed);
     }
 
     fn allow(&self, key: &str) -> bool {
@@ -51,7 +60,7 @@ impl RateLimiter {
         {
             q.pop_front();
         }
-        if q.len() >= self.limit {
+        if q.len() >= self.limit.load(Ordering::Relaxed) {
             return false;
         }
         q.push_back(now);

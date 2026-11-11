@@ -249,7 +249,7 @@ async fn issue_session(
         .add(session_cookie(
             &token,
             state.config.cookie_secure,
-            state.config.session_ttl_hours,
+            state.rt().session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
 
@@ -410,7 +410,7 @@ pub async fn begin_login_mfa_flow(
     let jar = jar.add(session_cookie(
         &token,
         state.config.cookie_secure,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
     ));
     crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
     record(
@@ -475,8 +475,8 @@ pub(crate) async fn force_password_change(
         &state.pool,
         user.id,
         &body.new_password,
-        state.config.password_min_length,
-        state.config.password_history_size,
+        state.rt().password_min_length,
+        state.rt().password_history_size,
     )
     .await?;
 
@@ -594,9 +594,19 @@ async fn verify_mfa(
                     // The conditional advance is the claim — two concurrent
                     // verifications of one code cannot both move the
                     // watermark, and the loser is a replay.
+                    //
+                    // The third arm is the clock-jump escape hatch: a watermark
+                    // more than 10 minutes ahead of the presented code means the
+                    // server clock moved backwards (NTP correction, VM
+                    // migration), not that the user replayed an old code — a
+                    // code that old is outside the ±1-step window and could
+                    // never have matched. Without it, TOTP sign-in stays refused
+                    // until wall time catches up with the stale mark.
                     let advanced = sqlx::query(
                         "UPDATE users SET totp_last_step = $1 \
-                         WHERE id = $2 AND (totp_last_step IS NULL OR totp_last_step < $1)",
+                         WHERE id = $2 AND (totp_last_step IS NULL \
+                                            OR totp_last_step < $1 \
+                                            OR totp_last_step > $1 + 20)",
                     )
                     .bind(step as i64)
                     .bind(user.id)
@@ -804,7 +814,7 @@ async fn enroll_confirm_challenge(
         .add(session_cookie(
             &token,
             state.config.cookie_secure,
-            state.config.session_ttl_hours,
+            state.rt().session_ttl_hours,
         ))
         .add(clear_mfa_cookie(state.config.cookie_secure));
 

@@ -249,6 +249,48 @@ export async function updateSignInSettings(allowed_email_domains: string[] | nul
   return parseJson<SignInSettings>(res);
 }
 
+/** Operational policy that can be changed here instead of redeploying. */
+export type RuntimeSettings = {
+  session_ttl_hours: number;
+  auth_code_ttl_secs: number;
+  access_token_ttl_secs: number;
+  id_token_ttl_secs: number;
+  refresh_token_ttl_days: number;
+  max_login_attempts: number;
+  lockout_minutes: number;
+  password_min_length: number;
+  password_history_size: number;
+  audit_retention_days: number;
+  rate_limit_per_minute: number;
+};
+
+export type RuntimeSettingsResponse = {
+  settings: RuntimeSettings;
+  /** Fields currently overridden in the database (the rest come from env). */
+  overridden: (keyof RuntimeSettings)[];
+  /** Empty today; the UI grows a badge here when something needs a restart. */
+  restart_required: (keyof RuntimeSettings)[];
+};
+
+export async function fetchRuntimeSettings() {
+  const res = await fetch("/api/v1/admin/settings/runtime", { credentials: "include" });
+  return parseJson<RuntimeSettingsResponse>(res);
+}
+
+export async function updateRuntimeSettings(patch: Partial<RuntimeSettings>) {
+  const res = await fetch("/api/v1/admin/settings/runtime", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(patch),
+  });
+  return parseJson<{
+    settings: RuntimeSettings;
+    changed: (keyof RuntimeSettings)[];
+    overridden: (keyof RuntimeSettings)[];
+  }>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);

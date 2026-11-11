@@ -73,7 +73,7 @@ async fn setup_admin(
     if email.is_empty() || !email.contains('@') {
         return Err(AppError::bad_request("invalid email"));
     }
-    validate_password_strength(&body.password, state.config.password_min_length)
+    validate_password_strength(&body.password, state.rt().password_min_length)
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let ip = client_ip(&headers, Some(addr));
@@ -117,7 +117,7 @@ async fn setup_admin(
     let token = create_session(
         &state.pool,
         user.id,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
         ip.as_deref(),
         user_agent.as_deref(),
     )
@@ -125,7 +125,7 @@ async fn setup_admin(
     let jar = jar.add(session_cookie(
         &token,
         state.config.cookie_secure,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
     ));
 
     record(

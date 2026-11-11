@@ -1012,7 +1012,7 @@ async fn finish_sign_in(
     let session = crate::auth::session::session_cookie(
         &token,
         state.config.cookie_secure,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
     );
 
     crate::auth::login_alert::track_login(&state, &user, ip.as_deref(), user_agent.as_deref())

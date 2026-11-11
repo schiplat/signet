@@ -178,8 +178,8 @@ async fn confirm_reset(
         &state.pool,
         user_id,
         &body.new_password,
-        state.config.password_min_length,
-        state.config.password_history_size,
+        state.rt().password_min_length,
+        state.rt().password_history_size,
     )
     .await?;
 

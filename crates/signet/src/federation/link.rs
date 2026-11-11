@@ -147,6 +147,24 @@ pub async fn confirm_pending_link(
         return Err(AppError::not_found("no pending sso identity"));
     };
 
+    // A provider deleted between stash and confirm is a clean refusal, not a
+    // foreign-key violation: `provider_allows` treats a missing row as "carry
+    // on" (its caller is normally the callback, where the next query reports
+    // the deletion), but here the next statement is an INSERT into
+    // `user_identities`, whose `provider_code` has an FK to
+    // `upstream_providers(code)`. Without this check the user gets a 500 and
+    // the stash has already been consumed.
+    let provider_exists: Option<String> =
+        sqlx::query_scalar("SELECT code FROM upstream_providers WHERE code = $1")
+            .bind(&provider_code)
+            .fetch_optional(&state.pool)
+            .await?;
+    if provider_exists.is_none() {
+        return Err(AppError::not_found(
+            "this sign-in provider no longer exists; ask an administrator to re-enable it",
+        ));
+    }
+
     // Admission at consume time. The checks ran when the identity was stashed,
     // but the lists are editable: a provider narrowed or deleted in between
     // must not retroactively admit an identity into a local account. The

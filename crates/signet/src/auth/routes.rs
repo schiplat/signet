@@ -177,8 +177,8 @@ async fn login(
         .bind(user.id)
         .fetch_one(&state.pool)
         .await?;
-        if attempts as i64 >= state.config.max_login_attempts {
-            let until = Utc::now() + Duration::minutes(state.config.lockout_minutes);
+        if attempts as i64 >= state.rt().max_login_attempts {
+            let until = Utc::now() + Duration::minutes(state.rt().lockout_minutes);
             sqlx::query(
                 "UPDATE users SET failed_login_attempts = 0, locked_until = $2, updated_at = NOW() WHERE id = $1",
             )
@@ -627,8 +627,8 @@ async fn change_password(
         &state.pool,
         user.id,
         &body.new_password,
-        state.config.password_min_length,
-        state.config.password_history_size,
+        state.rt().password_min_length,
+        state.rt().password_history_size,
     )
     .await?;
 

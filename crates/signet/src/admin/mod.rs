@@ -977,7 +977,7 @@ async fn create_user(
             return Err(AppError::bad_request("username already exists"));
         }
     }
-    validate_password_strength(&body.password, state.config.password_min_length)
+    validate_password_strength(&body.password, state.rt().password_min_length)
         .map_err(|e| AppError::bad_request(e.to_string()))?;
 
     let role = Role::parse(body.role.as_deref().unwrap_or("member"))?;
@@ -1244,8 +1244,8 @@ async fn update_user(
                 &state.pool,
                 id,
                 pw,
-                state.config.password_min_length,
-                state.config.password_history_size,
+                state.rt().password_min_length,
+                state.rt().password_history_size,
             )
             .await?;
             // An admin-set password retires everything the old one authorized:

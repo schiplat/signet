@@ -31,7 +31,7 @@ pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(TICK).await;
-            let days = state.config.audit_retention_days;
+            let days = state.rt().audit_retention_days;
             if let Err(e) = sweep_once(&state, days).await {
                 tracing::warn!(error = %e, "maintenance sweep failed; retrying next tick");
             }

@@ -406,7 +406,7 @@ async fn login_finish(
     let jar = jar.add(session_cookie(
         &token,
         state.config.cookie_secure,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
     ));
 
     crate::auth::login_alert::track_login(

@@ -74,6 +74,8 @@ SIGNET_ISSUER=http://localhost:8443
 | `SIGNET_TRUSTED_PROXIES` | 仅反向代理后需要：允许断言 `X-Forwarded-For` 的代理 IP/CIDR，逗号分隔 |
 | 密钥 | `./data/jwt_private.pem` 与 `./data/encryption.key` 首次启动自动生成——**务必备份**：丢失或轮换会使已签发 token 失效、已存 TOTP 无法解密 |
 
+运维策略（会话与 token 有效期、登录尝试与锁定、密码长度/历史、审计保留、全局限流）可在 **Dashboard → Settings → Runtime policies** 在线修改，无需重启或改 `.env`；同名 `SIGNET_*` 变量只是"尚未在后台保存过"字段的兜底（界面会标注哪些仍继承自环境）。
+
 首位管理员**不**通过配置文件创建：首次启动时 Dashboard 会跳转 `/setup` 创建。
 
 ### 首次运行

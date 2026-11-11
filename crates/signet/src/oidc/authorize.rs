@@ -173,7 +173,7 @@ pub async fn authorize(
 
     let code = random_token(32);
     let code_hash = sha256_hex(&code);
-    let expires_at = Utc::now() + Duration::seconds(state.config.auth_code_ttl_secs);
+    let expires_at = Utc::now() + Duration::seconds(state.rt().auth_code_ttl_secs);
 
     sqlx::query(
         r#"

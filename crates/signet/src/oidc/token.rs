@@ -367,8 +367,8 @@ async fn build_token_response(
     family: Option<Uuid>,
 ) -> AppResult<serde_json::Value> {
     let now = Utc::now();
-    let access_exp = now + Duration::seconds(state.config.access_token_ttl_secs);
-    let id_exp = now + Duration::seconds(state.config.id_token_ttl_secs);
+    let access_exp = now + Duration::seconds(state.rt().access_token_ttl_secs);
+    let id_exp = now + Duration::seconds(state.rt().id_token_ttl_secs);
 
     let access_claims = AccessTokenClaims {
         iss: state.config.issuer.clone(),
@@ -402,7 +402,7 @@ async fn build_token_response(
 
     let refresh = random_token(32);
     let refresh_hash = sha256_hex(&refresh);
-    let refresh_exp = now + Duration::days(state.config.refresh_token_ttl_days);
+    let refresh_exp = now + Duration::days(state.rt().refresh_token_ttl_days);
     sqlx::query(
         r#"
         INSERT INTO refresh_tokens (id, token_hash, client_id, user_id, scope, family_id, expires_at)
@@ -424,7 +424,7 @@ async fn build_token_response(
     Ok(json!({
         "access_token": access_token,
         "token_type": "Bearer",
-        "expires_in": state.config.access_token_ttl_secs,
+        "expires_in": state.rt().access_token_ttl_secs,
         "refresh_token": refresh,
         "id_token": id_token,
         "scope": scope,

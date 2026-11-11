@@ -41,7 +41,7 @@ pub async fn create_sign_in_session(
     create_session(
         &state.pool,
         user.id,
-        state.config.session_ttl_hours,
+        state.rt().session_ttl_hours,
         ip,
         user_agent,
     )

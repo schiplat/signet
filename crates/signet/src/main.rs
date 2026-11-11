@@ -61,6 +61,38 @@ fn init_logger() {
     }
 }
 
+/// Resolves on SIGINT or SIGTERM. `axum::serve` then stops accepting and drains
+/// in-flight requests.
+///
+/// Container orchestration stops a container with SIGTERM: without this, every
+/// rolling restart cut live requests, half-finished directory syncs and in-flight
+/// audit/webhook writes. Draining is also what lets a sync close its run row
+/// instead of leaving it `running` for the staleness sweep.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            // No SIGTERM handler available (should not happen on unix): wait
+            // forever, so the SIGINT arm still works on its own.
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("shutdown signal received; draining connections");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_logger();
@@ -82,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
                 listener,
                 app.into_make_service_with_connect_info::<SocketAddr>(),
             )
+            .with_graceful_shutdown(shutdown_signal())
             .await?;
             Ok(())
         }
