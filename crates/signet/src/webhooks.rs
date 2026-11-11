@@ -4,6 +4,7 @@ use crate::error::{AppError, AppResult};
 use crate::http::extract::AuditIp;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
+use anyhow::Result;
 use axum::extract::{Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::routing::get;
@@ -188,50 +189,39 @@ async fn list_deliveries(
     Ok(Json(rows))
 }
 
-/// Fire-and-forget dispatch of an audit event to all enabled webhooks.
+/// Dispatches an audit event to all enabled webhooks via the outbox.
+///
+/// One durable row per receiver: the caller returns after a single INSERT, and
+/// the outbox worker owns delivery and retries. (This used to spawn a task with
+/// a single attempt — a restart lost in-flight dispatches and a receiver blip
+/// lost the event for good.)
 pub fn dispatch(state: &AppState, event_id: Uuid, payload: Value) {
     let state = state.clone();
     tokio::spawn(async move {
-        if let Err(e) = deliver_all(&state, event_id, &payload).await {
-            tracing::warn!(error = %e, "webhook dispatch failed");
+        if let Err(e) = crate::outbox::enqueue_webhook(&state, event_id, &payload).await {
+            tracing::warn!(error = %e, %event_id, "failed to enqueue webhook deliveries");
         }
     });
 }
 
 #[derive(Debug, sqlx::FromRow)]
-struct WebhookRow {
-    id: Uuid,
-    url: String,
-    kind: String,
-    /// AES-256-GCM blob, decrypted at delivery time with the application key.
-    secret_enc: Option<String>,
+
+pub(crate) struct WebhookRef {
+    pub id: Uuid,
+    pub url: String,
+    pub secret_enc: Option<String>,
+    pub kind: String,
 }
 
-async fn deliver_all(state: &AppState, event_id: Uuid, payload: &Value) -> AppResult<()> {
-    let rows = sqlx::query_as::<_, WebhookRow>(
-        "SELECT id, url, kind, secret_enc FROM webhooks WHERE enabled = TRUE",
-    )
-    .fetch_all(&state.pool)
-    .await?;
-
-    for wh in rows {
-        let state = state.clone();
-        let payload = payload.clone();
-        tokio::spawn(async move {
-            if let Err(e) = deliver_one(&state, &wh, event_id, &payload).await {
-                tracing::warn!(webhook = %wh.id, error = %e, "webhook delivery failed");
-            }
-        });
-    }
-    Ok(())
-}
-
-async fn deliver_one(
+/// One delivery attempt against one receiver. Moved here from the old
+/// `deliver_all` loop unchanged (validation, pinning, signing, recording) —
+/// only the ownership moved, to the outbox worker.
+pub(crate) async fn attempt_delivery(
     state: &AppState,
-    wh: &WebhookRow,
+    wh: &WebhookRef,
     event_id: Uuid,
     payload: &Value,
-) -> AppResult<()> {
+) -> Result<()> {
     // A secret we cannot decrypt is treated as "no secret": signing would be
     // wrong, and failing the delivery outright would be worse than an unsigned
     // (still HMAC-less) attempt. The mismatch is already visible via
@@ -294,7 +284,11 @@ async fn deliver_one(
     .execute(&state.pool)
     .await?;
 
-    Ok(())
+    if success {
+        Ok(())
+    } else {
+        anyhow::bail!("delivery failed")
+    }
 }
 
 /// Build a Feishu custom-bot message body (interactive card), with optional

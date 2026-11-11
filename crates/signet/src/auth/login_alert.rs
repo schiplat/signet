@@ -1,5 +1,4 @@
 use crate::audit::{record, AuditEvent};
-use crate::email;
 use crate::models::User;
 use crate::state::AppState;
 use serde_json::json;
@@ -47,8 +46,9 @@ pub async fn track_login(
     )
     .await;
 
-    // Best effort: a failed alert must never fail the sign-in it describes.
-    if let Err(e) = email::send(
+    // Best effort, via the outbox: a failed alert must never fail the sign-in
+    // it describes, and the worker owns retrying a flaky relay.
+    if let Err(e) = crate::outbox::enqueue_email(
         state,
         &user.email,
         "Signet new sign-in device",
@@ -64,7 +64,7 @@ pub async fn track_login(
     )
     .await
     {
-        tracing::warn!(error = %e, email = %user.email, "new-device alert email failed");
+        tracing::warn!(error = %e, email = %user.email, "new-device alert enqueue failed");
     }
 }
 

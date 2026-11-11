@@ -15,6 +15,11 @@ pub struct AppState {
     /// Live operational policy (DB > env > default). Read through [`Self::rt`]
     /// at the point of use, never cached in a long-lived object, so a settings
     /// change applies to the next request.
+    ///
+    /// Multi-replica: a PATCH publishes here and to the database; peer
+    /// replicas converge via the background re-reader in [`crate::settings`]
+    /// (a 30-second interval), so cross-replica propagation is bounded by that
+    /// interval rather than "at next restart".
     pub(crate) settings: Arc<RwLock<RuntimeSettings>>,
     /// Field names the database currently overrides; reported by the admin API
     /// so the UI can mark "inherited from environment" vs "set here".

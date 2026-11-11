@@ -215,6 +215,7 @@
 | `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503） |
 | `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH（可信中继可省略） |
 | `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | 指标监听地址；`off` 关闭 |
+| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签） |
 | `SIGNET_EMAIL_FROM` | — | 邮件发件人 |
 | `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API 认证 token（可选，仅作首次启动种子；后续由后台 UI 管理） |
 | `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |

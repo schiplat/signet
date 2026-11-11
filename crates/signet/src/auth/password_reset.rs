@@ -101,7 +101,11 @@ async fn request_reset(
         // The body carries the live token, so it is logged only behind the dev
         // opt-in — a reset link in a log stream is a working account takeover
         // for anyone who can read the logs.
-        crate::email::send(
+        // Enqueued, not awaited: the SMTP round trip used to sit inside this
+        // request, so a slow relay stalled the one request a locked-out user
+        // cannot afford to hang. The outbox worker owns delivery and retries;
+        // a transport failure surfaces there, and the token is already valid.
+        crate::outbox::enqueue_email(
             &state,
             &user.1,
             "Signet password reset",
@@ -113,10 +117,8 @@ async fn request_reset(
         )
         .await
         .map_err(|e| {
-            // The token is already stored, so a retry of this request still
-            // works; the caller gets a 502 rather than a silent no-op.
-            tracing::error!(error = %e, email = %user.1, "password reset email failed");
-            AppError::upstream("the reset email could not be delivered; try again later")
+            tracing::error!(error = %e, email = %user.1, "password reset email enqueue failed");
+            AppError::upstream("the reset email could not be queued; try again later")
         })?;
 
         // Dev/test convenience: without a real mailer, surface the link once —

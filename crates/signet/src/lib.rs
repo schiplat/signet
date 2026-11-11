@@ -18,6 +18,7 @@ pub mod mfa;
 pub mod models;
 pub mod oidc;
 pub mod outbound;
+pub mod outbox;
 pub mod roles;
 pub mod scim;
 pub mod settings;
@@ -71,6 +72,13 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     // module docs). Boot-time only used to be the whole story for retention,
     // which silently re-grew past the configured window between restarts.
     maintenance::spawn(state.clone());
+
+    // Converge runtime settings across replicas every 30s (the PATCH path
+    // publishes to its own process instantly; this is the cross-replica path).
+    settings::spawn_refresher(state.clone());
+
+    // Durable webhook/email delivery with backoff (see the module docs).
+    outbox::spawn(state.clone());
 
     // Metrics get their own listener. They used to be an unauthenticated route
     // on the public API: token-issuance, login-failure and lockout counters are

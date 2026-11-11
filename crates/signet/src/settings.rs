@@ -187,6 +187,33 @@ pub struct RuntimePatch {
     rate_limit_per_minute: Option<usize>,
 }
 
+/// Re-reads the database periodically so every replica converges on the saved
+/// policy without a restart.
+///
+/// The PATCH path publishes to its own process instantly; this task is what
+/// carries a change *across* replicas (and picks up a hand-edited
+/// `app_settings` row). Interval over immediacy: a 30-second worst case is
+/// fine for operational policy, and per-request DB reads on the token-mint
+/// path would cost far more than they could ever buy. A failed re-read keeps
+/// the previous snapshot — stale policy beats an unavailable IdP.
+pub fn spawn_refresher(state: AppState) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(REFRESH_INTERVAL);
+        ticker.tick().await; // the boot load already ran; skip tick zero
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let (next, overridden) = load(&state.pool, &state.config).await;
+            state.publish_settings(next);
+            state.replace_overridden(overridden);
+            state.rate_limiter.set_limit(next.rate_limit_per_minute);
+        }
+    });
+}
+
+/// How often the background re-reader converges replicas.
+const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub fn router() -> Router<AppState> {
     Router::new().route(
         "/admin/settings/runtime",
