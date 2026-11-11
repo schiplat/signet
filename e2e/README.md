@@ -24,6 +24,11 @@ has its own JWT and encryption keys (legitimate — separate databases).
   (including id_token validation failures = script failure), test-drive
   endpoint (one-time code, uncovered-parts note), global-MFA enrollment and
   TOTP gates on the password path.
+- `e2e_ops.sh` — a throwaway instance on :8445 exercising the operational
+  surface: security/cache headers, /metrics on its own listener (and NOT on
+  the public port), RP-initiated logout (GET needs a signed hint, POST does
+  not), and `signet keys rotate` / `keys prune` against a real process with
+  a JWKS check after restart. Creates and removes its own database/data dir.
 - `e2e_sso.sh` — upstream world bootstrap, JIT creation (`sso_jit`, member, no
   password) landing on the `sso_step=enroll` gate with `via=sso`, enrollment
   continuation, auto-link without duplicate accounts, `jit_mode=off` refusal
@@ -38,6 +43,7 @@ Both scratch databases are **dropped and recreated** on every run.
 ```bash
 # on the lab host, from the repo checkout
 bash e2e/run_all.sh            # prints PASS/FAIL per assertion + SUMMARY
+                               # (core, sso, ops; exit code = failures)
 ```
 
 All lab specifics are env-overridable — see `e2e/lib.sh` (`E2E_REPO`, `E2E_DOWN`,

@@ -12,4 +12,6 @@ psql -h "$E2E_PG_HOST" -U "$E2E_PG_USER" -d postgres \
 bash "$SCRIPT_DIR/start_instances.sh"
 bash "$SCRIPT_DIR/e2e_core.sh"; CORE=$?
 bash "$SCRIPT_DIR/e2e_sso.sh"; SSO=$?
-echo "SUMMARY core=$CORE sso=$SSO"
+# Ops runs last: it starts its own throwaway instance and cleans it up.
+bash "$SCRIPT_DIR/e2e_ops.sh"; OPS=$?
+echo "SUMMARY core=$CORE sso=$SSO ops=$OPS"
