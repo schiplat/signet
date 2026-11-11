@@ -376,6 +376,21 @@ Signet **不是**对外账户体系：无公开自助注册。
 | P2 | 告警对接 | ⏳ | 基于 Prometheus 指标接入 Alertmanager |
 | P2 | 链路追踪 / 请求 ID | ✅ | `x-request-id` 生成/透传/回显 + tracing span 关联 |
 
+### 连接器与 SAML（同行对比后核实：维持不做，附触发条件）
+
+同行对比（Keycloak/Authentik/Zitadel）后重审了两项差距，结论是**维持原范围决策**：
+
+**钉钉 / 企业微信连接器 —— 不做，按需启动。**
+- 设计非目标里本就写明（§1.2）："不做企业微信/钉钉全量同步（可作为后续 IdP 连接器）"，联邦放 Phase 3。
+- 本组织的身份源是**飞书**（登录连接器、webhook 告警格式、e2e 均为飞书），仓库中无任何钉钉/企微消费方。
+- 触发条件：出现第一个需要钉钉或企微登录/同步的具体系统，再按需实现（模式与飞书连接器同构，每个 S-M）。
+
+**SAML —— 不做，含技术依据。**
+- 仓库与全部客户端均为 OIDC，无任何 SAML SP 消费方；
+- Rust 生态没有成熟的 SAML 工具包（对比 Python 的 python3-saml / Java 的 OpenSAML）：要么依赖不成熟的 crate，要么手写 XML 签名与 canonicalization——后者正是历史上 XML signature wrapping 攻击的高发面，安全评审成本使工作量从 L 变 XL；
+- **过渡方案已存在**：Signet 的通用 OIDC 上游连接器可以前置一个具备 SAML 能力的 IdP（如 Keycloak/ADFS），把"某个上游只会 SAML"的问题转化为标准联邦对接，不需要 Signet 自己实现 SAML。
+- 触发条件：出现**无法改用 OIDC** 的下游 SP 且业务必须接入时，单独立项（含专门的 XMLDsig 安全评审）。
+
 ### 组身份迁移（规划中，未排期）
 
 当前组身份以**显示名**为键：`users.groups[]` 与 `users.directory_groups[]` 存名字，
