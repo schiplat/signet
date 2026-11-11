@@ -43,6 +43,8 @@ pub struct AdminClient {
     pub redirect_uris: Vec<String>,
     pub post_logout_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
+    pub extra_claims: Option<serde_json::Value>,
+    pub backchannel_logout_uri: Option<String>,
     pub scopes: Vec<String>,
     pub enabled: bool,
     pub ip_allowlist_enabled: bool,
@@ -64,6 +66,14 @@ struct CreateClientBody {
     redirect_uris: Vec<String>,
     post_logout_redirect_uris: Option<Vec<String>>,
     scopes: Option<Vec<String>>,
+    /// Subset of {authorization_code, refresh_token, client_credentials}.
+    /// Absent → the classic web-app pair; `client_credentials` is opt-in
+    /// because it makes the client a standalone principal.
+    grant_types: Option<Vec<String>>,
+    /// Static or `$field` claims merged into this client's tokens.
+    extra_claims: Option<serde_json::Value>,
+    /// OIDC Back-Channel Logout endpoint.
+    backchannel_logout_uri: Option<String>,
     /// Default true (minimum privilege).
     ip_allowlist_enabled: Option<bool>,
     allowed_cidrs: Option<Vec<String>>,
@@ -74,6 +84,9 @@ struct UpdateClientBody {
     redirect_uris: Option<Vec<String>>,
     post_logout_redirect_uris: Option<Vec<String>>,
     scopes: Option<Vec<String>>,
+    grant_types: Option<Vec<String>>,
+    extra_claims: Option<serde_json::Value>,
+    backchannel_logout_uri: Option<String>,
     ip_allowlist_enabled: Option<bool>,
     allowed_cidrs: Option<Vec<String>>,
 }
@@ -111,6 +124,11 @@ async fn create_client(
         body.scopes
             .unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]),
     )?;
+    let grant_types = normalize_grant_types(
+        body.grant_types.as_ref(),
+        &["authorization_code", "refresh_token"],
+    )?;
+    let extra_claims = normalize_extra_claims(body.extra_claims.as_ref())?;
 
     let ip_allowlist_enabled = body.ip_allowlist_enabled.unwrap_or(true);
     let allowed_cidrs = normalize_cidrs(&body.allowed_cidrs.unwrap_or_default())?;
@@ -138,14 +156,13 @@ async fn create_client(
         r#"
         INSERT INTO client_apps (
             id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
-            grant_types, scopes, enabled,
+            grant_types, extra_claims, backchannel_logout_uri, scopes, enabled,
             ip_allowlist_enabled, allowed_cidrs
         )
         VALUES (
             $1, $2, $3, $4, $5,
-            ARRAY['authorization_code', 'refresh_token'],
-            $6, TRUE,
-            $7, $8
+            $6, $7, $8, TRUE,
+            $9, $10
         )
         RETURNING {CLIENT_RETURNING}
         "#
@@ -155,6 +172,14 @@ async fn create_client(
     .bind(secret_hash)
     .bind(&redirect_uris)
     .bind(&post_logout)
+    .bind(&grant_types)
+    .bind(&extra_claims)
+    .bind(
+        body.backchannel_logout_uri
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
     .bind(&scopes)
     .bind(ip_allowlist_enabled)
     .bind(&allowed_cidrs)
@@ -251,15 +276,29 @@ async fn update_client(
             "allowed_cidrs required when IP allowlist is enabled (or disable allowlist)",
         ));
     }
+    // Absent fields keep the stored value, which is what makes a form that
+    // does not render grants/claims safe to save.
+    let grant_types = normalize_grant_types(
+        body.grant_types.as_ref().or(Some(&existing.grant_types)),
+        &[],
+    )?;
+    let extra_claims = normalize_extra_claims(
+        body.extra_claims
+            .as_ref()
+            .or(existing.extra_claims.as_ref()),
+    )?;
 
     let client = sqlx::query_as::<_, AdminClient>(&format!(
         r#"
         UPDATE client_apps
         SET redirect_uris = $2,
             post_logout_redirect_uris = $3,
-            scopes = $4,
-            ip_allowlist_enabled = $5,
-            allowed_cidrs = $6,
+            grant_types = $4,
+            extra_claims = $5,
+            backchannel_logout_uri = $6,
+            scopes = $7,
+            ip_allowlist_enabled = $8,
+            allowed_cidrs = $9,
             updated_at = NOW()
         WHERE id = $1
         RETURNING {CLIENT_RETURNING}
@@ -268,6 +307,14 @@ async fn update_client(
     .bind(id)
     .bind(&redirect_uris)
     .bind(&post_logout)
+    .bind(&grant_types)
+    .bind(&extra_claims)
+    .bind(
+        body.backchannel_logout_uri
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    )
     .bind(&scopes)
     .bind(ip_allowlist_enabled)
     .bind(&allowed_cidrs)
@@ -504,6 +551,67 @@ async fn set_enabled(state: &AppState, id: Uuid, enabled: bool) -> AppResult<Adm
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| AppError::NotFound("client not found".into()))
+}
+
+/// The grant types a client may be registered for. `client_credentials` makes
+/// the client a standalone principal with no user behind its tokens, so it is
+/// opt-in per client rather than part of the default pair.
+pub(crate) const ALLOWED_GRANT_TYPES: &[&str] =
+    &["authorization_code", "refresh_token", "client_credentials"];
+
+fn normalize_grant_types(grants: Option<&Vec<String>>, default: &[&str]) -> AppResult<Vec<String>> {
+    let Some(grants) = grants else {
+        return Ok(default.iter().map(|s| s.to_string()).collect());
+    };
+    let mut out: Vec<String> = grants
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if out.is_empty() {
+        return Err(AppError::bad_request(
+            "at least one grant type is required (a client with none can do nothing)",
+        ));
+    }
+    out.sort();
+    out.dedup();
+    for g in &out {
+        if !ALLOWED_GRANT_TYPES.contains(&g.as_str()) {
+            return Err(AppError::bad_request(format!(
+                "unsupported grant_type: {g} (allowed: {})",
+                ALLOWED_GRANT_TYPES.join(", ")
+            )));
+        }
+    }
+    Ok(out)
+}
+
+/// `extra_claims` must be an object of scalars (or `$field` placeholders).
+fn normalize_extra_claims(raw: Option<&serde_json::Value>) -> AppResult<Option<serde_json::Value>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let Some(obj) = raw.as_object() else {
+        return Err(AppError::bad_request(
+            "extra_claims must be an object of claim name -> value",
+        ));
+    };
+    if obj.len() > 32 {
+        return Err(AppError::bad_request(
+            "extra_claims accepts at most 32 entries",
+        ));
+    }
+    for (name, value) in obj {
+        if !(value.is_string() || value.is_boolean() || value.is_number()) {
+            return Err(AppError::bad_request(format!(
+                "extra claim `{name}` must be a string, number or boolean (string values                  starting with `$` resolve per user: $sub, $email, $username, $display_name,                  $phone)"
+            )));
+        }
+    }
+    Ok(Some(raw.clone()))
 }
 
 fn normalize_client_id(raw: &str) -> AppResult<String> {

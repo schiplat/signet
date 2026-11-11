@@ -11,6 +11,7 @@ export type PublicUser = {
   is_admin: boolean;
   mfa_required: boolean;
   must_change_password: boolean;
+  email_verified: boolean;
   totp_enabled: boolean;
   groups: string[];
   phone: string | null;

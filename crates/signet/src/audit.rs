@@ -701,6 +701,11 @@ fn to_csv(rows: &[AuditLogRow]) -> String {
     out
 }
 
+/// Public for the users CSV export, which needs the same formula defense.
+pub fn csv_cell(s: &str) -> String {
+    csv_escape(s)
+}
+
 fn csv_escape(s: &str) -> String {
     // A cell beginning with one of these is a formula in Excel/LibreOffice, and
     // the export carries user-influenced values (actor emails, detail JSON,

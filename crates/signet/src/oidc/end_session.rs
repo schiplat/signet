@@ -96,6 +96,13 @@ async fn finish(
     let client_id = q.client_id.as_deref().or(hinted_client.as_deref());
 
     let jar = if let Some(token) = cookie_value(&headers, SESSION_COOKIE) {
+        if let Some(session_user) = &session_user {
+            let state2 = state.clone();
+            let uid = session_user.id;
+            tokio::spawn(async move {
+                crate::oidc::fire_backchannel_logout(&state2, uid).await;
+            });
+        }
         destroy_session(&state.pool, &token).await?;
         jar.add(clear_session_cookie(state.config.cookie_secure))
     } else {

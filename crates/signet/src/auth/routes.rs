@@ -5,6 +5,7 @@ use crate::auth::session::{
     list_sessions, revoke_all_sessions, revoke_other_sessions, revoke_session_by_id,
     session_id_for_token, SESSION_COOKIE,
 };
+use crate::crypto::util::{random_token, sha256_hex};
 use crate::directory;
 use crate::error::{AppError, AppResult};
 use crate::http::extract::{client_ip, AuditIp};
@@ -30,6 +31,8 @@ pub fn router() -> Router<AppState> {
         .route("/login/password-change", post(force_password_change))
         .route("/logout", post(logout))
         .route("/me", get(me).patch(update_me))
+        .route("/me/email/change-request", post(email_change_request))
+        .route("/me/email/confirm", get(email_change_confirm))
         .route("/me/password", post(change_password))
         .route(
             "/me/sessions",
@@ -288,6 +291,16 @@ async fn logout(
     jar: CookieJar,
 ) -> AppResult<impl IntoResponse> {
     if let Some(token) = cookie_value(&headers, SESSION_COOKIE) {
+        // Notify RPs before the row is gone: they key off the subject.
+        if let Some(user) =
+            crate::auth::session::user_from_session_token(&state.pool, &token).await?
+        {
+            let state2 = state.clone();
+            let uid = user.id;
+            tokio::spawn(async move {
+                crate::oidc::fire_backchannel_logout(&state2, uid).await;
+            });
+        }
         destroy_session(&state.pool, &token).await?;
     }
     let jar = jar.add(clear_session_cookie(state.config.cookie_secure));
@@ -708,4 +721,179 @@ async fn change_password(
     .await;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+// ── Self-service email change (with verification) ────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct EmailChangeBody {
+    new_email: String,
+}
+
+/// Requests a change of the account's email: a verification link is delivered
+/// to the **new** address (proving ownership) and applied when visited.
+///
+/// The admission allowlist gates the *new* address here — moving to an
+/// excluded domain would lock the user out at next sign-in. Existing sessions
+/// survive until the change is confirmed, then die with the rest (an email is
+/// a recovery channel; changing it retires what it protects).
+async fn email_change_request(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<EmailChangeBody>,
+) -> AppResult<impl IntoResponse> {
+    let user = current_user(&state, &headers).await?;
+    let new_email = body.new_email.trim().to_lowercase();
+    if new_email.is_empty() || !new_email.contains('@') {
+        return Err(AppError::bad_request("invalid email"));
+    }
+    if new_email == user.email {
+        return Err(AppError::bad_request("that is already your email"));
+    }
+    if !user.email_verified {
+        return Err(AppError::forbidden(
+            "your current email is not verified; contact an administrator first",
+        ));
+    }
+    // Same gate as admin moves: an excluded domain is a dead end for the user.
+    crate::admission::ensure_provision_allowed(
+        &state,
+        &new_email,
+        crate::admission::via::ADMIN,
+        crate::http::extract::user_agent(&headers),
+        None,
+    )
+    .await?;
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1 OR username = $1")
+            .bind(&new_email)
+            .fetch_one(&state.pool)
+            .await?;
+    if exists > 0 {
+        return Err(AppError::bad_request("email already exists"));
+    }
+
+    let token = random_token(32);
+    let token_hash = sha256_hex(&token);
+    sqlx::query("DELETE FROM email_change_tokens WHERE user_id = $1")
+        .bind(user.id)
+        .execute(&state.pool)
+        .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO email_change_tokens (id, user_id, token_hash, new_email, expires_at)
+        VALUES ($1, $2, $3, $4, NOW() + INTERVAL '30 minutes')
+        "#,
+    )
+    .bind(Uuid::new_v4())
+    .bind(user.id)
+    .bind(&token_hash)
+    .bind(&new_email)
+    .execute(&state.pool)
+    .await?;
+
+    let link = format!(
+        "{}/api/v1/me/email/confirm?token={token}",
+        state.config.public_base()
+    );
+    crate::outbox::enqueue_email(
+        &state,
+        &new_email,
+        "Signet email change",
+        &format!(
+            "A change of the email address for {} was requested. Confirm it here:\n\n{link}\n\nExpires in 30 minutes. If this was not you, ignore this message.",
+            user.email
+        ),
+        state.config.dev_log_links,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "email change enqueue failed");
+        AppError::upstream("the verification email could not be queued; try again later")
+    })?;
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// The verification link target. GET because the user clicks it in a mail
+/// client; single-use via the atomic consume, like the reset flow.
+async fn email_change_confirm(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> AppResult<impl IntoResponse> {
+    let Some(token) = q.get("token") else {
+        return Err(AppError::bad_request("missing token"));
+    };
+    let token_hash = sha256_hex(token);
+    // Consume first: two clicks must not both apply, and the address is
+    // validated after the claim for the same reason as the reset flow.
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        r#"
+        UPDATE email_change_tokens SET consumed_at = NOW()
+        WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > NOW()
+        RETURNING user_id, new_email
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some((user_id, new_email)) = row else {
+        return Err(AppError::bad_request("invalid or expired change token"));
+    };
+
+    // The address may have been taken between request and confirmation.
+    let exists: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1 OR username = $1")
+            .bind(&new_email)
+            .fetch_one(&state.pool)
+            .await?;
+    if exists > 0 {
+        return Err(AppError::bad_request("email already exists"));
+    }
+
+    let updated = sqlx::query_as::<_, crate::models::User>(
+        r#"
+        UPDATE users SET email = $2, email_verified = TRUE, updated_at = NOW()
+        WHERE id = $1
+        RETURNING {USER_COLS}
+        "#,
+    )
+    .bind(user_id)
+    .bind(&new_email)
+    .fetch_one(&state.pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
+            AppError::bad_request("email already exists")
+        }
+        other => AppError::from(other),
+    })?;
+
+    // The email is a recovery channel; changing it retires what it authorized.
+    revoke_all_sessions(&state.pool, user_id).await?;
+    crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user_id).await?;
+    crate::oidc::fire_backchannel_logout(&state, user_id).await;
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(updated.clone()),
+            action: "me.email_change",
+            resource_type: "user",
+            resource_id: Some(updated.id.to_string()),
+            detail: json!({ "new_email": new_email }),
+            ip: Some(client_ip(&headers, Some(addr)).unwrap_or_default()).filter(|s| !s.is_empty()),
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    tracing::info!(user_id = %user_id, %new_email, "email changed via verified link");
+    Ok(Json(json!({
+        "ok": true,
+        "message": "email updated; sign in again with the new address"
+    })))
 }

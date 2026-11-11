@@ -16,6 +16,7 @@ mod common;
 
 use sqlx::PgPool;
 use sqlx::Row;
+use uuid::Uuid;
 
 /// Runs the query under `enable_seqscan = off` and returns the plan as one text
 /// blob.
@@ -50,6 +51,30 @@ async fn the_membership_predicate_uses_the_gin_index() {
         return;
     };
 
+    // The planner is data-dependent: on an empty table it prices an
+    // `users_email_key` scan (which satisfies the ORDER BY) below a GIN bitmap,
+    // and the assertion would report failure for an index that works fine in
+    // production. Seeding a real selection makes the plan deterministic on any
+    // database, empty or populated.
+    let batch: Vec<Uuid> = (0..60).map(|_| Uuid::new_v4()).collect();
+    for (i, id) in batch.iter().enumerate() {
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, sub, email, display_name, password_hash, status, role, groups)
+            VALUES ($1, $2, $3, 'seed', '', 'active', 'member', ARRAY['engineering'])
+            "#,
+        )
+        .bind(id)
+        .bind(id.to_string())
+        .bind(format!(
+            "seed-{i}-{}@gin.test",
+            uuid::Uuid::new_v4().simple()
+        ))
+        .execute(&state.pool)
+        .await
+        .expect("seed the group members");
+    }
+
     for sql in [
         // group_members(): "who is in this group?" — the exact read path, sort
         // and all; the planner answers it with a bitmap scan plus a sort.
@@ -63,4 +88,10 @@ async fn the_membership_predicate_uses_the_gin_index() {
             "the planner did not use the GIN index for:\n  {sql}\nplan:\n{plan}"
         );
     }
+
+    sqlx::query("DELETE FROM users WHERE id = ANY($1)")
+        .bind(&batch)
+        .execute(&state.pool)
+        .await
+        .expect("remove the seeded members");
 }

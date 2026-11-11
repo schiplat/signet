@@ -18,6 +18,8 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub struct TokenForm {
     pub grant_type: String,
+    /// client_credentials: requested scope, clamped to the client's list.
+    pub scope: Option<String>,
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
     pub client_id: Option<String>,
@@ -41,6 +43,13 @@ struct IdTokenClaims {
     nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     email: Option<String>,
+    /// OIDC Core §5.4: separate standard claim, not nested in `email`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
+    /// When the user authenticated (the session's creation), carried from the
+    /// auth code for RPs implementing max_age/step-up on their side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    auth_time: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -60,6 +69,12 @@ struct AccessTokenClaims {
     iat: i64,
     scope: String,
     token_use: String,
+    /// When the mint carried a user (authorization_code/refresh); absent on
+    /// client-credentials tokens, whose `sub` is the client itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
+    #[serde(flatten)]
+    extra: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
 pub async fn token(
@@ -113,6 +128,7 @@ pub async fn token(
             )
             .await?
         }
+        "client_credentials" => issue_client_credentials(&state, &client, &form).await?,
         _ => {
             return Err(AppError::oauth(
                 "unsupported_grant_type",
@@ -164,7 +180,7 @@ pub(crate) async fn load_client(state: &AppState, client_id: &str) -> AppResult<
     sqlx::query_as::<_, ClientApp>(
         r#"
         SELECT id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
-               grant_types, pkce_required, scopes, enabled,
+               grant_types, extra_claims, backchannel_logout_uri, pkce_required, scopes, enabled,
                ip_allowlist_enabled, allowed_cidrs
         FROM client_apps
         WHERE client_id = $1 AND enabled = TRUE
@@ -202,7 +218,7 @@ async fn issue_from_code(
     let code_hash = sha256_hex(code);
     let row = sqlx::query_as::<_, AuthCodeRow>(
         r#"
-        SELECT id, client_id, user_id, redirect_uri, scope, code_challenge, nonce, expires_at, consumed_at
+        SELECT id, client_id, user_id, redirect_uri, scope, code_challenge, nonce, expires_at, consumed_at, auth_time
         FROM auth_codes
         WHERE code_hash = $1
         "#,
@@ -248,7 +264,73 @@ async fn issue_from_code(
 
     let user = active_user_for_grant(state, row.user_id).await?;
     // A code exchange starts a fresh family; rotation keeps the parent's.
-    build_token_response(state, client, &user, &row.scope, row.nonce, None).await
+    build_token_response(
+        state,
+        client,
+        &user,
+        &row.scope,
+        row.nonce,
+        None,
+        row.auth_time.map(|t| t.timestamp()),
+    )
+    .await
+}
+
+/// The client-credentials grant (RFC 6749 §4.4): machine-to-machine tokens
+/// where the client *is* the principal.
+///
+/// `sub` is the `client_id` — there is no user behind the token, so user
+/// claims (`email`, `groups`, ...) are absent by construction and per-client
+/// `$field` extras resolve to nothing (only literals survive). No refresh
+/// token: a service re-authenticates with its secret, which is what the grant
+/// is for. Scope is the client's own registered list, requested via the form
+/// and clamped to it.
+async fn issue_client_credentials(
+    state: &AppState,
+    client: &ClientApp,
+    form: &TokenForm,
+) -> AppResult<serde_json::Value> {
+    let scope = crate::oidc::normalize_scope(form.scope.as_deref().unwrap_or(""));
+    if let Some(requested) = form.scope.as_deref() {
+        for s in requested.split_whitespace() {
+            if !client.scopes.iter().any(|a| a == s) {
+                return Err(AppError::oauth(
+                    "invalid_scope",
+                    format!("scope not allowed for this client: {s}"),
+                ));
+            }
+        }
+    }
+    let scope = if scope.is_empty() {
+        client.scopes.join(" ")
+    } else {
+        scope
+    };
+
+    let now = Utc::now();
+    let access_exp = now + Duration::seconds(state.rt().access_token_ttl_secs);
+    let mut claims = serde_json::json!({
+        "iss": state.config.issuer,
+        "sub": client.client_id,
+        "aud": client.client_id,
+        "exp": access_exp.timestamp(),
+        "iat": now.timestamp(),
+        "scope": scope,
+        "token_use": "access",
+    });
+    let obj = claims.as_object_mut().expect("claims are an object");
+    // No user: only literal extras can resolve here.
+    crate::models::merge_extra_claims(obj, client.extra_claims.as_ref(), None)?;
+    let access_token = state.keys.encode(&claims)?;
+
+    crate::metrics::inc_tokens_issued();
+
+    Ok(json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": state.rt().access_token_ttl_secs,
+        "scope": scope,
+    }))
 }
 
 /// `active_user_by_id` for the token endpoint's error vocabulary.
@@ -362,7 +444,7 @@ async fn issue_from_refresh(
     }
 
     let user = active_user_for_grant(state, row.user_id).await?;
-    build_token_response(state, client, &user, &row.scope, None, row.family_id).await
+    build_token_response(state, client, &user, &row.scope, None, row.family_id, None).await
 }
 
 /// The shared response to presenting — or losing the atomic rotation race on —
@@ -407,6 +489,7 @@ async fn revoke_family_on_reuse(
     AppError::oauth("invalid_grant", "refresh_token expired or revoked")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_token_response(
     state: &AppState,
     client: &ClientApp,
@@ -414,12 +497,13 @@ async fn build_token_response(
     scope: &str,
     nonce: Option<String>,
     family: Option<Uuid>,
+    auth_time: Option<i64>,
 ) -> AppResult<serde_json::Value> {
     let now = Utc::now();
     let access_exp = now + Duration::seconds(state.rt().access_token_ttl_secs);
     let id_exp = now + Duration::seconds(state.rt().id_token_ttl_secs);
 
-    let access_claims = AccessTokenClaims {
+    let mut access_claims = serde_json::to_value(AccessTokenClaims {
         iss: state.config.issuer.clone(),
         sub: user.sub.clone(),
         aud: client.client_id.clone(),
@@ -427,10 +511,23 @@ async fn build_token_response(
         iat: now.timestamp(),
         scope: scope.to_string(),
         token_use: "access".into(),
-    };
+        email_verified: Some(user.email_verified),
+        extra: None,
+    })
+    .expect("access claims serialize")
+    .as_object_mut()
+    .expect("access claims are an object")
+    .clone();
+    // Per-client claims go on both halves of the response: the id_token is
+    // what an RP's session sees, the access token is what its API calls see.
+    crate::models::merge_extra_claims(
+        &mut access_claims,
+        client.extra_claims.as_ref(),
+        Some(user),
+    )?;
     let access_token = state.keys.encode(&access_claims)?;
 
-    let id_claims = IdTokenClaims {
+    let mut id_claims = serde_json::to_value(IdTokenClaims {
         iss: state.config.issuer.clone(),
         sub: user.sub.clone(),
         aud: client.client_id.clone(),
@@ -439,6 +536,8 @@ async fn build_token_response(
         at_hash: crate::crypto::util::at_hash(&access_token),
         nonce,
         email: crate::oidc::scope_contains(scope, "email").then(|| user.email.clone()),
+        email_verified: crate::oidc::scope_contains(scope, "email").then_some(user.email_verified),
+        auth_time: None,
         name: crate::oidc::scope_contains(scope, "profile").then(|| user.display_name.clone()),
         preferred_username: crate::oidc::scope_contains(scope, "profile")
             .then(|| user.username.clone().unwrap_or_else(|| user.email.clone())),
@@ -447,7 +546,18 @@ async fn build_token_response(
         phone_number: crate::oidc::scope_contains(scope, "phone")
             .then(|| user.phone.clone())
             .flatten(),
-    };
+    })
+    .expect("id claims serialize")
+    .as_object_mut()
+    .expect("id claims are an object")
+    .clone();
+    if crate::oidc::scope_contains(scope, "email") {
+        id_claims.insert("email_verified".into(), json!(user.email_verified));
+    }
+    crate::models::merge_extra_claims(&mut id_claims, client.extra_claims.as_ref(), Some(user))?;
+    if let Some(at) = auth_time {
+        id_claims.insert("auth_time".into(), json!(at));
+    }
     let id_token = state.keys.encode(&id_claims)?;
 
     let refresh = random_token(32);
@@ -492,6 +602,7 @@ struct AuthCodeRow {
     nonce: Option<String>,
     expires_at: chrono::DateTime<Utc>,
     consumed_at: Option<chrono::DateTime<Utc>>,
+    auth_time: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, sqlx::FromRow)]

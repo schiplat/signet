@@ -5,7 +5,7 @@ use uuid::Uuid;
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
     mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
     provisioned_via, local_disabled, directory_disabled, scim_disabled, scim_managed, \
-    directory_groups, created_at, updated_at, external_id";
+    directory_groups, created_at, updated_at, external_id, email_verified";
 
 /// The rule that turns the three disable flags into `status`, as SQL.
 ///
@@ -88,6 +88,66 @@ pub fn effective_groups(groups: &[String], directory_groups: &[String]) -> Vec<S
     out.sort_unstable();
     out.dedup();
     out
+}
+
+/// Resolves one per-client extra claim.
+///
+/// A JSON string of the form `"$email"` / `"$username"` / `"$display_name"` /
+/// `"$phone"` / `"$sub"` resolves per user (the five attributes that exist on
+/// every account); anything else is taken literally. Non-string values pass
+/// through untouched. `None` when the referenced attribute is absent — a claim
+/// that cannot be resolved is dropped rather than emitted as the literal
+/// placeholder.
+pub fn resolve_claim_value(
+    raw: &serde_json::Value,
+    user: Option<&User>,
+) -> Option<serde_json::Value> {
+    let text = raw.as_str()?;
+    let resolved = match text {
+        "$sub" => Some(user?.sub.clone()),
+        "$email" => Some(user?.email.clone()),
+        "$username" => user?.username.clone(),
+        "$display_name" => Some(user?.display_name.clone()),
+        "$phone" => user?.phone.clone(),
+        other => {
+            if other.starts_with('$') {
+                // Unknown placeholder: refusing silently would emit tokens
+                // missing a claim the RP was promised; refusing loudly stops
+                // the sign-in where the operator can see it.
+                return None;
+            }
+            return Some(raw.clone());
+        }
+    }?;
+    Some(serde_json::Value::String(resolved))
+}
+
+/// Merges a client's `extra_claims` into a token's claim object.
+///
+/// For user tokens every `$field` resolves against that user; for
+/// client-credentials tokens (no user) only literal values survive. A claim
+/// whose placeholder cannot be resolved aborts the mint — see
+/// [`resolve_claim_value`].
+pub fn merge_extra_claims(
+    claims: &mut serde_json::Map<String, serde_json::Value>,
+    extra: Option<&serde_json::Value>,
+    user: Option<&User>,
+) -> anyhow::Result<()> {
+    let Some(extra) = extra.and_then(|v| v.as_object()) else {
+        return Ok(());
+    };
+    for (name, raw) in extra {
+        match resolve_claim_value(raw, user) {
+            Some(value) => {
+                claims.insert(name.clone(), value);
+            }
+            None if raw.as_str().is_some_and(|s| s.starts_with('$')) => {
+                anyhow::bail!("extra claim `{name}` references an unavailable attribute");
+            }
+            None => anyhow::bail!("extra claim `{name}` must be a string or a $placeholder"),
+        }
+    }
+    Ok(())
 }
 
 /// Loads a single user by id.
@@ -272,6 +332,9 @@ pub struct User {
     pub role: String,
     pub mfa_required: bool,
     pub must_change_password: bool,
+    /// Whether the current address was verified through the email-change flow
+    /// (or was vouched for at creation: admin, SCIM, verified upstream).
+    pub email_verified: bool,
     pub totp_enabled: bool,
     pub totp_secret: Option<String>,
     pub groups: Vec<String>,
@@ -314,6 +377,11 @@ pub struct ClientApp {
     pub redirect_uris: Vec<String>,
     pub post_logout_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
+    /// Static or `$field`-resolved claims merged into every token this client
+    /// receives. `None`/`{}` = no extra claims. See `resolve_claim_value`.
+    pub extra_claims: Option<serde_json::Value>,
+    /// OIDC Back-Channel Logout endpoint; `None` = no logout notification.
+    pub backchannel_logout_uri: Option<String>,
     /// Deprecated and unenforced: every client must use PKCE S256 at
     /// authorize/token (the column is kept for schema stability only, and is
     /// no longer exposed by the admin API or the dashboard).
@@ -337,6 +405,9 @@ pub struct PublicUser {
     pub is_admin: bool,
     pub mfa_required: bool,
     pub must_change_password: bool,
+    /// Whether the current address is verified (email-change flow or vouched
+    /// for at creation).
+    pub email_verified: bool,
     pub totp_enabled: bool,
     pub groups: Vec<String>,
     pub phone: Option<String>,
@@ -409,6 +480,7 @@ impl From<User> for PublicUser {
             is_admin,
             mfa_required: u.mfa_required,
             must_change_password: u.must_change_password,
+            email_verified: u.email_verified,
             totp_enabled: u.totp_enabled,
             groups: u.groups,
             phone: u.phone,

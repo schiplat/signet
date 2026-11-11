@@ -15,18 +15,21 @@ use crate::models::{
 };
 use crate::roles::{require_admin_role, require_staff, Role};
 use crate::state::AppState;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/admin/stats", get(stats))
         .route("/admin/users", get(list_users).post(create_user))
+        .route("/admin/users/import", post(import_users))
+        .route("/admin/users/export", get(export_users))
         .route("/admin/users/email-check", get(check_email))
         .route("/admin/users/username-check", get(check_username))
         .route("/admin/users/phone-check", get(check_phone))
@@ -1766,4 +1769,289 @@ async fn audit_managed_write_blocked(
         },
     )
     .await;
+}
+
+// ── Bulk import / export ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct ImportUserRow {
+    email: String,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    groups: Option<Vec<String>>,
+    #[serde(default)]
+    phone: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportUsersBody {
+    users: Vec<ImportUserRow>,
+    /// When true, rows whose email already exists get their profile fields
+    /// updated instead of being skipped. Passwords are never updated by import.
+    #[serde(default)]
+    update: bool,
+}
+
+/// Bulk-creates (and optionally updates) users from a JSON array.
+///
+/// Per-row errors do not abort the batch — a 300-row import should not die on
+/// row 297 — but every failure is reported with its index so the operator can
+/// fix and re-submit just those rows. Rows are attempted in order and a unique
+/// violation from a concurrent write surfaces as that row's error.
+async fn import_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    ConnectInfo(_addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<ImportUsersBody>,
+) -> AppResult<Json<Value>> {
+    let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    if body.users.is_empty() {
+        return Err(AppError::bad_request("users array is empty"));
+    }
+    if body.users.len() > 1000 {
+        return Err(AppError::bad_request(
+            "at most 1000 rows per import; split the file",
+        ));
+    }
+
+    let mut created: Vec<String> = Vec::new();
+    let mut updated: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
+
+    for (idx, row) in body.users.into_iter().enumerate() {
+        // Row-local capture so a per-row failure names the row, not the batch.
+        let email = row.email.trim().to_lowercase();
+        if email.is_empty() || !email.contains('@') {
+            errors.push(json!({ "row": idx, "email": email, "error": "invalid email" }));
+            continue;
+        }
+        let role = match Role::parse(row.role.as_deref().unwrap_or("member")) {
+            Ok(r) => r,
+            Err(e) => {
+                errors.push(json!({ "row": idx, "email": email, "error": e.to_string() }));
+                continue;
+            }
+        };
+        if !actor.can_assign_role(role) {
+            errors.push(json!({ "row": idx, "email": email, "error": "cannot assign this role" }));
+            continue;
+        }
+
+        let existing: Option<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM users WHERE email = $1 OR username = $1")
+                .bind(&email)
+                .fetch_optional(&state.pool)
+                .await?;
+
+        if let Some((id,)) = existing {
+            if !body.update {
+                skipped.push(email);
+                continue;
+            }
+            // Update-only profile fields; role honored, passwords untouched.
+            let display_name = row.display_name.clone().unwrap_or_default();
+            let groups = row.groups.clone().unwrap_or_default();
+            let phone = normalize_phone(row.phone.clone())?;
+            let res = sqlx::query(
+                r#"
+                UPDATE users SET display_name = $2, role = $3, groups = $4, phone = $5,
+                    updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(id)
+            .bind(&display_name)
+            .bind(role.as_str())
+            .bind(&groups)
+            .bind(&phone)
+            .execute(&state.pool)
+            .await;
+            match res {
+                Ok(_) => updated.push(email),
+                Err(e) => {
+                    errors.push(json!({ "row": idx, "email": email, "error": e.to_string() }));
+                }
+            }
+            continue;
+        }
+
+        // New row: same validation gates the single-create handler applies.
+        if let Err(e) = crate::admission::ensure_provision_allowed(
+            &state,
+            &email,
+            crate::admission::via::ADMIN,
+            crate::http::extract::user_agent(&headers),
+            ip.as_deref(),
+        )
+        .await
+        {
+            errors.push(json!({ "row": idx, "email": email, "error": e.to_string() }));
+            continue;
+        }
+        let password_hash = match row.password.as_deref() {
+            Some(pw) if !pw.is_empty() => {
+                match validate_password_strength(pw, state.rt().password_min_length) {
+                    Ok(()) => hash_password_offloaded(pw).await?,
+                    Err(e) => {
+                        errors.push(json!({ "row": idx, "email": email, "error": e.to_string() }));
+                        continue;
+                    }
+                }
+            }
+            // No password: the account starts passwordless (SSO/reset only),
+            // exactly like a JIT-provisioned member.
+            _ => String::new(),
+        };
+        let username = normalize_username(row.username.as_deref());
+        if let Some(u) = &username {
+            let username_exists: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE username = $1 OR email = $1")
+                    .bind(u)
+                    .fetch_one(&state.pool)
+                    .await?;
+            if username_exists > 0 {
+                errors.push(
+                    json!({ "row": idx, "email": email, "error": "username already exists" }),
+                );
+                continue;
+            }
+        }
+        if let Some(p) = &normalize_phone(row.phone.clone())? {
+            if phone_exists(&state.pool, p, None).await? {
+                errors.push(json!({ "row": idx, "email": email, "error": "phone already exists" }));
+                continue;
+            }
+        }
+        let display_name = row
+            .display_name
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| email.split('@').next().unwrap_or("user").to_string());
+        let id = Uuid::new_v4();
+        let sub = id.to_string();
+        let groups = row.groups.clone().unwrap_or_default();
+        let phone = normalize_phone(row.phone.clone())?;
+        let mut new_user =
+            crate::models::NewUser::new(id, &sub, &email, &display_name, &password_hash);
+        new_user.role = role.as_str();
+        new_user.username = username.as_deref();
+        new_user.phone = phone.as_deref();
+        new_user.groups = &groups;
+        match crate::models::insert_user(&state.pool, &new_user).await {
+            Ok(_) => created.push(email),
+            Err(e) => {
+                let msg = match &e {
+                    sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
+                        "email already exists".to_string()
+                    }
+                    sqlx::Error::Database(db) if db.constraint() == Some("users_username_key") => {
+                        "username already exists".to_string()
+                    }
+                    other => other.to_string(),
+                };
+                errors.push(json!({ "row": idx, "email": email, "error": msg }));
+            }
+        }
+    }
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "user.import",
+            resource_type: "user",
+            resource_id: None,
+            detail: json!({
+                "created": created.len(),
+                "updated": updated.len(),
+                "skipped": skipped.len(),
+                "errors": errors.len(),
+            }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({
+        "created": created,
+        "updated": updated,
+        "skipped": skipped,
+        "errors": errors,
+    })))
+}
+
+/// CSV export of the user directory (same shape the list API returns).
+///
+/// Formula-neutralizing like the audit export: user-chosen fields (emails,
+/// names, groups) land in spreadsheet cells unescaped otherwise.
+async fn export_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<axum::response::Response> {
+    require_staff_user(&state, &headers).await?;
+    #[derive(sqlx::FromRow)]
+    struct ExportRow {
+        email: String,
+        username: Option<String>,
+        display_name: String,
+        role: String,
+        status: String,
+        groups: Vec<String>,
+        phone: Option<String>,
+    }
+    let rows: Vec<ExportRow> = sqlx::query_as(
+        "SELECT email, username, display_name, role, status, groups, phone FROM users ORDER BY created_at",
+    )
+    .fetch_all(&state.pool)
+    .await?;
+
+    let mut out = String::from("email,username,display_name,role,status,groups,phone\n");
+    for ExportRow {
+        email,
+        username,
+        display_name,
+        role,
+        status,
+        groups,
+        phone,
+    } in rows
+    {
+        let groups = groups.join(" ");
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{}\n",
+            crate::audit::csv_cell(&email),
+            crate::audit::csv_cell(username.as_deref().unwrap_or_default()),
+            crate::audit::csv_cell(&display_name),
+            crate::audit::csv_cell(&role),
+            crate::audit::csv_cell(&status),
+            crate::audit::csv_cell(&groups),
+            crate::audit::csv_cell(phone.as_deref().unwrap_or_default()),
+        ));
+    }
+
+    let mut response = axum::response::Response::builder()
+        .status(axum::http::StatusCode::OK)
+        .body(axum::body::Body::from(out))
+        .expect("static CSV response parts");
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_DISPOSITION,
+        axum::http::HeaderValue::from_static("attachment; filename=\"users.csv\""),
+    );
+    Ok(response)
 }

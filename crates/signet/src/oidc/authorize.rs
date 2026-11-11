@@ -24,6 +24,10 @@ pub struct AuthorizeQuery {
     pub state: Option<String>,
     pub nonce: Option<String>,
     pub prompt: Option<String>,
+    /// OIDC Core §3.1.2.1: maximum seconds since the user's last
+    /// authentication. A session older than this is re-authenticated before a
+    /// code is minted — the protocol-shaped form of "step-up".
+    pub max_age: Option<i64>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
 }
@@ -93,7 +97,7 @@ pub async fn authorize(
     let client = sqlx::query_as::<_, ClientApp>(
         r#"
         SELECT id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
-               grant_types, pkce_required, scopes, enabled,
+               grant_types, extra_claims, backchannel_logout_uri, pkce_required, scopes, enabled,
                ip_allowlist_enabled, allowed_cidrs
         FROM client_apps
         WHERE client_id = $1
@@ -158,10 +162,45 @@ pub async fn authorize(
     }
 
     let token = cookie_value(&headers, SESSION_COOKIE);
+    // `auth_time` rides on the session row: the session's creation IS the last
+    // authentication event (every sign-in mints a fresh session).
+    let authenticated_at: Option<chrono::DateTime<Utc>> = match &token {
+        Some(t) => {
+            sqlx::query_scalar(
+                "SELECT s.created_at FROM sessions s WHERE s.token_hash = $1 \
+              AND s.expires_at > NOW()",
+            )
+            .bind(sha256_hex(t))
+            .fetch_optional(&state.pool)
+            .await?
+        }
+        None => None,
+    };
     let user = match &token {
         Some(t) => user_from_session_token(&state.pool, t).await?,
         None => None,
     };
+    // max_age: a session older than the window must re-authenticate before
+    // this client gets a code. max_age=0 means "fresh login, always". The
+    // stale session is destroyed so the re-login cannot be skipped by backing
+    // into the RP with the old cookie.
+    if let (Some(max_age), Some(auth_at)) = (q.max_age, authenticated_at) {
+        let age = (chrono::Utc::now() - auth_at).num_seconds();
+        if age > max_age {
+            if let Some(t) = &token {
+                destroy_session(&state.pool, t).await?;
+            }
+            if has_prompt("none") {
+                return Ok(redirect_error(
+                    redirect_uri,
+                    state_val,
+                    "login_required",
+                    "session older than max_age",
+                ));
+            }
+            return Ok(redirect_to_login(&q, q.prompt.as_deref()));
+        }
+    }
     let Some(user) = user else {
         if has_prompt("none") {
             // Silent renewal has no browser to land on; the RP reads the error
@@ -233,9 +272,9 @@ pub async fn authorize(
         r#"
         INSERT INTO auth_codes (
             id, code_hash, client_id, user_id, redirect_uri, scope,
-            code_challenge, code_challenge_method, nonce, expires_at
+            code_challenge, code_challenge_method, nonce, expires_at, auth_time
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'S256', $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, 'S256', $8, $9, $10)
         "#,
     )
     .bind(Uuid::new_v4())
@@ -247,6 +286,7 @@ pub async fn authorize(
     .bind(code_challenge)
     .bind(&q.nonce)
     .bind(expires_at)
+    .bind(authenticated_at)
     .execute(&state.pool)
     .await?;
 

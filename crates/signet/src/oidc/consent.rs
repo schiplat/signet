@@ -34,7 +34,7 @@ pub async fn consent(
     let client = sqlx::query_as::<_, ClientApp>(
         r#"
         SELECT id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
-               grant_types, pkce_required, scopes, enabled,
+               grant_types, extra_claims, backchannel_logout_uri, pkce_required, scopes, enabled,
                ip_allowlist_enabled, allowed_cidrs
         FROM client_apps
         WHERE client_id = $1
