@@ -376,6 +376,25 @@ Signet **不是**对外账户体系：无公开自助注册。
 | P2 | 告警对接 | ⏳ | 基于 Prometheus 指标接入 Alertmanager |
 | P2 | 链路追踪 / 请求 ID | ✅ | `x-request-id` 生成/透传/回显 + tracing span 关联 |
 
+### 组身份迁移（规划中，未排期）
+
+当前组身份以**显示名**为键：`users.groups[]` 与 `users.directory_groups[]` 存名字，
+`scim_groups.id` 是唯一真正的组标识符，`docs/integrations.md` 里 SCIM User 的
+`groups[].value` 已改为组 id。核实过的边界：SCIM 组**没有改名端点**（PATCH 只处理
+成员增删换，创建后 `displayName` 不可变），本地组由用户编辑时按名隐式创建——因此
+"改名孤儿化成员"目前不可触发，该迁移是**还技术债**而非修复在逃缺陷。
+
+迁移方向（做时一次性完成，不拆步）：
+
+1. `users.groups` / `users.directory_groups` 改存组 id（text[]→uuid[]，迁移时为
+   现有每个名字建组记录并回填 id）；
+2. OIDC `groups` claim 与 dashboard 渲染在读取时 join 出名字；
+3. 目录同步的组写入（指纹比较含组列表）改按 id；
+4. 展示名归组表所有，改名即改一行。
+
+前提：目录同步的组语义（上游组名→本地组）需要先定义"上游组没有本地记录时"的
+创建策略，避免迁移把隐式约定变成显式 bug。
+
 > 已实现的可观测基础：`/metrics` 暴露登录/token/MFA 计数与 HTTP 指标；`TraceLayer` 请求日志；`/health` 依赖探测；审计日志保留策略。
 
 ---
