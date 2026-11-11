@@ -69,11 +69,11 @@ curl -s -X POST "$ISSUER/oauth/register" \
 | `redirect_uris` | 必填，至少 1 条；必须 `http(s)://` 开头；**不得含 `#` 片段**；去重排序 |
 | `scopes` | 可选；若提供必须包含 `openid` |
 | `client_name` | 可选展示名 |
-| `grant_types` | 当前忽略，固定 `authorization_code` + `refresh_token` |
+| `grant_types` | 请求字段当前忽略，固定写入 `authorization_code` + `refresh_token`；**存储的 grant 列表会在 authorize/token 处强制** |
 
 响应中**不返回** `registration_access_token` / `registration_client_uri`：本服务没有 RFC 7591 的客户端管理端点（`GET/PUT /oauth/register/{client_id}`），返回它们只会让标准客户端去请求一个 404。注册后的客户端在 Dashboard → Clients 管理。
 
-注册出的客户端默认：`pkce_required=true`、`ip_allowlist_enabled=false`（不限制源 IP）。
+注册出的客户端默认：`ip_allowlist_enabled=false`（不限制源 IP）、scopes `openid profile email`。PKCE S256 对所有客户端无条件强制（无开关字段）。
 
 ### 1.4 错误码
 
@@ -238,6 +238,8 @@ Authorization: Bearer <token>
 | `password` | `users.password_hash` | 可选；缺省随机生成 |
 | Group `displayName` | `users.groups[]` | 与 OIDC `groups` claim 同源 |
 
+> SCIM User 资源中的 `groups[].value` 是 **Group 资源的 `id`**（`display` 才是组名）；没有对应 SCIM 组的本地组不会出现在该列表中。
+
 ### 3.4 示例
 
 ```bash
@@ -283,7 +285,7 @@ curl -s -X PATCH "$ISSUER/scim/v2/Groups/grp-001" -H "$AUTH" -H "$JSON" \
 - 每次操作均写审计（`scim.user.create` / `scim.user.delete` / `scim.group.*` 等），actor 为空。
 - 创建的用户角色固定为 `user`（非 admin/manager）；无公开注册。
 - **组 PATCH 目前仅支持「增加成员」**（把用户 UUID 加入组），未实现按 `op` 的 remove/replace 语义；删除组会把成员从 `users.groups[]` 移除。
-- `bulk`、`filter`、`sort`、`etag`、`changePassword` 等能力在 `ServiceProviderConfig` 中声明为 `supported: false`，目录系统应避免依赖。
+- `bulk`、`filter`、`sort`、`etag`、`changePassword` 等能力在 `ServiceProviderConfig` 中声明为 `supported: false`。请求若仍带 `filter`，返回 **400** 而不是静默返回整个目录。
 - 未配置 token 时整体禁用；token 明文不落库（只存哈希），生成后仅展示一次。
 
 ---

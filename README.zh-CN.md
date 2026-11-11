@@ -99,6 +99,8 @@ cargo run
 
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard：用户、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
+- **运行时策略**（token/会话有效期、登录锁定、密码策略、审计保留、限流）在后台修改，落库即生效，无需重新部署
+- **签名密钥轮换**（`signet keys rotate` / `keys prune`），JWKS 同时发布新旧公钥，已签发 token 不受影响
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
   绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则按 JIT 策略（全局 Settings 开关 + **每个 provider 可独立覆盖** `jit_mode`，并可单独配置 email 可信级别 `email_trust`）**JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。本地 MFA / 强制改密策略对第三方登录同样生效。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
@@ -173,14 +175,14 @@ cd .. && cargo build -p signet
 - 所有请求响应带 **`x-request-id`**（透传 / 自动生成 UUIDv4），用于链路关联
 - 访问日志由 `crates/signet/src/access_log.rs` 统一输出：单行、结构化字段（`request_id` / `method` / `path` / `query` / `ip` / `status` / `latency_ms`），`2xx/3xx` 为 `INFO`，`4xx` 为 `WARN`，`5xx` 为 `ERROR`
 - 日志走 `tracing`，规范见 [.cursor/rules/logging.mdc](./.cursor/rules/logging.mdc)：静态消息 + 结构化字段，错误用 `error` 字段，生产（`APP_ENV=production`）输出单行 JSON
-- `GET /metrics` 暴露 Prometheus 指标
+- `GET /metrics` 在**独立监听**上暴露 Prometheus 指标（默认仅回环，`SIGNET_METRICS_BIND` 可改/关），不在公开 API 端口
 
 ## 主要端点
 
 | 路径 | 说明 |
 |------|------|
 | `GET /health` | 探活 |
-| `GET /metrics` | Prometheus 指标（公开） |
+| `GET /metrics` | Prometheus 指标——独立监听，默认仅 `127.0.0.1:9464`（`SIGNET_METRICS_BIND`），不在公开端口 |
 | `GET /.well-known/openid-configuration` | OIDC Discovery |
 | `GET /oauth/authorize` | 授权（未登录跳转 `/login`，未同意跳转 `/consent`） |
 | `POST /oauth/token` | 换票（code + PKCE / refresh） |

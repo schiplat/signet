@@ -161,7 +161,7 @@ AuthorizationCode / RefreshToken / Session
 | `redirect_uris` | 精确白名单 |
 | `post_logout_redirect_uris` | 可选 |
 | `grant_types` | `authorization_code`, `refresh_token` |
-| `pkce_required` | 默认 true（authorize 始终要求 S256） |
+| PKCE | 始终要求 S256（`pkce_required` 字段已移除） |
 | `scopes` | `openid`, `profile`, `email` |
 | `enabled` | |
 | `ip_allowlist_enabled` | 默认新建为 true；可关 |
@@ -352,7 +352,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 
 | 优先级 | 功能 | 状态 | 说明 |
 |--------|------|------|------|
-| P0 | 密码重置/找回 | ✅ | `/api/v1/password-reset/*`；30 分钟单次 token；邮件当前为日志型 |
+| P0 | 密码重置/找回 | ✅ | `/api/v1/password-reset/*`；30 分钟单次 token；SMTP 真实投递（未配置时 503） |
 | P0 | **手机号短信验证绑定** | ⏳ | 唯一未实施项：需短信网关；当前 `phone` 仅作联系信息落库，未验证 |
 | P0 | RFC 7009 吊销端点 | ✅ | 独立 `/oauth/revoke` |
 | P0 | WebAuthn/Passkey + 恢复码 | ✅ | 注册/登录/管理；挑战存内存 |

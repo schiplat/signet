@@ -18,7 +18,7 @@
 | 用户密码 | `users.password_hash` | Argon2（随机盐） | ✅ |
 | 密码历史 | `password_history.password_hash` | Argon2 | ✅ |
 | MFA 恢复码 | `totp_recovery_codes.code_hash` | Argon2（规范化后哈希） | ✅ |
-| OAuth 客户端密钥 | `client_apps.client_secret_hash` | Argon2 | ✅ |
+| OAuth 客户端密钥 | `client_apps.client_secret_hash` | HMAC-SHA256（应用侧 pepper，常量时间比较；历史 Argon2 行在匹配后自动升级） | ✅ |
 | 会话 token | `sessions.token_hash` | SHA-256 | ✅ |
 | 授权码 | `auth_codes.code_hash` | SHA-256 | ✅ |
 | Refresh token | `refresh_tokens.token_hash` | SHA-256 | ✅ |
@@ -74,7 +74,7 @@
 ### 2.5 密码重置 ✅
 
 - `POST /api/v1/password-reset/request` 生成 30 分钟有效、单次使用的重置 token（SHA-256 哈希落库）。
-- 链接经邮件发送（当前为日志型 mailer，接入 SMTP 后真实投递）；无论邮箱是否存在均返回成功，防枚举。
+- 链接经 SMTP 真实投递；未配置 SMTP 时请求返回 503（开发态用 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回成功，防枚举。
 - `POST /api/v1/password-reset/confirm` 校验 token、应用密码策略、消费 token 并吊销全部会话。
 
 ### 2.6 WebAuthn / Passkey ✅
@@ -85,7 +85,7 @@
 
 ### 2.7 新设备/IP 登录告警 ✅
 
-- 首次出现的（用户, IP）会写 `auth.new_device` 审计并发送告警邮件（日志型 mailer）。
+- 首次出现的（用户, IP）会写 `auth.new_device` 审计并发送告警邮件；未配置 SMTP 时告警只进日志，不阻塞登录。
 - 登录源记录在 `login_devices` 表，用于后续异常检测。
 
 ### 2.8 登录白名单（邮箱域名）✅
@@ -151,9 +151,12 @@
 | Consent 用户侧撤销（`/me/consents`，连带吊销 refresh token） | ✅ |
 | `groups` claim 下发（id_token / userinfo，按 scope 裁剪） | ✅ |
 | `phone` scope 下发 `phone_number` / `phone_number_verified`（按 scope 裁剪） | ✅ |
-| `end_session` 统一登出 | ✅ |
+| `end_session` 统一登出；GET 必须携带有效 `id_token_hint`（`sub` 与会话一致），POST 免 hint 但跨站表单不带 cookie（防注销 CSRF） | ✅ |
+| 登记的 `grant_types` 在 authorize/token 双向强制 | ✅ |
+| id_token 携带 `at_hash`（绑定同次签发的 access token） | ✅ |
+| 签名密钥环：轮换后旧公钥继续验签，JWKS 同时发布 | ✅ |
 
-客户端密钥 Argon2 哈希存储；授权码/refresh 均 SHA-256 哈希存储。
+客户端密钥以应用 pepper 的 HMAC-SHA256 存储（常量时间比较，历史 Argon2 自动升级）；授权码/refresh 均 SHA-256 哈希存储。
 
 ---
 
@@ -169,11 +172,11 @@
 
 ### 6.2 保留策略 ✅
 
-- 启动时清理早于 `SIGNET_AUDIT_RETENTION_DAYS`（默认 180）天的记录。
+- 小时巡检清理早于保留窗口的记录（`SIGNET_AUDIT_RETENTION_DAYS`，默认 180，启动时拒绝 < 1；运行时可改）。
 
 ### 6.3 可观测 ✅
 
-- `/metrics`（公开，Prometheus 文本格式）暴露：
+- `/metrics` 在**独立监听**（默认 `127.0.0.1:9464`，`SIGNET_METRICS_BIND`）暴露，公开端口不提供：
   - 业务计数：登录/登录失败、token 签发、MFA 校验（成功/失败）。
   - HTTP：请求计数（按状态类 2xx/3xx/4xx/5xx）、在途请求、延迟直方图。
 - `/health` 就绪探测：探测 Postgres（`SELECT 1`），失败返回 503，供负载均衡/K8s 使用。
@@ -197,7 +200,8 @@
 
 | 配置项 | 默认 | 说明 |
 |--------|------|------|
-| `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 私钥，首启生成 |
+| `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 私钥，首启生成；`signet keys rotate` 轮换 |
+| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签，JWKS 同时发布） |
 | `SIGNET_ENCRYPTION_KEY_PATH` | `./data/encryption.key` | AES-256-GCM 密钥，首启生成 |
 | `SIGNET_COOKIE_SECURE` | `false` | issuer 为 https 时自动生效；显式配置仅用于覆盖 |
 | `SIGNET_TRUSTED_PROXIES` | — | 可信反向代理 IP/CIDR 列表；未配置时忽略转发头，取 peer 地址 |
@@ -208,7 +212,9 @@
 | `SIGNET_AUDIT_RETENTION_DAYS` | `180` | 审计保留天数 |
 | `SIGNET_RATE_LIMIT_PER_MINUTE` | `300` | 每 IP 每分钟请求上限 |
 | `SIGNET_PUBLIC_BASE_URL` | — | 邮件/重置链接的公开基址 |
-| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（配置后真实投递邮件） |
+| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503） |
+| `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH（可信中继可省略） |
+| `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | 指标监听地址；`off` 关闭 |
 | `SIGNET_EMAIL_FROM` | — | 邮件发件人 |
 | `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API 认证 token（可选，仅作首次启动种子；后续由后台 UI 管理） |
 | `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |

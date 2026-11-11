@@ -82,6 +82,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `GET/PATCH` | `/api/v1/admin/settings/mfa` | **admin**：全局强制开关 |
 | `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**：SSO JIT 开户开关 `{ "jit_provision": bool }` |
 | `GET/PATCH` | `/api/v1/admin/settings/sign-in` | **admin**：登录白名单（邮箱域名），见 §14 |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/runtime` | **admin**：运行时策略（token/会话有效期、登录锁定、密码策略、审计保留、限流）；优先级 **DB > 环境变量 > 默认**，DELETE 清除覆盖 |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
 
 ---
@@ -127,7 +128,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 |------|------|------|
 | `GET` | `/api/v1/admin/clients` | 列表 |
 | `POST` | `/api/v1/admin/clients` | 注册（secret 仅返回一次） |
-| `PUT` | `/api/v1/admin/clients/{id}` | 更新 redirect / PKCE / **IP 白名单** |
+| `PUT` | `/api/v1/admin/clients/{id}` | 更新 redirect / scopes / **IP 白名单**（PKCE 已无开关，始终强制 S256） |
 | `DELETE` | `/api/v1/admin/clients/{id}` | **admin** 删除 |
 | `POST` | `/api/v1/admin/clients/{id}/disable\|enable` | 启停 |
 | `POST` | `/api/v1/admin/clients/{id}/rotate-secret` | 轮换 secret |
@@ -188,11 +189,11 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 | `/api/v1/*` | Signet Dashboard、会话、后台管理 |
 | `/oauth/*` | 标准 OIDC（业务客户端对接） |
 | `/health` | 探活 |
-| `/metrics` | Prometheus 指标（公开） |
+| `/metrics` | Prometheus 指标（独立监听；默认仅 `127.0.0.1:9464`，`SIGNET_METRICS_BIND` 可改/关） |
 
 ### 审计保留策略
 
-启动时清理 `created_at` 早于 `SIGNET_AUDIT_RETENTION_DAYS`（默认 180）天的审计记录。管理台查询与导出不受影响。
+小时巡检清理 `created_at` 早于保留窗口的记录（`SIGNET_AUDIT_RETENTION_DAYS`，默认 180；也可在 Settings → Runtime policies 修改，**不得小于 1 天**）。管理台查询与导出不受影响。
 
 ### OIDC 附加端点
 
@@ -207,7 +208,7 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 
 | 方法/路径 | 说明 |
 |-----------|------|
-| `POST /api/v1/password-reset/request` | body `{ email }`；生成 30 分钟有效的重置 token，发送重置链接（当前为日志型邮件，接入 SMTP 后真实投递）。无论邮箱是否存在均返回 `{ ok: true }` |
+| `POST /api/v1/password-reset/request` | body `{ email }`；生成 30 分钟有效的重置 token 并经 SMTP 发送。**未配置 `SIGNET_SMTP_HOST` 时返回 503**（不再假装成功；开发态可开 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回 `{ ok: true }` 防枚举；投递失败返回 502 |
 | `POST /api/v1/password-reset/confirm` | body `{ token, new_password }`；校验 token、应用密码策略、吊销全部会话 |
 
 ## 8. Passkeys（WebAuthn）
@@ -337,7 +338,7 @@ GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体
 | 端点 | 说明 |
 |------|------|
 | `GET /health` | 就绪探测：探测 Postgres（`SELECT 1`），失败返回 503 |
-| `GET /metrics` | Prometheus 文本格式；新增 HTTP 请求计数（按状态类）、在途请求、延迟直方图，以及既有登录/token/MFA 计数 |
+| `GET /metrics` | Prometheus 文本格式；登录/token/MFA 计数与 HTTP 请求计数、在途请求、延迟直方图。**独立监听**（默认 `127.0.0.1:9464`，`SIGNET_METRICS_BIND` 配置；公开端口不提供），该监听同时提供 `/health` |
 
 全局速率限制：对 `/api/v1`、`/oauth/*` 等按客户端 IP 限流，默认 `SIGNET_RATE_LIMIT_PER_MINUTE=300`，超限返回 429。
 
@@ -367,7 +368,7 @@ GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体
 | 位置 | 名单外的行为 |
 |------|--------------|
 | 登录（密码 / MFA / passkey / SSO 回调） | 统一在会话签发处拒绝：Unauthorized；SSO 回调重定向带 `error=domain_not_allowed` |
-| `POST /api/v1/login` | 凭据先行：口令错误与「口令正确但域名不允许」返回**同一句** `invalid email or password`，被策略挡住的账号不会因为多一句解释而变成枚举 oracle |
+| `POST /api/v1/login` | 凭据先行：未知账号、口令错误与「口令正确但域名不允许」返回**同一句** `invalid email or password`；未知账号同样跑一次 dummy Argon2 对齐耗时；`disabled` / `locked` 只在密码验证通过后提示 |
 | 管理端建号 / 改邮箱 | 400 拒绝 |
 | SCIM `POST`/`PUT` `/scim/v2/Users` | 400 拒绝（IdP 能直接看到原因） |
 | SSO JIT 开户 | 拒绝开户（与上面的登录拒绝同一条路径） |

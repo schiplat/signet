@@ -48,6 +48,15 @@ SIGNET_COOKIE_SECURE=true
 # SIGNET_SMTP_USERNAME=${secrets.SIGNET_SMTP_USERNAME}
 # SIGNET_SMTP_PASSWORD=${secrets.SIGNET_SMTP_PASSWORD}
 
+# ── Metrics (optional) ──
+# Loopback by default; set an internal address when the scraper is remote,
+# or "off" to disable the listener.
+# SIGNET_METRICS_BIND=127.0.0.1:9464
+
+# ── Signing-key rotation (optional) ──
+# Retired public keys written by `signet keys rotate`.
+# SIGNET_JWT_RETIRED_KEY_DIR=/app/data/retired_keys
+
 # ── WebAuthn (override for production) ──
 # RP_ID must be a domain suffix of RP_ORIGIN, and production requires HTTPS.
 SIGNET_WEBAUTHN_RP_ID=${vars.SIGNET_WEBAUTHN_RP_ID}

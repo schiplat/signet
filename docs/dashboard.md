@@ -55,7 +55,8 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 
 - 注册 / Edit / Enable·Disable / Rotate secret；Delete 仅 admin  
 - Disabled 行视觉标注  
-- **Source IP**：默认新建开启白名单；可关闭为 Unrestricted；Edit 可改 CIDR 列表  
+- **Source IP**：默认新建开启白名单；可关闭为 Unrestricted；Edit 可改 CIDR 列表
+- 授权码流程始终要求 PKCE S256（无开关）  
 
 ### Audit logs
 
@@ -67,6 +68,7 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 ### Settings（admin only）
 
 - Security：全局 **Require MFA for all users**
+- **Runtime policies**：会话/token 有效期、登录尝试与锁定、密码长度/历史、审计保留、全局限流；保存即生效，未保存的字段沿用环境变量
 - SSO / federation：**JIT provision on SSO**（首次第三方登录且已验证邮箱无本地用户时是否自动开户）
 
 ### Integrations（admin only）

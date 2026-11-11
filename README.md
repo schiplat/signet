@@ -103,6 +103,8 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 
 - OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard: users, clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
+- **Runtime policies** (token/session lifetimes, lockout, password policy, audit retention, rate limit) edited in the dashboard — DB-backed, no redeploy
+- **Signing-key rotation** (`signet keys rotate` / `keys prune`) with a JWKS key ring that keeps outstanding tokens verifiable
 - **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
   Binding: verified email match → auto-link; else **JIT create** a `member` when Settings → JIT is on (default; also `SIGNET_SSO_JIT_PROVISION` fallback) and the provider returns a verified email; otherwise stash pending identity (15 min) for password bind. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
 
@@ -178,14 +180,14 @@ In production/staging, Rust serves `dashboard/dist` via `rust-embed` (the folder
 - Every request/response carries **`x-request-id`** (passed through or auto-generated UUIDv4) for trace linking
 - Access logs are emitted uniformly by `crates/signet/src/access_log.rs`: single line, structured fields (`request_id` / `method` / `path` / `query` / `ip` / `status` / `latency_ms`), with `2xx/3xx` at `INFO`, `4xx` at `WARN`, `5xx` at `ERROR`
 - Logging goes through `tracing`; see [.cursor/rules/logging.mdc](./.cursor/rules/logging.mdc): static messages + structured fields, errors in an `error` field, single-line JSON in production (`APP_ENV=production`)
-- `GET /metrics` exposes Prometheus metrics
+- `GET /metrics` exposes Prometheus metrics on a **separate listener** (loopback by default; `SIGNET_METRICS_BIND`) — never on the public API port
 
 ## Main endpoints
 
 | Path | Description |
 |------|-------------|
 | `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics (public) |
+| `GET /metrics` | Prometheus metrics — separate listener, loopback by default (`SIGNET_METRICS_BIND`); not served on the public port |
 | `GET /.well-known/openid-configuration` | OIDC Discovery |
 | `GET /oauth/authorize` | Authorization (redirects to `/login` if not signed in, `/consent` if not consented) |
 | `POST /oauth/token` | Token exchange (code + PKCE / refresh) |

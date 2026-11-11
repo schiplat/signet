@@ -50,7 +50,7 @@ Discovery 返回（节选）：
 
 - `client_id`：稳定标识（如 `cella`）
 - `redirect_uris`：精确匹配白名单（一行一个）
-- `pkce_required`：默认开启（当前授权端点**始终要求** PKCE S256）
+- PKCE S256 **始终强制**：客户端已无 `pkce_required` 开关字段，授权端点与 token 端点都要求 43–128 字符的 challenge/verifier
 - **Source IP allowlist**（默认开启）：仅允许列出的 IP / CIDR 访问该客户端的 `/oauth/authorize` 与 `/oauth/token`；可关闭为不限制。开启时必须至少配置一条 CIDR/IP。
 - 创建后 **client_secret 只展示一次**，同时展示可直接复制给子系统的**对接配置片段**（`.env` / `config.toml` 两种形态，issuer/client/scopes/redirect 全部预填）；可 Rotate（轮换后同样展示）
 - **Test drive**：Clients 列表对已启用客户端提供一键联调——用系统自带的 `{issuer}/oauth/test-callback/{client_id}` 回调地址走真实 authorize → 登录 → consent → 回调，结果页展示通过项（认证、scope、redirect 匹配、一次性 code）。token 端点 + secret + PKCE verifier 不在覆盖范围（服务端只存 secret 哈希），需真实集成验证

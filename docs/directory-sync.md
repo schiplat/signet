@@ -591,7 +591,7 @@ id                                     started (UTC)        status    created up
 - 成功 `0`；任何错误 `1`（`main` 返回 `anyhow::Result`），错误摘要同时以 `Error: …` 打到输出，便于 CI 判定。
 - 源不存在 / 配置解析失败：`load_source` 在 `open_run` **之前**执行，因此 `Error: directory source not found: <code>` 之类只终止进程，**不落 run 记录、也不写审计**（`source::get_by_code` → `SourceConfig::parse`）。
 - 连接失败等规划期错误：发生在 `open_run` **之后**，会把该 run 以 `failed` + `error` 收尾，并写一条 `directory.sync.failed` 审计（dry run 的 `run_id` 为 `null`）。留下失败记录是有意为之——否则进程被杀会永久占住"运行中"。
-- **并发保护**：迁移 `025` 的单运行唯一索引保证一个源同一时刻只有一条 `running`。与 dashboard 手动触发或调度器抢跑时，后来者会拿到 `another sync run for this source is already in progress`（HTTP 侧为 409），而不是两次同步交错。超过 `STALE_RUN_MINUTES`（120 分钟）的 `running` 会先被标记为 `abandoned by a previous process` 再开新 run，避免进程被杀后源被永久卡住。
+- **并发保护**：迁移 `025` 的单运行唯一索引保证一个源同一时刻只有一条 `running`。与 dashboard 手动触发或调度器抢跑时，后来者会拿到 `another sync run for this source is already in progress`（HTTP 侧为 409），而不是两次同步交错。运行中的 run 每 60 秒写心跳；只有心跳超过 `STALE_RUN_MINUTES`（120 分钟）未更新的 `running` 才会被标记为 `abandoned by a previous process` 再开新 run——长任务不会因为跑得久而误判，进程被杀也不会永久卡住源。运行历史默认保留 90 天。
 
 ### 9.6 运行前提（重要）
 
