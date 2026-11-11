@@ -38,8 +38,9 @@ use crate::audit::{record, AuditEvent};
 use crate::auth::current_user;
 use crate::crypto::util::{random_token, sha256_b64url, sha256_hex};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::state::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Json, Router};
@@ -160,10 +161,12 @@ async fn pending_identity(
 async fn confirm_pending(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     jar: CookieJar,
 ) -> AppResult<(CookieJar, Json<serde_json::Value>)> {
     let user = current_user(&state, &headers).await?;
-    let (body, jar) = crate::federation::confirm_pending_link(&state, jar, &user).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let (body, jar) = crate::federation::confirm_pending_link(&state, jar, &user, ip).await?;
     Ok((jar, Json(body)))
 }
 
@@ -180,9 +183,11 @@ async fn discard_pending(
 async fn unlink_identity(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(provider_code): Path<String>,
 ) -> AppResult<Json<serde_json::Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     // Lockout guard (pre-check): the user must keep at least one login
     // method after the unlink — a usable password or another identity.
@@ -213,7 +218,7 @@ async fn unlink_identity(
             action: "auth.identity.unlink",
             resource_type: "user",
             detail: json!({ "provider": provider_code }),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },

@@ -30,6 +30,12 @@ SIGNET_POSTGRES_DB=signet
 SIGNET_ISSUER=${vars.SIGNET_ISSUER}
 SIGNET_COOKIE_SECURE=true
 
+# Reverse proxy(ies) allowed to assert the client IP via X-Forwarded-For.
+# Without this, every request behind a proxy is attributed to the proxy's
+# address in audit logs, client IP allowlists and rate-limit buckets. Set it
+# to the proxy network (e.g. the Docker bridge) when one is in front.
+# SIGNET_TRUSTED_PROXIES=${vars.SIGNET_TRUSTED_PROXIES:-172.17.0.0/16}
+
 # ── First-run admin ──
 # No env vars required: the dashboard redirects to /setup on first boot (when
 # no admin exists) to create the first administrator.

@@ -33,6 +33,10 @@ struct IdTokenClaims {
     aud: String,
     exp: i64,
     iat: i64,
+    /// Binds this id_token to the access token issued beside it (OIDC Core
+    /// 3.1.3.6); a client that checks it detects a response whose halves were
+    /// mixed by an attacker.
+    at_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -242,9 +246,26 @@ async fn issue_from_code(
         return Err(AppError::oauth("invalid_grant", "code already used"));
     }
 
-    let user = active_user_by_id(&state.pool, row.user_id).await?;
+    let user = active_user_for_grant(state, row.user_id).await?;
     // A code exchange starts a fresh family; rotation keeps the parent's.
     build_token_response(state, client, &user, &row.scope, row.nonce, None).await
+}
+
+/// `active_user_by_id` for the token endpoint's error vocabulary.
+///
+/// A missing or disabled account is a failed grant (`invalid_grant`), not an
+/// authentication problem: the client authenticated fine, and RFC 6749 §5.2
+/// has a code for "the grant is no longer usable". Other errors (database)
+/// keep their normal mapping.
+async fn active_user_for_grant(state: &AppState, user_id: Uuid) -> AppResult<User> {
+    match active_user_by_id(&state.pool, user_id).await {
+        Ok(user) => Ok(user),
+        Err(AppError::Unauthorized(_)) | Err(AppError::NotFound(_)) => Err(AppError::oauth(
+            "invalid_grant",
+            "the account for this grant is not active",
+        )),
+        Err(e) => Err(e),
+    }
 }
 
 /// Revokes every still-live refresh token in `family`. Returns how many died.
@@ -340,7 +361,7 @@ async fn issue_from_refresh(
         );
     }
 
-    let user = active_user_by_id(&state.pool, row.user_id).await?;
+    let user = active_user_for_grant(state, row.user_id).await?;
     build_token_response(state, client, &user, &row.scope, None, row.family_id).await
 }
 
@@ -415,6 +436,7 @@ async fn build_token_response(
         aud: client.client_id.clone(),
         exp: id_exp.timestamp(),
         iat: now.timestamp(),
+        at_hash: crate::crypto::util::at_hash(&access_token),
         nonce,
         email: crate::oidc::scope_contains(scope, "email").then(|| user.email.clone()),
         name: crate::oidc::scope_contains(scope, "profile").then(|| user.display_name.clone()),

@@ -35,14 +35,12 @@ const formClientId = ref("");
 const formRedirects = ref("");
 const formPostLogoutRedirects = ref("");
 const formScopes = ref("");
-const formPkce = ref(true);
 const formIpAllowlist = ref(true);
 const formAllowedCidrs = ref("");
 
 const editRedirects = ref("");
 const editPostLogoutRedirects = ref("");
 const editScopes = ref("");
-const editPkce = ref(true);
 const editIpAllowlist = ref(true);
 const editAllowedCidrs = ref("");
 
@@ -112,8 +110,6 @@ const { sorted, toggleSort, sortIndicator } = useClientSort(filtered, {
     switch (key) {
       case "client_id":
         return row.client_id;
-      case "pkce_required":
-        return row.pkce_required ? 1 : 0;
       case "enabled":
         return row.enabled ? 1 : 0;
       case "created_at":
@@ -161,7 +157,6 @@ function openCreate() {
   formRedirects.value = "";
   formPostLogoutRedirects.value = "";
   formScopes.value = "";
-  formPkce.value = true;
   formIpAllowlist.value = true;
   formAllowedCidrs.value = "";
   showCreate.value = true;
@@ -172,7 +167,6 @@ function openEdit(c: AdminClient) {
   editRedirects.value = c.redirect_uris.join("\n");
   editPostLogoutRedirects.value = (c.post_logout_redirect_uris || []).join("\n");
   editScopes.value = (c.scopes || []).join("\n");
-  editPkce.value = c.pkce_required;
   editIpAllowlist.value = c.ip_allowlist_enabled;
   editAllowedCidrs.value = (c.allowed_cidrs || []).join("\n");
 }
@@ -189,7 +183,6 @@ async function onCreate() {
       client_id: formClientId.value,
       redirect_uris,
       post_logout_redirect_uris,
-      pkce_required: formPkce.value,
       scopes: scopes.length ? scopes : undefined,
       ip_allowlist_enabled: formIpAllowlist.value,
       allowed_cidrs,
@@ -218,7 +211,6 @@ async function onSaveEdit() {
     await updateClient(editing.value.id, {
       redirect_uris: parseLines(editRedirects.value),
       post_logout_redirect_uris: parseLines(editPostLogoutRedirects.value),
-      pkce_required: editPkce.value,
       scopes: parseLines(editScopes.value),
       ip_allowlist_enabled: editIpAllowlist.value,
       allowed_cidrs: parseLines(editAllowedCidrs.value),
@@ -408,12 +400,6 @@ async function onTestDrive(c: AdminClient) {
                     Scopes
                   </th>
                   <SortableTh
-                    label="PKCE"
-                    column="pkce_required"
-                    :indicator="sortIndicator('pkce_required')"
-                    @toggle="toggleSort"
-                  />
-                  <SortableTh
                     label="Status"
                     column="enabled"
                     :indicator="sortIndicator('enabled')"
@@ -475,7 +461,6 @@ async function onTestDrive(c: AdminClient) {
                   <td class="max-w-xs px-5 py-3 text-xs text-muted-foreground">
                     <span class="font-mono text-[11px]">{{ (c.scopes || []).join(", ") }}</span>
                   </td>
-                  <td class="px-5 py-3 text-xs">{{ c.pkce_required ? "required" : "optional" }}</td>
                   <td class="px-5 py-3 text-xs">
                     <span
                       :class="
@@ -587,10 +572,6 @@ async function onTestDrive(c: AdminClient) {
               />
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
-            <label class="flex items-center gap-2 text-sm">
-              <input v-model="formPkce" type="checkbox" class="rounded" />
-              Require PKCE (S256)
-            </label>
             <div>
               <label class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea
@@ -662,10 +643,6 @@ async function onTestDrive(c: AdminClient) {
               />
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
-            <label class="flex items-center gap-2 text-sm">
-              <input v-model="editPkce" type="checkbox" class="rounded" />
-              Require PKCE (S256)
-            </label>
             <div>
               <label class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea

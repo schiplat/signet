@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const CLIENT_RETURNING: &str = r#"
     id, client_id, redirect_uris, post_logout_redirect_uris,
-    grant_types, pkce_required, scopes, enabled,
+    grant_types, scopes, enabled,
     ip_allowlist_enabled, allowed_cidrs, created_at, updated_at
 "#;
 
@@ -43,7 +43,6 @@ pub struct AdminClient {
     pub redirect_uris: Vec<String>,
     pub post_logout_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
-    pub pkce_required: bool,
     pub scopes: Vec<String>,
     pub enabled: bool,
     pub ip_allowlist_enabled: bool,
@@ -64,7 +63,6 @@ struct CreateClientBody {
     client_secret: Option<String>,
     redirect_uris: Vec<String>,
     post_logout_redirect_uris: Option<Vec<String>>,
-    pkce_required: Option<bool>,
     scopes: Option<Vec<String>>,
     /// Default true (minimum privilege).
     ip_allowlist_enabled: Option<bool>,
@@ -75,7 +73,6 @@ struct CreateClientBody {
 struct UpdateClientBody {
     redirect_uris: Option<Vec<String>>,
     post_logout_redirect_uris: Option<Vec<String>>,
-    pkce_required: Option<bool>,
     scopes: Option<Vec<String>>,
     ip_allowlist_enabled: Option<bool>,
     allowed_cidrs: Option<Vec<String>>,
@@ -110,7 +107,6 @@ async fn create_client(
         .map(|u| normalize_uris(&u))
         .transpose()?
         .unwrap_or_default();
-    let pkce_required = body.pkce_required.unwrap_or(true);
     let scopes = normalize_scopes(
         body.scopes
             .unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]),
@@ -142,14 +138,14 @@ async fn create_client(
         r#"
         INSERT INTO client_apps (
             id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
-            grant_types, pkce_required, scopes, enabled,
+            grant_types, scopes, enabled,
             ip_allowlist_enabled, allowed_cidrs
         )
         VALUES (
             $1, $2, $3, $4, $5,
             ARRAY['authorization_code', 'refresh_token'],
-            $6, $7, TRUE,
-            $8, $9
+            $6, TRUE,
+            $7, $8
         )
         RETURNING {CLIENT_RETURNING}
         "#
@@ -159,7 +155,6 @@ async fn create_client(
     .bind(secret_hash)
     .bind(&redirect_uris)
     .bind(&post_logout)
-    .bind(pkce_required)
     .bind(&scopes)
     .bind(ip_allowlist_enabled)
     .bind(&allowed_cidrs)
@@ -238,7 +233,6 @@ async fn update_client(
     } else {
         existing.post_logout_redirect_uris.clone()
     };
-    let pkce_required = body.pkce_required.unwrap_or(existing.pkce_required);
     let scopes = if let Some(s) = body.scopes {
         normalize_scopes(s)?
     } else {
@@ -263,10 +257,9 @@ async fn update_client(
         UPDATE client_apps
         SET redirect_uris = $2,
             post_logout_redirect_uris = $3,
-            pkce_required = $4,
-            scopes = $5,
-            ip_allowlist_enabled = $6,
-            allowed_cidrs = $7,
+            scopes = $4,
+            ip_allowlist_enabled = $5,
+            allowed_cidrs = $6,
             updated_at = NOW()
         WHERE id = $1
         RETURNING {CLIENT_RETURNING}
@@ -275,7 +268,6 @@ async fn update_client(
     .bind(id)
     .bind(&redirect_uris)
     .bind(&post_logout)
-    .bind(pkce_required)
     .bind(&scopes)
     .bind(ip_allowlist_enabled)
     .bind(&allowed_cidrs)
@@ -297,7 +289,6 @@ async fn update_client(
                 "redirect_uris": { "before": existing.redirect_uris, "after": client.redirect_uris },
                 "post_logout_redirect_uris": { "before": existing.post_logout_redirect_uris, "after": client.post_logout_redirect_uris },
                 "scopes": { "before": existing.scopes, "after": client.scopes },
-                "pkce_required": { "before": existing.pkce_required, "after": client.pkce_required },
                 "ip_allowlist_enabled": client.ip_allowlist_enabled,
                 "allowed_cidrs": client.allowed_cidrs,
             }),

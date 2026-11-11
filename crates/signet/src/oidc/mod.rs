@@ -114,7 +114,9 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/oauth/end_session",
-            get(end_session::end_session).post(end_session::end_session),
+            // GET requires a valid id_token_hint (CSRF-safe); POST does not,
+            // because a cross-site form POST carries no Lax cookie.
+            get(end_session::end_session_get).post(end_session::end_session_post),
         )
         .route("/oauth/consent", post(consent::consent))
         .route(

@@ -460,22 +460,35 @@ async fn logout(State(state): State<std::sync::Arc<AppState>>, jar: CookieJar) -
     // RP-initiated logout: clear the SSO session too, and come back to a
     // page that does not require auth (see the guide's §8.5 — without a
     // public landing page the user is bounced straight back to a login form).
+    //
+    // POST, not a GET redirect: Signet accepts GET /oauth/end_session only
+    // with a signed id_token_hint (its CSRF protection), and this example does
+    // not retain one. POST needs no hint, and the cookie policy already makes a
+    // cross-site form POST unable to end the victim's session.
     let target = match state.discovery().await {
-        Ok(d) => d.end_session_endpoint.as_ref().map(|end| {
-            format!(
-                "{}?client_id={}&post_logout_redirect_uri={}",
-                end,
-                urlencoding(&state.cfg.client_id),
-                urlencoding(&state.cfg.post_logout_redirect_uri),
-            )
-        }),
+        Ok(d) => d.end_session_endpoint.clone(),
         Err(_) => None,
     };
-    (
-        jar,
-        Redirect::to(target.as_deref().unwrap_or("/signed-out")),
-    )
-        .into_response()
+    let Some(end) = target else {
+        return (jar, Redirect::to("/signed-out")).into_response();
+    };
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let html = format!(
+        "<!doctype html><meta charset=\"utf-8\"><title>Signing out…</title>\
+         <form id=\"f\" method=\"post\" action=\"{action}\">\
+         <input type=\"hidden\" name=\"client_id\" value=\"{client}\">\
+         <input type=\"hidden\" name=\"post_logout_redirect_uri\" value=\"{back}\">\
+         </form><script>document.getElementById('f').submit()</script>",
+        action = esc(&end),
+        client = esc(&state.cfg.client_id),
+        back = esc(&state.cfg.post_logout_redirect_uri),
+    );
+    (jar, Html(html)).into_response()
 }
 
 async fn signed_out() -> Html<&'static str> {

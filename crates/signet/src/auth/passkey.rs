@@ -5,9 +5,10 @@ use std::time::Instant;
 use crate::auth::session::{create_sign_in_session, current_user, session_cookie};
 use crate::crypto::util::{b64url_encode, random_token};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::models::{active_user_by_id, PublicUser};
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, Path, State};
+use axum::extract::{ConnectInfo, Extension, Path, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
@@ -177,9 +178,11 @@ struct RegisterFinishBody {
 async fn register_finish(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<RegisterFinishBody>,
 ) -> AppResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
 
     let ChallengeState::Register {
         state: reg_state,
@@ -239,7 +242,7 @@ async fn register_finish(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({ "credential_id": credential_id }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -252,9 +255,11 @@ async fn register_finish(
 async fn remove_passkey(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     sqlx::query("DELETE FROM webauthn_credentials WHERE id = $1 AND user_id = $2")
         .bind(id)
         .bind(user.id)
@@ -269,7 +274,7 @@ async fn remove_passkey(
             resource_type: "user",
             resource_id: Some(id.to_string()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

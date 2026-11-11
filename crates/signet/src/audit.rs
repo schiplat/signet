@@ -365,7 +365,16 @@ async fn list_audit_logs(
         "DESC"
     };
 
-    let search = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let search_owned =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            });
+    let search = search_owned.as_deref();
     let action_filter = q.action.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let client_filter = q
         .client_id
@@ -571,7 +580,16 @@ async fn export_audit_logs(
     } else {
         None
     };
-    let search = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let search_owned =
+        q.q.as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            });
+    let search = search_owned.as_deref();
     let action_filter = q.action.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let client_filter = q
         .client_id
@@ -684,10 +702,19 @@ fn to_csv(rows: &[AuditLogRow]) -> String {
 }
 
 fn csv_escape(s: &str) -> String {
+    // A cell beginning with one of these is a formula in Excel/LibreOffice, and
+    // the export carries user-influenced values (actor emails, detail JSON,
+    // user agents). Prefixing an apostrophe keeps the text and defuses the
+    // formula; quoting alone does not.
+    let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{s}")
+    } else {
+        s.to_string()
+    };
     if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {
-        s.to_string()
+        s
     }
 }
 

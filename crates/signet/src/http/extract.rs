@@ -72,7 +72,14 @@ pub fn client_ip_with(
         }
         if let Some(real) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
             if let Some(ip) = parse_hop(real) {
-                return Some(ip.to_string());
+                // A proxy that forwards a client-supplied `X-Real-IP` would
+                // otherwise let that client name any address — including one of
+                // our own proxies, or a value chosen to dodge an allowlist. A
+                // hop that is itself trusted makes no client assertion, so fall
+                // through to the peer address.
+                if !trusted.iter().any(|net| net.contains(&ip)) {
+                    return Some(ip.to_string());
+                }
             }
         }
     }

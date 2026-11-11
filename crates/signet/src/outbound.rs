@@ -60,9 +60,11 @@ fn is_public_v4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_public_v6(ip: Ipv6Addr) -> bool {
-    // IPv4-mapped (::ffff:a.b.c.d) must be judged as the IPv4 address it
-    // carries, otherwise ::ffff:127.0.0.1 would look like a normal v6 address.
-    if let Some(v4) = ip.to_ipv4_mapped() {
+    // Both IPv4-mapped (::ffff:a.b.c.d) and the deprecated IPv4-compatible
+    // (::a.b.c.d) forms must be judged as the IPv4 address they carry:
+    // `to_ipv4` covers both, so ::127.0.0.1 cannot pass as an ordinary v6
+    // address. (to_ipv4_mapped alone missed the compatible form.)
+    if let Some(v4) = ip.to_ipv4() {
         return is_public_v4(v4);
     }
     let [s0, s1, ..] = ip.segments();
@@ -73,7 +75,11 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || (s0 & 0xffc0) == 0xfe80 // fe80::/10       link local
         || (s0 == 0x2001 && s1 == 0x0db8) // 2001:db8::/32    documentation
         || (s0 == 0x2001 && s1 == 0x0000) // 2001::/32        Teredo
-        || s0 == 0x2002) // 2002::/16        6to4
+        || s0 == 0x2002 // 2002::/16        6to4
+        // NAT64 maps any embedded IPv4 (including private/loopback) into this
+        // prefix; treating it as public would let ::ffff / 64:ff9b reach the
+        // address it carries.
+        || (s0 == 0x0064 && s1 == 0xff9b)) // 64:ff9b::/96   NAT64
 }
 
 fn is_blocked_host_name(host: &str) -> bool {

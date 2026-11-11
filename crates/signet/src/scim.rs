@@ -56,7 +56,14 @@ async fn authorize(state: &AppState, headers: &HeaderMap) -> AppResult<()> {
         .map(str::trim);
 
     match provided {
-        Some(p) if crate::crypto::util::sha256_hex(p) == stored_hash => Ok(()),
+        Some(p)
+            if crate::auth::client_secret::constant_time_eq(
+                crate::crypto::util::sha256_hex(p).as_bytes(),
+                stored_hash.as_bytes(),
+            ) =>
+        {
+            Ok(())
+        }
         _ => Err(AppError::unauthorized("invalid SCIM bearer token")),
     }
 }
@@ -200,6 +207,21 @@ struct ListQuery {
     pub start_index: Option<i64>,
     #[serde(default)]
     pub count: Option<i64>,
+    /// Advertised as unsupported in the service provider config, but some IdPs
+    /// send it anyway. Refusing it is the difference between a client that
+    /// knows its filter was ignored and one that silently reconciles against
+    /// the whole directory.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+fn reject_filter(q: &ListQuery) -> AppResult<()> {
+    if q.filter.as_deref().is_some_and(|f| !f.trim().is_empty()) {
+        return Err(AppError::bad_request(
+            "SCIM filter is not supported; use startIndex/count",
+        ));
+    }
+    Ok(())
 }
 
 async fn list_users(
@@ -208,6 +230,7 @@ async fn list_users(
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Value>> {
     authorize(&state, &headers).await?;
+    reject_filter(&q)?;
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&state.pool)
         .await?;
@@ -1437,6 +1460,10 @@ async fn delete_group(
     authorize(&state, &headers).await?;
     let group = find_group(&state, &id).await?;
 
+    // One transaction: releasing the membership and recording who was in it
+    // must land together, or a failure between the two leaves a live-but-empty
+    // group with no snapshot — the recovery record the tombstone exists for.
+    let mut tx = state.pool.begin().await?;
     // Snapshot the membership before releasing it. `users.groups` is what the
     // `groups` claim is built from, so a deleted group must stop granting — but
     // the membership has to survive somewhere or a mistaken delete is
@@ -1444,10 +1471,10 @@ async fn delete_group(
     let members: Vec<Uuid> =
         sqlx::query_scalar("SELECT id FROM users WHERE groups @> ARRAY[$1::text] ORDER BY email")
             .bind(&group.display_name)
-            .fetch_all(&state.pool)
+            .fetch_all(&mut *tx)
             .await?;
 
-    clear_group(&state.pool, &group.display_name).await?;
+    clear_group(&mut *tx, &group.display_name).await?;
 
     // Marked, not removed. The row is the record that the group existed and who
     // was in it; the partial unique index on the live rows means a re-created
@@ -1458,8 +1485,9 @@ async fn delete_group(
     )
     .bind(group.id)
     .bind(&members)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     record_scim(
         &state,

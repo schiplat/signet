@@ -571,7 +571,6 @@ export type AdminClient = {
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   grant_types: string[];
-  pkce_required: boolean;
   scopes: string[];
   enabled: boolean;
   ip_allowlist_enabled: boolean;
@@ -595,7 +594,6 @@ export async function createClient(body: {
   client_secret?: string;
   redirect_uris: string[];
   post_logout_redirect_uris?: string[];
-  pkce_required?: boolean;
   scopes?: string[];
   ip_allowlist_enabled?: boolean;
   allowed_cidrs?: string[];
@@ -614,7 +612,6 @@ export async function updateClient(
   body: {
     redirect_uris?: string[];
     post_logout_redirect_uris?: string[];
-    pkce_required?: boolean;
     scopes?: string[];
     ip_allowlist_enabled?: boolean;
     allowed_cidrs?: string[];

@@ -6,6 +6,7 @@ use crate::auth::session::{
     cookie_value, create_sign_in_session, current_user, revoke_all_sessions, session_cookie,
 };
 use crate::error::{AppError, AppResult};
+use crate::http::extract::AuditIp;
 use crate::models::{user_by_id, PublicUser, User};
 use crate::roles::require_admin_role;
 use crate::state::AppState;
@@ -721,9 +722,13 @@ async fn enroll_start_challenge(
     }
 
     let secret = generate_totp_secret();
+    // The pending seed is as sensitive as the enrolled one, which is stored
+    // encrypted: a challenge row lives for 10 minutes and a database dump in
+    // that window must not hand out a working TOTP seed.
+    let sealed = encrypt_totp_secret(&state, &secret);
     sqlx::query("UPDATE mfa_challenges SET pending_secret = $2 WHERE id = $1")
         .bind(challenge.id)
-        .bind(&secret)
+        .bind(&sealed)
         .execute(&state.pool)
         .await?;
 
@@ -763,7 +768,8 @@ async fn enroll_confirm_challenge(
         .pending_secret
         .as_deref()
         .ok_or_else(|| AppError::bad_request("call enroll/start first"))?;
-    if !verify_totp_code(secret, &body.code)? {
+    let secret = decrypt_totp_secret(&state, secret);
+    if !verify_totp_code(&secret, &body.code)? {
         return Err(AppError::unauthorized("invalid code"));
     }
 
@@ -777,7 +783,7 @@ async fn enroll_confirm_challenge(
         "#,
     )
     .bind(user_id)
-    .bind(encrypt_totp_secret(&state, secret))
+    .bind(encrypt_totp_secret(&state, &secret))
     .execute(&state.pool)
     .await?;
 
@@ -891,11 +897,12 @@ async fn enroll_start_session(
         .await?;
     // Self-service enrollment inside an existing session: the challenge never
     // issues a session, so the via label is only a placeholder.
+    let sealed = encrypt_totp_secret(&state, &secret);
     let token = create_challenge(
         &state.pool,
         user.id,
         "enroll",
-        Some(&secret),
+        Some(&sealed),
         crate::admission::via::PASSWORD,
     )
     .await?;
@@ -913,10 +920,12 @@ async fn enroll_start_session(
 async fn enroll_confirm_session(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     jar: CookieJar,
     Json(body): Json<EnrollConfirmBody>,
 ) -> AppResult<impl IntoResponse> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if user.totp_enabled {
         return Err(AppError::bad_request("totp already enabled"));
     }
@@ -928,7 +937,8 @@ async fn enroll_confirm_session(
         .pending_secret
         .as_deref()
         .ok_or_else(|| AppError::bad_request("call enroll/start first"))?;
-    if !verify_totp_code(secret, &body.code)? {
+    let secret = decrypt_totp_secret(&state, secret);
+    if !verify_totp_code(&secret, &body.code)? {
         return Err(AppError::unauthorized("invalid code"));
     }
 
@@ -940,7 +950,7 @@ async fn enroll_confirm_session(
         "#,
     )
     .bind(user.id)
-    .bind(encrypt_totp_secret(&state, secret))
+    .bind(encrypt_totp_secret(&state, &secret))
     .execute(&state.pool)
     .await?;
 
@@ -956,7 +966,7 @@ async fn enroll_confirm_session(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "via": "session" }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -981,9 +991,11 @@ struct TotpCodeBody {
 async fn regenerate_recovery(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<TotpCodeBody>,
 ) -> AppResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if !user.totp_enabled {
         return Err(AppError::bad_request("totp not enabled"));
     }
@@ -1004,7 +1016,7 @@ async fn regenerate_recovery(
             resource_type: "user",
             resource_id: None,
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1018,9 +1030,11 @@ async fn regenerate_recovery(
 async fn disable_mfa(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<TotpCodeBody>,
 ) -> AppResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     if !user.totp_enabled {
         return Err(AppError::bad_request("totp not enabled"));
     }
@@ -1051,7 +1065,7 @@ async fn disable_mfa(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -1084,11 +1098,12 @@ async fn rebind_start(
         .bind(user.id)
         .execute(&state.pool)
         .await?;
+    let sealed = encrypt_totp_secret(&state, &new_secret);
     let token = create_challenge(
         &state.pool,
         user.id,
         "enroll",
-        Some(&new_secret),
+        Some(&sealed),
         crate::admission::via::PASSWORD,
     )
     .await?;
@@ -1105,10 +1120,12 @@ async fn rebind_start(
 async fn rebind_confirm(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     jar: CookieJar,
     Json(body): Json<EnrollConfirmBody>,
 ) -> AppResult<impl IntoResponse> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let challenge = load_challenge(&state.pool, &headers).await?;
     if challenge.purpose != "enroll" || challenge.user_id != user.id {
         return Err(AppError::bad_request("rebind challenge required"));
@@ -1117,7 +1134,8 @@ async fn rebind_confirm(
         .pending_secret
         .as_deref()
         .ok_or_else(|| AppError::bad_request("call rebind/start first"))?;
-    if !verify_totp_code(secret, &body.code)? {
+    let secret = decrypt_totp_secret(&state, secret);
+    if !verify_totp_code(&secret, &body.code)? {
         return Err(AppError::unauthorized("invalid code"));
     }
 
@@ -1129,7 +1147,7 @@ async fn rebind_confirm(
         "#,
     )
     .bind(user.id)
-    .bind(encrypt_totp_secret(&state, secret))
+    .bind(encrypt_totp_secret(&state, &secret))
     .execute(&state.pool)
     .await?;
 
@@ -1145,7 +1163,7 @@ async fn rebind_confirm(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

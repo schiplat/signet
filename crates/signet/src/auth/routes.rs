@@ -7,11 +7,11 @@ use crate::auth::session::{
 };
 use crate::directory;
 use crate::error::{AppError, AppResult};
-use crate::http::extract::client_ip;
+use crate::http::extract::{client_ip, AuditIp};
 use crate::mfa::{begin_login_mfa_flow, force_password_change};
 use crate::models::{PublicUser, User, USER_COLS};
 use crate::state::AppState;
-use axum::extract::{ConnectInfo, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
@@ -496,9 +496,11 @@ async fn list_my_consents(
 async fn revoke_my_consent(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Path(client_id): Path<String>,
 ) -> AppResult<Json<Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let res = sqlx::query("DELETE FROM oauth_consents WHERE user_id = $1 AND client_id = $2")
         .bind(user.id)
         .bind(&client_id)
@@ -527,7 +529,7 @@ async fn revoke_my_consent(
             resource_type: "client",
             resource_id: Some(client_id),
             detail: json!({}),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -546,14 +548,28 @@ struct UpdateMeBody {
 async fn update_me(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<UpdateMeBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     let user = current_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
     let display_name = body
         .display_name
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| AppError::bad_request("display_name required"))?;
+
+    // Same ownership rule as the admin path: a directory- or SCIM-managed
+    // display name is not the account holder's to edit locally. Without this
+    // the profile form was a way around the restriction, and the edit survived
+    // only until the next sync overwrote it.
+    if display_name != user.display_name {
+        if let Some(authority) = crate::authority::managing_authority(&state.pool, user.id).await? {
+            if let Some(msg) = authority.write_error("display_name") {
+                return Err(AppError::forbidden(msg));
+            }
+        }
+    }
 
     let phone = if body.phone.is_some() {
         crate::admin::normalize_phone(body.phone)?
@@ -595,7 +611,7 @@ async fn update_me(
             resource_type: "user",
             resource_id: Some(updated.id.to_string()),
             detail: json!({ "display_name": display_name }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
@@ -614,12 +630,23 @@ struct ChangePasswordBody {
 async fn change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
     Json(body): Json<ChangePasswordBody>,
 ) -> AppResult<Json<serde_json::Value>> {
     // Unrestricted on purpose: this endpoint is what clears a pending
     // `must_change_password`, so it cannot sit behind the gate it exists to
     // lift (the current-password check is its own authentication).
     let user = current_user_unrestricted(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    // SSO-JIT and directory-provisioned accounts have no local password, so
+    // there is nothing to verify: parsing the empty hash surfaced as a 500.
+    // Their credential lives upstream (or arrives by email reset).
+    if user.password_hash.is_empty() {
+        return Err(AppError::bad_request(
+            "this account has no local password; set one through the password reset flow \
+             or your SSO provider",
+        ));
+    }
     if !verify_password_offloaded(&body.current_password, &user.password_hash).await? {
         return Err(AppError::unauthorized("current password is incorrect"));
     }
@@ -658,7 +685,7 @@ async fn change_password(
                 "revoked_sessions": revoked_sessions,
                 "revoked_refresh_tokens": revoked_tokens,
             }),
-            ip: None,
+            ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },

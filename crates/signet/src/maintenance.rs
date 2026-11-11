@@ -63,8 +63,35 @@ pub async fn sweep_once(state: &AppState, retention_days: i64) -> anyhow::Result
             tracing::debug!(table, deleted, "swept expired rows");
         }
     }
+
+    // Age-based retention for the two append-only tables with no expiry column.
+    // `login_devices` is a "have I seen this IP before" memo, not an audit
+    // record: after 90 days an address counts as new again, which re-arms the
+    // new-device alert rather than leaking anything. Delivery history is
+    // diagnostic only.
+    for (table, column, days) in RETENTION_TABLES {
+        let deleted = sqlx::query(&format!(
+            "DELETE FROM {table} WHERE id IN \
+             (SELECT id FROM {table} \
+              WHERE {column} < NOW() - ($1::int * INTERVAL '1 day') LIMIT {BATCH})"
+        ))
+        .bind(days)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if deleted > 0 {
+            tracing::debug!(table, deleted, days, "swept rows past retention");
+        }
+    }
     Ok(())
 }
+
+/// `(table, age column, retention days)` for tables swept by age rather than by
+/// an `expires_at` timestamp.
+const RETENTION_TABLES: &[(&str, &str, i32)] = &[
+    ("login_devices", "last_seen_at", 90),
+    ("webhook_deliveries", "created_at", 30),
+];
 
 /// `(table, expiry column)` pairs swept every tick.
 ///

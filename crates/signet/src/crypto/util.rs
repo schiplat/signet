@@ -26,6 +26,14 @@ pub fn sha256_b64url(input: &str) -> String {
     URL_SAFE_NO_PAD.encode(digest)
 }
 
+/// OIDC `at_hash`: base64url of the left half of SHA-256 over the access token
+/// (OpenID Connect Core 3.1.3.6). A client verifies it against the access
+/// token it received, binding the two halves of one token response.
+pub fn at_hash(access_token: &str) -> String {
+    let digest = Sha256::digest(access_token.as_bytes());
+    URL_SAFE_NO_PAD.encode(&digest[..digest.len() / 2])
+}
+
 pub fn b64url_encode(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }

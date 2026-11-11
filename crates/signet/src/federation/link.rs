@@ -127,6 +127,7 @@ pub async fn confirm_pending_link(
     state: &AppState,
     jar: CookieJar,
     user: &User,
+    ip: Option<String>,
 ) -> AppResult<(serde_json::Value, CookieJar)> {
     let Some(raw_state) = jar.get(PENDING_COOKIE).map(|c| c.value().to_owned()) else {
         return Err(AppError::not_found("no pending sso identity"));
@@ -229,7 +230,7 @@ pub async fn confirm_pending_link(
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
             detail: json!({ "provider": provider_code, "via": "pending_confirmed" }),
-            ip: None,
+            ip,
             user_agent: None,
             client_id: None,
         },

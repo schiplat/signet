@@ -314,6 +314,9 @@ pub struct ClientApp {
     pub redirect_uris: Vec<String>,
     pub post_logout_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
+    /// Deprecated and unenforced: every client must use PKCE S256 at
+    /// authorize/token (the column is kept for schema stability only, and is
+    /// no longer exposed by the admin API or the dashboard).
     pub pkce_required: bool,
     pub scopes: Vec<String>,
     pub enabled: bool,

@@ -1257,6 +1257,10 @@ async fn update_user(
         }
     }
 
+    // Recorded in the audit detail below: a password write is the one part of
+    // this endpoint whose effect is invisible in the returned user row.
+    let password_reset = body.password.as_deref().is_some_and(|p| !p.is_empty());
+
     // Built as a query first so the one statement can run on either executor:
     // the plain pool, or the last-admin guard's transaction.
     let update_sql = format!(
@@ -1314,12 +1318,27 @@ async fn update_user(
             action: "user.update",
             resource_type: "user",
             resource_id: Some(user.id.to_string()),
+            // Before/after, plus whether a new password was set: the trail has
+            // to distinguish "renamed the display name" from "took the account
+            // over", which the old shape (result only) could not.
             detail: json!({
-                "email": user.email,
-                "role": user.role,
-                "status": user.status,
-                "mfa_required": user.mfa_required,
-                "must_change_password": user.must_change_password,
+                "password_reset": password_reset,
+                "before": {
+                    "email": target.email,
+                    "role": target.role,
+                    "status": target.status,
+                    "display_name": target.display_name,
+                    "mfa_required": target.mfa_required,
+                    "must_change_password": target.must_change_password,
+                },
+                "after": {
+                    "email": user.email,
+                    "role": user.role,
+                    "status": user.status,
+                    "display_name": user.display_name,
+                    "mfa_required": user.mfa_required,
+                    "must_change_password": user.must_change_password,
+                },
             }),
             ip,
             user_agent: crate::http::extract::user_agent(&headers),
