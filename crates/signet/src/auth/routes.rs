@@ -853,13 +853,13 @@ async fn email_change_confirm(
         return Err(AppError::bad_request("email already exists"));
     }
 
-    let updated = sqlx::query_as::<_, crate::models::User>(
+    let updated = sqlx::query_as::<_, crate::models::User>(&format!(
         r#"
         UPDATE users SET email = $2, email_verified = TRUE, updated_at = NOW()
         WHERE id = $1
         RETURNING {USER_COLS}
-        "#,
-    )
+        "#
+    ))
     .bind(user_id)
     .bind(&new_email)
     .fetch_one(&state.pool)

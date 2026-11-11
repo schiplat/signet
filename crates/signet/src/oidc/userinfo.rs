@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Deserialize)]
 struct AccessClaims {
     sub: String,
+    aud: String,
     token_use: Option<String>,
     scope: Option<String>,
 }
@@ -78,6 +79,17 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
             out.insert("phone_number_verified".into(), json!(false));
         }
     }
+
+    // Per-client extra claims ride along here too — the access token carries
+    // them, and an RP that reads userinfo instead of decoding locally must see
+    // the same claims. `$field` extras resolve against the user; literals pass
+    // through. M2M tokens never reach this handler (no user row).
+    let client: Option<(Option<serde_json::Value>,)> =
+        sqlx::query_as("SELECT extra_claims FROM client_apps WHERE client_id = $1")
+            .bind(&data.claims.aud)
+            .fetch_optional(&state.pool)
+            .await?;
+    crate::models::merge_extra_claims(&mut out, client.and_then(|(c,)| c).as_ref(), Some(&user))?;
 
     Ok(Json(Value::Object(out)))
 }

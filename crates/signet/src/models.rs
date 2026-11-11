@@ -102,7 +102,11 @@ pub fn resolve_claim_value(
     raw: &serde_json::Value,
     user: Option<&User>,
 ) -> Option<serde_json::Value> {
-    let text = raw.as_str()?;
+    // Numbers and booleans pass through as literals; only strings can be
+    // `$field` placeholders.
+    let Some(text) = raw.as_str() else {
+        return Some(raw.clone());
+    };
     let resolved = match text {
         "$sub" => Some(user?.sub.clone()),
         "$email" => Some(user?.email.clone()),
