@@ -91,6 +91,9 @@ pub async fn sweep_once(state: &AppState, retention_days: i64) -> anyhow::Result
 const RETENTION_TABLES: &[(&str, &str, i32)] = &[
     ("login_devices", "last_seen_at", 90),
     ("webhook_deliveries", "created_at", 30),
+    // Sync history is diagnostic, not an audit record (the audit log carries
+    // the durable account). A five-minute schedule writes ~105k rows a year.
+    ("directory_sync_runs", "started_at", 90),
 ];
 
 /// `(table, expiry column)` pairs swept every tick.

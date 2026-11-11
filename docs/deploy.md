@@ -127,7 +127,13 @@ docker compose -f deploy/docker-compose.yml restart signet
 curl -s https://<issuer>/.well-known/jwks.json | jq '.keys[].kid'   # 应看到新旧两把
 ```
 
-可以重复执行：每次都会把当前密钥退役、生成新密钥；退役目录按 `kid` 命名，重复轮换的旧公钥幂等覆盖。确认所有旧 token 过期后可清理退役目录。
+可以重复执行：每次都会把当前密钥退役、生成新密钥；退役目录按 `kid` 命名，重复轮换的旧公钥幂等覆盖。
+
+退役目录不会自动清理（公钥，无泄露风险）。确认旧 token 已过期后可收缩：
+
+```bash
+signet keys prune --keep 3   # 只保留最近 3 把退役公钥
+```
 
 ---
 

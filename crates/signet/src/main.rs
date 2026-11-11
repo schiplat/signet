@@ -124,6 +124,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(SignetCommand::Keys { command }) => {
             match command {
+                signet::directory::cli::KeysCommand::Prune { keep } => {
+                    let removed =
+                        signet::crypto::keys::prune_retired(&cfg.jwt_retired_key_dir, keep)?;
+                    println!("removed {removed} retired key(s); kept the newest {keep}");
+                    tracing::info!(removed, keep, "pruned retired signing keys");
+                }
                 signet::directory::cli::KeysCommand::Rotate => {
                     let kid = signet::crypto::keys::rotate(
                         &cfg.jwt_private_key_path,

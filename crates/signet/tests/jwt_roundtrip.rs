@@ -91,3 +91,48 @@ fn rotation_keeps_old_tokens_verifiable() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Pruning keeps the newest retired keys and nothing older.
+#[test]
+fn pruning_retired_keys_keeps_the_newest() {
+    let dir = std::env::temp_dir().join(format!("signet-prune-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("jwt_private.pem");
+    let retired = dir.join("retired_keys");
+    let _ = JwtKeys::load_or_generate(&path).expect("initial keys");
+
+    // Two rotations produce two retired keys; stagger mtimes so "newest" is
+    // deterministic regardless of filesystem timestamp resolution.
+    let first = signet::crypto::keys::rotate(&path, &retired).expect("rotate 1");
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let second = signet::crypto::keys::rotate(&path, &retired).expect("rotate 2");
+    assert_ne!(first, second);
+
+    let count = || {
+        std::fs::read_dir(&retired)
+            .expect("retired dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pem"))
+            .count()
+    };
+    assert_eq!(count(), 2);
+
+    let removed = signet::crypto::keys::prune_retired(&retired, 1).expect("prune");
+    assert_eq!(removed, 1);
+    assert_eq!(count(), 1);
+
+    // `rotate` returns the *new active* kid; the file it retires is the
+    // previous active key. So after two rotations the retired set is
+    // {original, first}, and the newest is `first`.
+    // The ring still loads: a pruned key only drops tokens older than the
+    // retained window.
+    let survivors: Vec<String> = std::fs::read_dir(&retired)
+        .expect("retired dir")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(survivors, vec![format!("{first}.pem")]);
+    let _ = JwtKeys::load_or_generate_with_retired(&path, Some(&retired)).expect("reload");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

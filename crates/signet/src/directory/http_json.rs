@@ -183,12 +183,14 @@ async fn get_json(
     credential: Option<&str>,
     allow_private: bool,
 ) -> AppResult<Value> {
-    // Re-validated per request, and deliberately on the *rendered* URL: the
-    // cursor/paging values end up in the query string, and a URL assembled here
-    // must pass the same guard the stored one did.
-    let url = crate::outbound::ensure_allowed(url.as_str(), allow_private).await?;
+    // Re-validated and pinned per request, deliberately on the *rendered* URL:
+    // the cursor/paging values end up in the query string, so a URL assembled
+    // here must pass the same guard the stored one did. The credential this
+    // request may carry (Authorization header) must reach the validated
+    // address, not a second resolution of the hostname.
+    let (client, url) = crate::outbound::pinned_client(url.as_str(), allow_private).await?;
 
-    let mut request = crate::outbound::client().get(url.clone());
+    let mut request = client.get(url.clone());
     if let Some(header) = authorization(cfg, credential) {
         request = request.header(reqwest::header::AUTHORIZATION, header);
     }

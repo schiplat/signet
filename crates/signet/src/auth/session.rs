@@ -181,9 +181,24 @@ pub async fn user_from_session_token(pool: &PgPool, token: &str) -> AppResult<Op
         "#,
         crate::models::user_cols_with("u")
     ))
-    .bind(token_hash)
+    .bind(&token_hash)
     .fetch_optional(pool)
     .await?;
+
+    if user.is_some() {
+        // `last_seen_at` is what the device list labels "last seen"; it used to
+        // be written only at creation, so every session showed its sign-in time
+        // forever. Throttled in SQL so an active tab does not turn every request
+        // into a write; best effort because a session read must not fail over a
+        // bookkeeping update.
+        let _ = sqlx::query(
+            "UPDATE sessions SET last_seen_at = NOW() \
+             WHERE token_hash = $1 AND last_seen_at < NOW() - INTERVAL '60 seconds'",
+        )
+        .bind(&token_hash)
+        .execute(pool)
+        .await;
+    }
     Ok(user)
 }
 

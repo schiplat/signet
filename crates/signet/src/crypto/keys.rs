@@ -247,3 +247,37 @@ pub fn rotate(path: &Path, retired_dir: &Path) -> Result<String> {
 
     Ok(components(&RsaPublicKey::from(&new)).0)
 }
+
+/// Deletes all but the `keep` most recently written retired keys.
+///
+/// Retired keys are only needed until the tokens they signed expire (the
+/// longest TTL in play bounds it: refresh tokens are issued per grant, so keep
+/// enough to cover a rotation cycle rather than one access-token lifetime). A
+/// public key is not a secret, so the cost of keeping too many is disk noise,
+/// not exposure; the default of 3 covers "rotate, notice a problem, rotate
+/// back".
+pub fn prune_retired(dir: &Path, keep: usize) -> Result<usize> {
+    let mut entries: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    let reader = match std::fs::read_dir(dir) {
+        Ok(reader) => reader,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    for entry in reader {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("pem") {
+            continue;
+        }
+        let modified = entry.metadata()?.modified()?;
+        entries.push((modified, path));
+    }
+    entries.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    let mut removed = 0;
+    for (_, path) in entries.into_iter().skip(keep) {
+        std::fs::remove_file(&path)
+            .with_context(|| format!("remove retired key {}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}

@@ -49,6 +49,13 @@ pub enum KeysCommand {
     /// keeps verifying tokens already issued); the new key replaces the active
     /// PEM. Restart the server to start signing with it. Safe to repeat.
     Rotate,
+    /// Delete all but the newest retired keys.
+    Prune {
+        /// How many retired keys to keep. Default 3 — enough to rotate back
+        /// after a mistake.
+        #[arg(long, default_value_t = 3)]
+        keep: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]

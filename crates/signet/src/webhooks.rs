@@ -247,35 +247,36 @@ async fn deliver_one(
         (payload.to_string(), "application/json")
     };
 
-    let client = crate::outbound::client();
-
-    let mut req = client
-        .post(&wh.url)
-        .header("content-type", content_type)
-        .header("x-signet-event", event_id.to_string());
-
-    // Generic webhooks sign via header; Feishu embeds sign in the body instead.
-    if wh.kind != "feishu" {
-        if let Some(s) = secret.as_deref() {
-            let sig = hmac_sha256_hex(s.as_bytes(), body.as_bytes());
-            req = req.header("x-signet-signature", format!("sha256={sig}"));
-        }
-    }
-
-    // Re-validate on every attempt: the URL was checked when it was saved, but
-    // DNS can be re-pointed afterwards. A blocked destination is recorded as a
-    // failed delivery so it stays visible in the delivery history.
+    // Re-validate *and pin* on every attempt: the URL was checked when it was
+    // saved, but DNS can be re-pointed afterwards, and a separate connect-time
+    // resolution is exactly the window a rebinding attacker needs. A blocked
+    // destination is recorded as a failed delivery so it stays visible in the
+    // delivery history.
     let (success, status_code, err) =
-        match crate::outbound::ensure_allowed(&wh.url, state.config.outbound_allow_private).await {
+        match crate::outbound::pinned_client(&wh.url, state.config.outbound_allow_private).await {
             Err(e) => (false, None, Some(e.to_string())),
-            Ok(_) => match req.body(body).send().await {
-                Ok(resp) => {
-                    let code = resp.status().as_u16();
-                    let ok = (200..300).contains(&code);
-                    (ok, Some(code as i16), None)
+            Ok((client, url)) => {
+                let mut req = client
+                    .post(url)
+                    .header("content-type", content_type)
+                    .header("x-signet-event", event_id.to_string());
+                // Generic webhooks sign via header; Feishu embeds the signature
+                // in the body instead.
+                if wh.kind != "feishu" {
+                    if let Some(s) = secret.as_deref() {
+                        let sig = hmac_sha256_hex(s.as_bytes(), body.as_bytes());
+                        req = req.header("x-signet-signature", format!("sha256={sig}"));
+                    }
                 }
-                Err(e) => (false, None, Some(e.to_string())),
-            },
+                match req.body(body).send().await {
+                    Ok(resp) => {
+                        let code = resp.status().as_u16();
+                        let ok = (200..300).contains(&code);
+                        (ok, Some(code as i16), None)
+                    }
+                    Err(e) => (false, None, Some(e.to_string())),
+                }
+            }
         };
 
     sqlx::query(
