@@ -5,6 +5,7 @@ import UiButton from "@/components/ui/UiButton.vue";
 import {
   createApiToken,
   fetchApiTokens,
+  fetchBrandingSettings,
   fetchCaptchaSettings,
   fetchMfaSettings,
   fetchRuntimeSettings,
@@ -12,10 +13,12 @@ import {
   fetchSmtpSettings,
   fetchSsoSettings,
   me,
+  resetBrandingSettings,
   resetCaptchaSettings,
   resetSmtpSettings,
   revokeApiToken,
   testSmtp,
+  updateBrandingSettings,
   updateCaptchaSettings,
   updateMfaSettings,
   updateRuntimeSettings,
@@ -25,6 +28,7 @@ import {
   type ApiToken,
   type RuntimeSettings,
 } from "@/lib/api";
+import { useBrandingStore } from "@/stores/branding";
 import { joinList, splitList } from "@/lib/directoryMapping";
 
 const loading = ref(true);
@@ -133,6 +137,11 @@ onMounted(async () => {
   }
   try {
     await refreshCaptcha();
+  } catch {
+    /* surfaced when the operator interacts with the section */
+  }
+  try {
+    await refreshBranding();
   } catch {
     /* surfaced when the operator interacts with the section */
   }
@@ -437,6 +446,56 @@ async function onResetCaptcha() {
     error.value = e instanceof Error ? e.message : "CAPTCHA reset failed";
   } finally {
     captchaSaving.value = false;
+  }
+}
+
+// --- Branding ---
+//
+// One string, shown everywhere the product names itself. Rendered as plain
+// text by every surface (never HTML), so the only validation that matters is
+// length and control characters — both enforced server-side.
+
+const branding = useBrandingStore();
+const brandingName = ref("");
+const brandingSaving = ref(false);
+const brandingSaved = ref(false);
+
+async function refreshBranding() {
+  const res = await fetchBrandingSettings();
+  brandingName.value = res.name;
+}
+
+async function onSaveBranding() {
+  error.value = "";
+  brandingSaved.value = false;
+  const name = brandingName.value.trim();
+  if (!name) return;
+  brandingSaving.value = true;
+  try {
+    const res = await updateBrandingSettings(name);
+    brandingName.value = res.name;
+    branding.name = res.name; // live in this session too
+    document.title = res.name;
+    brandingSaved.value = true;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Branding save failed";
+  } finally {
+    brandingSaving.value = false;
+  }
+}
+
+async function onResetBranding() {
+  error.value = "";
+  brandingSaving.value = true;
+  try {
+    const res = await resetBrandingSettings();
+    brandingName.value = res.name;
+    branding.name = res.name;
+    document.title = res.name;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Branding reset failed";
+  } finally {
+    brandingSaving.value = false;
   }
 }
 </script>
@@ -877,6 +936,38 @@ async function onResetCaptcha() {
             Reset to env
           </UiButton>
           <span v-if="captchaSaved" class="text-xs text-muted-foreground">Saved</span>
+        </div>
+      </section>
+
+      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">Branding</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            The product name shown on the sign-in page, setup wizard, sidebar and browser tab.
+            Saved here it wins over <code class="text-[11px]">SIGNET_BRAND_NAME</code> and applies
+            immediately — no redeploy. Plain text only.
+          </p>
+        </div>
+
+        <label class="block">
+          <span class="type-label mb-1.5 block">Product name</span>
+          <input
+            v-model="brandingName"
+            type="text"
+            class="field-input"
+            maxlength="64"
+            placeholder="Signet"
+          />
+        </label>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton size="sm" :disabled="brandingSaving || !brandingName.trim()" @click="onSaveBranding">
+            {{ brandingSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <UiButton size="sm" variant="secondary" :disabled="brandingSaving" @click="onResetBranding">
+            Reset to env
+          </UiButton>
+          <span v-if="brandingSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
       </section>
     </template>

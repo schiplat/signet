@@ -118,6 +118,9 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     }
 
     let api_v1 = Router::new()
+        // Public: the unauthenticated pages (sign-in, reset, setup) read the
+        // product name here.
+        .route("/branding", get(settings::public_branding))
         .merge(auth::router())
         .merge(mfa::router())
         .merge(auth::passkey::router())

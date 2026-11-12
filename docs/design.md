@@ -391,13 +391,18 @@ Signet **不是**对外账户体系：无公开自助注册。
 - **过渡方案已存在**：Signet 的通用 OIDC 上游连接器可以前置一个具备 SAML 能力的 IdP（如 Keycloak/ADFS），把"某个上游只会 SAML"的问题转化为标准联邦对接，不需要 Signet 自己实现 SAML。
 - 触发条件：出现**无法改用 OIDC** 的下游 SP 且业务必须接入时，单独立项（含专门的 XMLDsig 安全评审）。
 
-### 组身份迁移（规划中，未排期）
+### 组身份迁移（规划中，已排入下一批次，前提已定）
 
 当前组身份以**显示名**为键：`users.groups[]` 与 `users.directory_groups[]` 存名字，
 `scim_groups.id` 是唯一真正的组标识符，`docs/integrations.md` 里 SCIM User 的
 `groups[].value` 已改为组 id。核实过的边界：SCIM 组**没有改名端点**（PATCH 只处理
 成员增删换，创建后 `displayName` 不可变），本地组由用户编辑时按名隐式创建——因此
 "改名孤儿化成员"目前不可触发，该迁移是**还技术债**而非修复在逃缺陷。
+
+**前提（原阻塞项）已决策** —— 目录同步遇到"上游组没有本地记录"时：**按上游组名创建**
+本地 `scim_groups` 记录（`display_name` = 上游组名，`external_id` = 上游组名），再把
+成员写进该组。这与 SCIM 开通路径和管理员手工编辑的隐式建组行为一致，同步从此拥有
+显式、幂等的建组语义；`deleted_at` 有墓碑的组视为不存在，同样按名重建（新 id）。
 
 迁移方向（做时一次性完成，不拆步）：
 
@@ -407,8 +412,9 @@ Signet **不是**对外账户体系：无公开自助注册。
 3. 目录同步的组写入（指纹比较含组列表）改按 id；
 4. 展示名归组表所有，改名即改一行。
 
-前提：目录同步的组语义（上游组名→本地组）需要先定义"上游组没有本地记录时"的
-创建策略，避免迁移把隐式约定变成显式 bug。
+预计波及面（实施时的检查清单）：`models.rs` 列定义、admin 用户 CRUD/导入（仍收
+名字、写库前解析成 id）、SCIM 组成员操作、directory engine/plan 指纹与 apply、
+OIDC claims（token.rs/userinfo.rs）、authority.rs、dashboard 用户页组展示。
 
 > 已实现的可观测基础：`/metrics` 暴露登录/token/MFA 计数与 HTTP 指标；`TraceLayer` 请求日志；`/health` 依赖探测；审计日志保留策略。
 

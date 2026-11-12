@@ -17,6 +17,7 @@ import {
 import { useAuthStore } from "@/stores/auth";
 import { loginWithPasskey } from "@/composables/usePasskeys";
 import { useCaptcha } from "@/composables/useCaptcha";
+import { useBrandingStore } from "@/stores/branding";
 
 const route = useRoute();
 const router = useRouter();
@@ -26,6 +27,7 @@ const auth = useAuthStore();
 // the composable resolves that on mount and hides itself otherwise.
 const captchaHost = ref<HTMLElement | null>(null);
 const captcha = useCaptcha();
+const branding = useBrandingStore();
 
 type Step = "password" | "mfa" | "enroll" | "password_change" | "recovery_codes";
 
@@ -330,7 +332,7 @@ function ssoStartUrl(code: string): string {
             Sg
           </span>
         </div>
-        <h1 class="text-lg font-semibold tracking-tight">Signet</h1>
+        <h1 class="text-lg font-semibold tracking-tight">{{ branding.name }}</h1>
         <p class="type-meta">
           <template v-if="step === 'password'">Sign in to your identity provider</template>
           <template v-else-if="step === 'mfa'">Two-factor authentication</template>

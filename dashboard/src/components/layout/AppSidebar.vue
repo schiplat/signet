@@ -5,8 +5,10 @@ import { useRoute, useRouter } from "vue-router";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
 import { useUiStore } from "@/stores/ui";
+import { useBrandingStore } from "@/stores/branding";
 
 const ui = useUiStore();
+const branding = useBrandingStore();
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
@@ -149,7 +151,7 @@ function onLogoClick(e: MouseEvent) {
       <a
         href="/"
         class="group flex min-w-0 items-center gap-2.5 rounded-xl px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
-        :title="ui.isCollapsed ? 'Signet' : undefined"
+        :title="ui.isCollapsed ? branding.name : undefined"
         @click="onLogoClick"
       >
         <span
@@ -158,7 +160,7 @@ function onLogoClick(e: MouseEvent) {
           Sg
         </span>
         <span v-if="!ui.isCollapsed" class="min-w-0">
-          <span class="block truncate text-sm font-semibold tracking-tight">Signet</span>
+          <span class="block truncate text-sm font-semibold tracking-tight">{{ branding.name }}</span>
           <span class="block truncate text-xs text-muted-foreground">Identity</span>
         </span>
       </a>

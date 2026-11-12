@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { confirmPasswordReset, requestPasswordReset } from "@/lib/api";
 import { useCaptcha } from "@/composables/useCaptcha";
+import { useBrandingStore } from "@/stores/branding";
 
 const route = useRoute();
 const router = useRouter();
@@ -22,6 +23,7 @@ const loading = ref(false);
 // above the submit button and its token rides on the request.
 const captchaHost = ref<HTMLElement | null>(null);
 const captcha = useCaptcha();
+const branding = useBrandingStore();
 
 const token = typeof route.query.token === "string" ? route.query.token : "";
 
@@ -114,7 +116,7 @@ async function handleConfirm() {
           </span>
         </div>
         <h1 class="text-lg font-semibold tracking-tight">Reset password</h1>
-        <p class="type-meta">Recover access to your Signet account</p>
+        <p class="type-meta">Recover access to your {{ branding.name }} account</p>
       </div>
 
       <form v-if="step === 'request'" class="space-y-4" @submit.prevent="handleRequest">

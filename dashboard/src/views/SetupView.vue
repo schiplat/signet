@@ -4,8 +4,10 @@ import { useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { fetchSetupStatus } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 
 const router = useRouter();
+const branding = useBrandingStore();
 const auth = useAuthStore();
 
 const email = ref("");
@@ -67,7 +69,7 @@ async function handleSubmit() {
             Sg
           </span>
         </div>
-        <h1 class="text-lg font-semibold tracking-tight">Welcome to Signet</h1>
+        <h1 class="text-lg font-semibold tracking-tight">Welcome to {{ branding.name }}</h1>
         <p class="type-meta">Create the first administrator account</p>
       </div>
 

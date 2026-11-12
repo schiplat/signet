@@ -484,6 +484,37 @@ export async function resetCaptchaSettings() {
   return parseJson<{ rows_deleted: number }>(res);
 }
 
+/** Public: the product name the unauthenticated pages display. */
+export async function fetchBranding() {
+  const res = await fetch("/api/v1/branding");
+  return parseJson<{ name: string }>(res);
+}
+
+export async function fetchBrandingSettings() {
+  const res = await fetch("/api/v1/admin/settings/branding", {
+    credentials: "include",
+  });
+  return parseJson<{ name: string; overridden: boolean; env_fallback: string | null }>(res);
+}
+
+export async function updateBrandingSettings(name: string) {
+  const res = await fetch("/api/v1/admin/settings/branding", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ name }),
+  });
+  return parseJson<{ name: string; overridden: boolean }>(res);
+}
+
+export async function resetBrandingSettings() {
+  const res = await fetch("/api/v1/admin/settings/branding", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ name: string; overridden: boolean }>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);

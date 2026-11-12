@@ -229,6 +229,12 @@ pub fn router() -> Router<AppState> {
             "/admin/settings/captcha",
             get(get_captcha).patch(patch_captcha).delete(reset_captcha),
         )
+        .route(
+            "/admin/settings/branding",
+            get(get_branding)
+                .patch(patch_branding)
+                .delete(reset_branding),
+        )
 }
 
 /// `?fields=session_ttl_hours,lockout_minutes`, or no query for "all".
@@ -1110,4 +1116,152 @@ async fn reset_captcha(
     view["rows_deleted"] = json!(deleted);
     view["overridden"] = json!(captcha_overridden(&state.pool).await?);
     Ok(Json(view))
+}
+
+// --- Branding ---
+//
+// The product name the UI shows on the sign-in page, the setup wizard, the
+// sidebar and the document title. One string, DB > env (`SIGNET_BRAND_NAME`)
+// > "Signet". Rendered as text everywhere (never HTML), length-capped, and
+// served publicly because the pages that show it are unauthenticated.
+
+pub const BRANDING_ENV: &str = "SIGNET_BRAND_NAME";
+const DEFAULT_BRAND: &str = "Signet";
+
+/// The effective product name: `branding.name` over the environment.
+pub async fn brand_name(pool: &PgPool) -> String {
+    let stored: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'branding.name'")
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+    let stored = stored
+        .and_then(|v| {
+            // The column is scalar JSONB (older rows may be a 1-element array
+            // from a hand edit); both shapes read the same way.
+            match v {
+                serde_json::Value::String(s) => Some(s),
+                serde_json::Value::Array(a) => a.into_iter().next().and_then(|v| match v {
+                    serde_json::Value::String(s) => Some(s),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    match stored {
+        Some(name) => name,
+        None => std::env::var(BRANDING_ENV)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| DEFAULT_BRAND.to_string()),
+    }
+}
+
+/// The unauthenticated read the sign-in/reset/setup pages mount on.
+pub async fn public_branding(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "name": brand_name(&state.pool).await }))
+}
+
+async fn get_branding(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let overridden: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM app_settings WHERE key = 'branding.name'")
+            .fetch_one(&state.pool)
+            .await?;
+    let overridden = overridden > 0;
+    Ok(Json(json!({
+        "name": brand_name(&state.pool).await,
+        "overridden": overridden,
+        "env_fallback": std::env::var(BRANDING_ENV).ok(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BrandingPatch {
+    name: String,
+}
+
+async fn patch_branding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<BrandingPatch>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+
+    let name = body.name.trim().to_string();
+    if name.is_empty() || name.len() > 64 {
+        return Err(AppError::bad_request("name must be 1-64 characters"));
+    }
+    // Control characters cannot render sanely anywhere the name goes.
+    if name.chars().any(|c| c.is_control()) {
+        return Err(AppError::bad_request(
+            "name must not contain control characters",
+        ));
+    }
+    let before = brand_name(&state.pool).await;
+    sqlx::query(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ('branding.name', $1, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        "#,
+    )
+    .bind(json!(name))
+    .execute(&state.pool)
+    .await?;
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.branding_update",
+            resource_type: "settings",
+            resource_id: Some("branding".into()),
+            detail: json!({ "before": before, "after": name }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({ "name": name, "overridden": true })))
+}
+
+async fn reset_branding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let before = brand_name(&state.pool).await;
+    sqlx::query("DELETE FROM app_settings WHERE key = 'branding.name'")
+        .execute(&state.pool)
+        .await?;
+    let after = brand_name(&state.pool).await;
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.branding_reset",
+            resource_type: "settings",
+            resource_id: Some("branding".into()),
+            detail: json!({ "before": before, "after": after }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+    Ok(Json(json!({ "name": after, "overridden": false })))
 }

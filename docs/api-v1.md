@@ -87,6 +87,8 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/smtp` | **admin**：SMTP 中继（host/port/username/password/from），**优先级 DB > 环境变量**，即时生效。PATCH 每字段三态：省略=不动、`null`=清除覆盖回退环境变量、值=设置；密码只写不读（GET 返回 `password_set`，落库为应用密钥加密的密文，`from` 校验 mailbox 格式）。审计 `settings.smtp_update` / `settings.smtp_reset`（不含密码） |
 | `POST` | `/api/v1/admin/settings/smtp/test` | **admin**：经当前生效中继发送测试邮件 `{ "to": "…" }`；返回 `{ ok, error? }`，transport 错误原样呈现（这是本端点存在的意义） |
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/captcha` | **admin**：登录/重置页 CAPTCHA（Turnstile/hCaptcha），**优先级 DB > 环境变量**；PATCH 三态同 SMTP；`secret_key` 只写不读（加密落库）；provider/site_key/secret 三要素齐备才启用，半配置状态=关闭。审计 `settings.captcha_update` / `settings.captcha_reset` |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/branding` | **admin**：产品名（登录页/初始化向导/侧栏/标签页标题），**优先级 DB > `SIGNET_BRAND_NAME` > "Signet"**，即时生效；1–64 字符纯文本（禁控制字符）。审计 `settings.branding_update` / `settings.branding_reset` |
+| `GET` | `/api/v1/branding` | **公开**：`{"name": …}`，登录/重置/初始化页无需认证读取产品名 |
 | `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问本表全部 admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
 | `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**：吊销（立即生效） |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
