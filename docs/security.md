@@ -212,7 +212,7 @@
 | `SIGNET_AUDIT_RETENTION_DAYS` | `180` | 审计保留天数 |
 | `SIGNET_RATE_LIMIT_PER_MINUTE` | `300` | 每 IP 每分钟请求上限 |
 | `SIGNET_PUBLIC_BASE_URL` | — | 邮件/重置链接的公开基址 |
-| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503） |
+| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503）。可在后台 Settings → Email relay 配置（**DB > 环境变量**，密码加密落库，支持发送测试邮件），环境变量仅作后备 |
 | `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH（可信中继可省略） |
 | `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | 指标监听地址；`off` 关闭 |
 | `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签） |

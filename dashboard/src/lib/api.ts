@@ -366,6 +366,64 @@ export async function revokeApiToken(id: string) {
   return parseJson<{ ok: boolean }>(res);
 }
 
+/** The effective SMTP relay (DB > env), password never included. */
+export type SmtpSettings = {
+  host: string | null;
+  port: number | null;
+  username: string | null;
+  from: string | null;
+  password_set: boolean;
+  configured: boolean;
+  overridden: string[];
+};
+
+export async function fetchSmtpSettings() {
+  const res = await fetch("/api/v1/admin/settings/smtp", {
+    credentials: "include",
+  });
+  return parseJson<SmtpSettings>(res);
+}
+
+/**
+ * PATCH semantics per field: `{ [name]: value }` sets, `{ [name]: null }`
+ * clears the stored override (env applies again), omitting the field leaves
+ * it untouched. The password is write-only.
+ */
+export async function updateSmtpSettings(patch: {
+  host?: string | null;
+  port?: number | null;
+  username?: string | null;
+  password?: string | null;
+  from?: string | null;
+}) {
+  const res = await fetch("/api/v1/admin/settings/smtp", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(patch),
+  });
+  return parseJson<SmtpSettings & { changed: string[]; cleared: string[] }>(res);
+}
+
+export async function resetSmtpSettings() {
+  const res = await fetch("/api/v1/admin/settings/smtp", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ configured: boolean; rows_deleted: number }>(res);
+}
+
+/** Sends one test message through the effective relay; reports the error. */
+export async function testSmtp(to: string) {
+  const res = await fetch("/api/v1/admin/settings/smtp/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ to }),
+  });
+  return parseJson<{ ok: boolean; error?: string }>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);

@@ -26,7 +26,7 @@ use crate::roles::require_admin_role;
 use crate::state::AppState;
 use axum::extract::{Extension, Query, State};
 use axum::http::HeaderMap;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -215,10 +215,16 @@ pub fn spawn_refresher(state: AppState) {
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/admin/settings/runtime",
-        get(get_runtime).patch(patch_runtime).delete(reset_runtime),
-    )
+    Router::new()
+        .route(
+            "/admin/settings/runtime",
+            get(get_runtime).patch(patch_runtime).delete(reset_runtime),
+        )
+        .route(
+            "/admin/settings/smtp",
+            get(get_smtp).patch(patch_smtp).delete(reset_smtp),
+        )
+        .route("/admin/settings/smtp/test", post(test_smtp))
 }
 
 /// `?fields=session_ttl_hours,lockout_minutes`, or no query for "all".
@@ -439,4 +445,398 @@ async fn patch_runtime(
         "changed": changed,
         "overridden": state.overridden(),
     })))
+}
+
+// --- SMTP relay settings ---
+//
+// Mail configuration lives under its own `smtp.*` key namespace (not
+// `runtime.*`), so the runtime-policy reset cannot silently unhook the mailer
+// an operator relies on for password resets. The password is stored encrypted
+// with the application key — same as webhook and TOTP secrets — and is
+// write-only over the API: the GET reports `password_set`, never the value.
+
+/// `app_settings` keys this section owns, without the `smtp.` prefix.
+const SMTP_FIELDS: &[&str] = &["host", "port", "username", "password", "from"];
+
+async fn smtp_overridden(pool: &PgPool) -> AppResult<Vec<&'static str>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT key FROM app_settings WHERE key LIKE 'smtp.%'")
+            .fetch_all(pool)
+            .await?;
+    let mut fields: Vec<&'static str> = rows
+        .into_iter()
+        .filter_map(|(k,)| k.strip_prefix("smtp.").map(str::to_owned))
+        .filter_map(|f| SMTP_FIELDS.iter().find(|known| **known == f).copied())
+        .collect();
+    fields.sort_unstable();
+    Ok(fields)
+}
+
+/// Renders the effective relay view for GET/PATCH responses — always without
+/// the password itself.
+fn smtp_view(smtp: &Option<crate::email::EffectiveSmtp>) -> Value {
+    match smtp {
+        Some(s) => json!({
+            "host": s.host,
+            "port": s.port,
+            "username": s.username,
+            "from": s.from,
+            "password_set": s.password.is_some(),
+            "configured": true,
+        }),
+        None => json!({
+            "host": null,
+            "port": null,
+            "username": null,
+            "from": null,
+            "password_set": false,
+            "configured": false,
+        }),
+    }
+}
+
+async fn get_smtp(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let smtp = crate::email::resolve(&state).await;
+    let mut view = smtp_view(&smtp);
+    view["overridden"] = json!(smtp_overridden(&state.pool).await?);
+    view["restart_required"] = json!([]);
+    Ok(Json(view))
+}
+
+/// Keeps "explicit null" distinct from "absent" on an optional field: JSON
+/// `null` becomes `Some(None)`, a value becomes `Some(Some(v))`, and an
+/// absent field stays `None` (via `#[serde(default)]`).
+///
+/// The derived `Option<Option<T>>` cannot do this — serde_json's
+/// `deserialize_option` maps `null` to the *outer* `None` — which is exactly
+/// the distinction the PATCH semantics need.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmtpPatch {
+    /// Three states per field (see [`double_option`]): absent (leave the
+    /// stored override), `null` (clear it; the environment answers again),
+    /// and a value (set it). An empty string is refused — clearing is null.
+    #[serde(default, deserialize_with = "double_option")]
+    host: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    port: Option<Option<u16>>,
+    #[serde(default, deserialize_with = "double_option")]
+    username: Option<Option<String>>,
+    /// Write-only: a value stores the password encrypted; `null` clears the
+    /// stored one. The plaintext is never sent back.
+    #[serde(default, deserialize_with = "double_option")]
+    password: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    from: Option<Option<String>>,
+}
+
+/// The validated text of a set-field, trimmed and refused when empty.
+fn set_text(v: String, what: &str) -> AppResult<String> {
+    let v = v.trim().to_string();
+    if v.is_empty() {
+        return Err(AppError::bad_request(format!(
+            "use null to clear {what}, not an empty string"
+        )));
+    }
+    Ok(v)
+}
+
+async fn patch_smtp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<SmtpPatch>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+
+    // Validate everything before writing anything: a relay the mailer cannot
+    // use must never make it into app_settings.
+    let host = match &body.host {
+        Some(Some(v)) => {
+            let v = set_text(v.clone(), "host")?;
+            if v.len() > 253 {
+                return Err(AppError::bad_request("host must be at most 253 characters"));
+            }
+            Some(v)
+        }
+        _ => None,
+    };
+    let port = match body.port {
+        // `Some(None)` (explicit null) and `None` (absent) both mean no port
+        // write; only a real value is validated here.
+        Some(Some(p)) => {
+            if !(1..=65535).contains(&p) {
+                return Err(AppError::bad_request("port must be 1-65535"));
+            }
+            Some(p)
+        }
+        _ => None,
+    };
+    let username = match &body.username {
+        Some(Some(v)) => Some(set_text(v.clone(), "username")?),
+        _ => None,
+    };
+    let password = match &body.password {
+        Some(Some(v)) => {
+            if v.trim().is_empty() {
+                return Err(AppError::bad_request(
+                    "use null to clear the password, not an empty string",
+                ));
+            }
+            if v.len() > 1024 {
+                return Err(AppError::bad_request("password is too long"));
+            }
+            Some(v.clone())
+        }
+        _ => None,
+    };
+    let from = match &body.from {
+        Some(Some(v)) => {
+            let v = set_text(v.clone(), "from")?;
+            v.parse::<lettre::message::Mailbox>().map_err(|_| {
+                AppError::bad_request(
+                    "from is not a mailbox (e.g. \"Signet <no-reply@example.com>\")",
+                )
+            })?;
+            Some(v)
+        }
+        _ => None,
+    };
+
+    let mut changed: Vec<&'static str> = Vec::new();
+    let mut clear: Vec<&'static str> = Vec::new();
+
+    let before = crate::email::resolve(&state).await.map(|s| s.redacted());
+
+    let mut tx = state.pool.begin().await?;
+    for (field, spec) in [
+        ("host", host.map(|v| json!(v))),
+        ("port", port.map(|v| json!(v))),
+        ("username", username.map(|v| json!(v))),
+        // Encrypted at rest; the plaintext never lands in the database or a
+        // log line.
+        (
+            "password",
+            password.map(|v| json!(state.encryptor.encrypt(&v))),
+        ),
+        ("from", from.map(|v| json!(v))),
+    ] {
+        match (body_field(&body, field), spec) {
+            (None, _) => {
+                continue; // absent: leave the stored override as it is
+            }
+            // Explicit null: drop the override so the env applies again.
+            (Some(false), _) => {
+                sqlx::query("DELETE FROM app_settings WHERE key = $1")
+                    .bind(format!("smtp.{field}"))
+                    .execute(&mut *tx)
+                    .await?;
+                clear.push(field);
+            }
+            (Some(true), Some(stored)) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    "#,
+                )
+                .bind(format!("smtp.{field}"))
+                .bind(stored)
+                .execute(&mut *tx)
+                .await?;
+                changed.push(field);
+            }
+            // A validated set-value whose field cannot be re-read from the
+            // body cannot happen (the pair above is built from the same body).
+            (Some(true), None) => {
+                return Err(AppError::bad_request("invalid field value"));
+            }
+        }
+    }
+    tx.commit().await?;
+
+    let after = crate::email::resolve(&state).await.map(|s| s.redacted());
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.smtp_update",
+            resource_type: "settings",
+            resource_id: Some("smtp".into()),
+            detail: json!({
+                "changed": changed,
+                "cleared": clear,
+                "before": before,
+                "after": after,
+            }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    let mut view = smtp_view(&crate::email::resolve(&state).await);
+    view["changed"] = json!(changed);
+    view["cleared"] = json!(clear);
+    view["overridden"] = json!(smtp_overridden(&state.pool).await?);
+    Ok(Json(view))
+}
+
+/// Whether the patch body carries `field`: `None` = absent, `Some(false)` =
+/// explicit null (clear the override), `Some(true)` = a value to set.
+fn body_field(body: &SmtpPatch, field: &str) -> Option<bool> {
+    match field {
+        "host" => body.host.as_ref().map(|v| v.is_some()),
+        "port" => body.port.as_ref().map(|v| v.is_some()),
+        "username" => body.username.as_ref().map(|v| v.is_some()),
+        "password" => body.password.as_ref().map(|v| v.is_some()),
+        "from" => body.from.as_ref().map(|v| v.is_some()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmtpReset {
+    fields: Option<String>,
+}
+
+/// Drops saved SMTP overrides so the environment applies again.
+async fn reset_smtp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Query(query): Query<SmtpReset>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+
+    let requested: Option<Vec<String>> = query.fields.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
+    let before = crate::email::resolve(&state).await.map(|s| s.redacted());
+    let deleted = match &requested {
+        Some(fields) => {
+            for field in fields {
+                if !SMTP_FIELDS.contains(&field.as_str()) {
+                    return Err(AppError::bad_request(format!("unknown field {field}")));
+                }
+            }
+            let keys: Vec<String> = fields.iter().map(|f| format!("smtp.{f}")).collect();
+            sqlx::query("DELETE FROM app_settings WHERE key = ANY($1)")
+                .bind(&keys)
+                .execute(&state.pool)
+                .await?
+                .rows_affected()
+        }
+        None => sqlx::query("DELETE FROM app_settings WHERE key LIKE 'smtp.%'")
+            .execute(&state.pool)
+            .await?
+            .rows_affected(),
+    };
+
+    let after = crate::email::resolve(&state).await.map(|s| s.redacted());
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.smtp_reset",
+            resource_type: "settings",
+            resource_id: Some("smtp".into()),
+            detail: json!({
+                "fields": requested,
+                "rows_deleted": deleted,
+                "before": before,
+                "after": after,
+            }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    let smtp = crate::email::resolve(&state).await;
+    Ok(Json(json!({
+        "configured": smtp.is_some(),
+        "rows_deleted": deleted,
+        "overridden": smtp_overridden(&state.pool).await?,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SmtpTest {
+    to: String,
+}
+
+/// Sends one test message through the *effective* relay, reporting the
+/// transport error verbatim on failure — this endpoint exists precisely so an
+/// operator sees "why does my mail not go out" without reading server logs.
+async fn test_smtp(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<SmtpTest>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let to = body.to.trim().to_string();
+
+    let outcome = if !crate::email::configured(&state).await {
+        Err("no SMTP relay is configured (set it here or via SIGNET_SMTP_HOST)".to_string())
+    } else {
+        crate::email::send(
+            &state,
+            &to,
+            "Signet test message",
+            "This is a test message from your Signet instance. If you can read this, \
+             the relay settings work.",
+            false,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    };
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.smtp_test",
+            resource_type: "settings",
+            resource_id: Some("smtp".into()),
+            detail: json!({
+                "to": to,
+                "ok": outcome.is_ok(),
+                "error": outcome.as_ref().err(),
+            }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    match outcome {
+        Ok(()) => Ok(Json(json!({ "ok": true }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
+    }
 }

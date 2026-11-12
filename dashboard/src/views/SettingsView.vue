@@ -8,12 +8,16 @@ import {
   fetchMfaSettings,
   fetchRuntimeSettings,
   fetchSignInSettings,
+  fetchSmtpSettings,
   fetchSsoSettings,
   me,
+  resetSmtpSettings,
   revokeApiToken,
+  testSmtp,
   updateMfaSettings,
   updateRuntimeSettings,
   updateSignInSettings,
+  updateSmtpSettings,
   updateSsoSettings,
   type ApiToken,
   type RuntimeSettings,
@@ -116,6 +120,11 @@ onMounted(async () => {
   // usable, with the section showing its own error on save attempts.
   try {
     await refreshApiTokens();
+  } catch {
+    /* surfaced when the operator interacts with the section */
+  }
+  try {
+    await refreshSmtp();
   } catch {
     /* surfaced when the operator interacts with the section */
   }
@@ -253,6 +262,109 @@ async function onRevokeToken(t: ApiToken) {
     error.value = e instanceof Error ? e.message : "Revoke failed";
   } finally {
     tokenWorking.value = false;
+  }
+}
+
+// --- SMTP relay ---
+//
+// The password is write-only: the server never sends it back, and the input
+// here stays empty unless the operator is setting a new one. Leaving a field
+// alone means omitting it from the PATCH, not sending null — null means
+// "clear the override and let the environment answer".
+
+const smtp = ref<{
+  host: string;
+  port: number | null;
+  username: string;
+  from: string;
+  password_set: boolean;
+  configured: boolean;
+  overridden: string[];
+} | null>(null);
+const smtpPassword = ref("");
+const smtpTo = ref("");
+const smtpSaving = ref(false);
+const smtpSaved = ref(false);
+const smtpTesting = ref(false);
+const smtpTestResult = ref<{ ok: boolean; error?: string } | null>(null);
+
+function smtpEdit() {
+  return {
+    host: smtp.value?.host ?? "",
+    port: smtp.value?.port ?? 587,
+    username: smtp.value?.username ?? "",
+    from: smtp.value?.from ?? "",
+  };
+}
+
+async function refreshSmtp() {
+  const res = await fetchSmtpSettings();
+  smtp.value = {
+    host: res.host ?? "",
+    port: res.port,
+    username: res.username ?? "",
+    from: res.from ?? "",
+    password_set: res.password_set,
+    configured: res.configured,
+    overridden: res.overridden,
+  };
+}
+
+async function onSaveSmtp() {
+  error.value = "";
+  smtpSaved.value = false;
+  smtpSaving.value = true;
+  try {
+    if (!smtp.value) return;
+    const patch: Record<string, string | number | null> = {};
+    // Only send fields with an editable value; `from`/`host` empty means
+    // "clear this override" only via the explicit reset button.
+    patch.host = smtp.value.host || null;
+    patch.from = smtp.value.from || null;
+    patch.username = smtp.value.username || null;
+    if (smtp.value.port !== null) patch.port = smtp.value.port;
+    if (smtpPassword.value) patch.password = smtpPassword.value;
+    const res = await updateSmtpSettings(patch);
+    await refreshSmtp();
+    smtpPassword.value = "";
+    smtpSaved.value = true;
+    smtp.value.overridden = res.overridden;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "SMTP save failed";
+  } finally {
+    smtpSaving.value = false;
+  }
+}
+
+async function onTestSmtp() {
+  error.value = "";
+  smtpTestResult.value = null;
+  const to = smtpTo.value.trim();
+  if (!to) return;
+  smtpTesting.value = true;
+  try {
+    smtpTestResult.value = await testSmtp(to);
+  } catch (e) {
+    smtpTestResult.value = {
+      ok: false,
+      error: e instanceof Error ? e.message : "Test failed",
+    };
+  } finally {
+    smtpTesting.value = false;
+  }
+}
+
+async function onResetSmtp() {
+  error.value = "";
+  smtpSaving.value = true;
+  try {
+    await resetSmtpSettings();
+    await refreshSmtp();
+    smtpPassword.value = "";
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "SMTP reset failed";
+  } finally {
+    smtpSaving.value = false;
   }
 }
 </script>
@@ -512,6 +624,119 @@ async function onRevokeToken(t: ApiToken) {
           </div>
         </div>
         <p v-else class="text-xs text-muted-foreground">No tokens yet.</p>
+      </section>
+
+      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">Email relay (SMTP)</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            Where password-reset and email-change messages are delivered. Saved here it wins over
+            <code class="text-[11px]">SIGNET_SMTP_*</code> and applies to the next message — no
+            redeploy. The password is stored encrypted and never shown again; leave it blank to
+            keep the current one.
+          </p>
+        </div>
+
+        <div v-if="smtp" class="space-y-3">
+          <label class="block">
+            <span class="type-label mb-1.5 block">SMTP host</span>
+            <input
+              v-model="smtp.host"
+              type="text"
+              class="field-input font-mono text-[12px]"
+              placeholder="smtp.example.com"
+            />
+            <span v-if="smtp.overridden.includes('host')" class="type-meta mt-1 block text-[11px]">
+              saved here — clearing the field and saving falls back to the environment
+            </span>
+          </label>
+
+          <div class="flex gap-3">
+            <label class="block w-28">
+              <span class="type-label mb-1.5 block">Port</span>
+              <input
+                v-model.number="smtp.port"
+                type="number"
+                min="1"
+                max="65535"
+                class="field-input text-right font-mono text-[12px]"
+              />
+            </label>
+            <label class="block flex-1">
+              <span class="type-label mb-1.5 block">Username</span>
+              <input
+                v-model="smtp.username"
+                type="text"
+                class="field-input font-mono text-[12px]"
+                autocomplete="off"
+              />
+            </label>
+          </div>
+
+          <label class="block">
+            <span class="type-label mb-1.5 block">
+              Password
+              <span v-if="smtp.password_set" class="ml-1 text-[10px] font-normal uppercase tracking-wide text-muted-foreground">
+                set
+              </span>
+            </span>
+            <input
+              v-model="smtpPassword"
+              type="password"
+              class="field-input font-mono text-[12px]"
+              :placeholder="smtp.password_set ? 'leave blank to keep' : 'not set'"
+              autocomplete="new-password"
+            />
+          </label>
+
+          <label class="block">
+            <span class="type-label mb-1.5 block">From</span>
+            <input
+              v-model="smtp.from"
+              type="text"
+              class="field-input font-mono text-[12px]"
+              placeholder="Signet &lt;no-reply@example.com&gt;"
+            />
+          </label>
+
+          <p class="type-meta text-[11px]">
+            465 uses implicit TLS; other ports negotiate STARTTLS. Certificates must be trusted —
+            there is no skip-verification switch.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton size="sm" :disabled="smtpSaving || !smtp" @click="onSaveSmtp">
+            {{ smtpSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <UiButton
+            size="sm"
+            variant="secondary"
+            :disabled="smtpSaving || !smtp"
+            @click="onResetSmtp"
+          >
+            Reset to env
+          </UiButton>
+          <span v-if="smtpSaved" class="text-xs text-muted-foreground">Saved</span>
+        </div>
+
+        <div class="space-y-2 border-t border-border/40 pt-4">
+          <span class="type-label block">Send a test message</span>
+          <div class="flex gap-2">
+            <input
+              v-model="smtpTo"
+              type="email"
+              class="field-input flex-1"
+              :placeholder="ownEmail"
+            />
+            <UiButton size="sm" variant="secondary" :disabled="smtpTesting || !smtpTo.trim()" @click="onTestSmtp">
+              {{ smtpTesting ? "Sending…" : "Send test" }}
+            </UiButton>
+          </div>
+          <p v-if="smtpTestResult" :class="smtpTestResult.ok ? 'type-meta text-[11px]' : 'field-error text-[12px]'">
+            {{ smtpTestResult.ok ? "Sent — check the inbox." : `Failed: ${smtpTestResult.error}` }}
+          </p>
+        </div>
       </section>
     </template>
   </div>

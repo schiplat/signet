@@ -32,10 +32,10 @@ async fn request_reset(
     // would generate a token nothing delivers. A uniform 503 keeps the
     // always-200 anti-enumeration property (it says nothing about the account)
     // while refusing to pretend the mail went out.
-    if !crate::email::configured(&state) && !state.config.dev_log_links {
+    if !crate::email::configured(&state).await && !state.config.dev_log_links {
         return Err(AppError::unavailable(
             "password reset by email is not configured on this instance; \
-             ask an administrator to set SIGNET_SMTP_HOST",
+             ask an administrator to set the SMTP relay in Settings",
         ));
     }
     let email = body.email.trim().to_lowercase();
@@ -123,7 +123,7 @@ async fn request_reset(
         // Dev/test convenience: without a real mailer, surface the link once —
         // same opt-in as the body above, and loudly absent otherwise so a dev
         // wondering where the link went learns the flag's name.
-        if state.config.smtp_host.is_none() {
+        if !crate::email::configured(&state).await {
             if state.config.dev_log_links {
                 tracing::info!(email = %user.1, link = %link, "password reset link (dev)");
             } else {
