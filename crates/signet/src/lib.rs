@@ -4,6 +4,7 @@ pub mod audit;
 pub mod auth;
 pub mod authority;
 pub mod bootstrap;
+pub mod captcha;
 pub mod config;
 pub mod crypto;
 pub mod db;

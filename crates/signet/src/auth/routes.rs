@@ -30,6 +30,10 @@ pub fn router() -> Router<AppState> {
         .route("/login", post(login))
         .route("/login/password-change", post(force_password_change))
         .route("/logout", post(logout))
+        // Unauthenticated: the login form needs to know whether to render the
+        // widget, and the site key is public by design. When the gate is off
+        // this answers `{"enabled": false}` and nothing is rendered.
+        .route("/captcha", get(captcha_challenge))
         .route("/me", get(me).patch(update_me))
         .route("/me/email/change-request", post(email_change_request))
         .route("/me/email/confirm", get(email_change_confirm))
@@ -52,6 +56,24 @@ struct LoginBody {
     /// login (and its audit trail) to the initiating OAuth app.
     #[serde(default)]
     return_to: Option<String>,
+    /// The CAPTCHA answer from the widget, required when the instance has a
+    /// provider configured (`Settings → CAPTCHA` or `SIGNET_CAPTCHA_*`).
+    #[serde(default)]
+    captcha_token: Option<String>,
+}
+
+/// What the sign-in (and reset-request) forms need to render the challenge:
+/// provider name and site key, or `{"enabled": false}`. No secret ever
+/// appears here.
+async fn captcha_challenge(State(state): State<AppState>) -> Json<Value> {
+    match crate::captcha::resolve(&state).await {
+        Some(gate) => Json(json!({
+            "enabled": true,
+            "provider": gate.provider.as_str(),
+            "site_key": gate.site_key,
+        })),
+        None => Json(json!({ "enabled": false })),
+    }
 }
 
 async fn login(
@@ -64,6 +86,11 @@ async fn login(
     let email = body.email.trim().to_lowercase();
     let client_id =
         crate::audit::resolve_audit_client_id(&state.pool, body.return_to.as_deref()).await;
+    // The gate runs before any user lookup: with CAPTCHA on, credential
+    // probing cannot even ask "does this address exist". When it is off this
+    // costs nothing.
+    let ip = client_ip(&headers, Some(addr));
+    crate::captcha::require(&state, body.captcha_token.as_deref(), ip.as_deref()).await?;
     // The lockout stamp rides along on the same row. It used to be a second
     // query for the same row, which is one extra round trip on every login — the
     // busiest write path there is. The failure counter itself is only meaningful
@@ -88,8 +115,6 @@ async fn login(
     };
     let user = User::from_row(&row)?;
     let locked_until: Option<DateTime<Utc>> = row.try_get("locked_until")?;
-
-    let ip = client_ip(&headers, Some(addr));
 
     // Account state is *not* checked here. "disabled" and "locked" before the
     // credential check answered existence and status to anyone who typed an

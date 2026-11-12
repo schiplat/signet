@@ -1,13 +1,16 @@
 use crate::auth::password::set_user_password;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
+use crate::http::extract::client_ip;
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 const RESET_TTL_MINUTES: i64 = 30;
@@ -21,13 +24,25 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct RequestBody {
     email: String,
+    /// Required when a CAPTCHA provider is configured — the reset door is the
+    /// other unauthenticated entry a spray can work through (token emails are
+    /// throttled, but the door itself is not otherwise gated).
+    #[serde(default)]
+    captcha_token: Option<String>,
 }
 
 /// Always returns 200 to avoid leaking whether an account exists.
 async fn request_reset(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(body): Json<RequestBody>,
 ) -> AppResult<Json<Value>> {
+    // The CAPTCHA gate before the address lookup: with the gate on, probing
+    // "does this account exist" via the always-200 endpoint costs a solved
+    // challenge per guess.
+    let ip = client_ip(&headers, Some(addr));
+    crate::captcha::require(&state, body.captcha_token.as_deref(), ip.as_deref()).await?;
     // Fail before looking at the address: with no transport, every request
     // would generate a token nothing delivers. A uniform 503 keeps the
     // always-200 anti-enumeration property (it says nothing about the account)

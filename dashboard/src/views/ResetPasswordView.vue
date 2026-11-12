@@ -3,6 +3,7 @@ import { nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import { confirmPasswordReset, requestPasswordReset } from "@/lib/api";
+import { useCaptcha } from "@/composables/useCaptcha";
 
 const route = useRoute();
 const router = useRouter();
@@ -15,6 +16,12 @@ const newPassword = ref("");
 const confirmPassword = ref("");
 const error = ref("");
 const loading = ref(false);
+
+// The request step is one of the unauthenticated doors a spray can work
+// through; when the instance has a provider configured, the challenge renders
+// above the submit button and its token rides on the request.
+const captchaHost = ref<HTMLElement | null>(null);
+const captcha = useCaptcha();
 
 const token = typeof route.query.token === "string" ? route.query.token : "";
 
@@ -43,14 +50,30 @@ watch(step, focusStepInput);
 // `watch` does not fire for the initial value.
 onMounted(focusStepInput);
 
+async function mountCaptcha() {
+  if (step.value === "request" && captchaHost.value) {
+    try {
+      await captcha.mount(captchaHost.value);
+    } catch {
+      /* a broken widget script must not block the form; the server refuses
+         the request with a clear message if the gate is actually on */
+    }
+  }
+}
+
+onMounted(mountCaptcha);
+watch(step, mountCaptcha);
+
 async function handleRequest() {
   error.value = "";
   loading.value = true;
   try {
-    await requestPasswordReset(email.value.trim());
+    await requestPasswordReset(email.value.trim(), captcha.take() ?? undefined);
     step.value = "done";
+    captcha.reset();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Request failed";
+    captcha.reset();
   } finally {
     loading.value = false;
   }
@@ -108,6 +131,8 @@ async function handleConfirm() {
           />
         </div>
         <p v-if="error" class="field-error">{{ error }}</p>
+        <!-- Renders only when a provider is configured (see useCaptcha). -->
+        <div v-show="captcha.enabled.value" ref="captchaHost" class="flex justify-center" />
         <UiButton type="submit" class="w-full" :disabled="loading">
           {{ loading ? "Sending…" : "Send reset link" }}
         </UiButton>

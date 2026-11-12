@@ -81,14 +81,35 @@ async function parseJson<T>(res: Response): Promise<T> {
   return data as T;
 }
 
-export async function login(email: string, password: string, returnTo?: string) {
-  const res = await fetch("/api/v1/login", {
+export async function login(
+  email: string,
+  password: string,
+  returnTo?: string,
+  captchaToken?: string,
+) {  const res = await fetch("/api/v1/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ email, password, return_to: returnTo || undefined }),
+    body: JSON.stringify({
+      email,
+      password,
+      return_to: returnTo || undefined,
+      captcha_token: captchaToken || undefined,
+    }),
   });
   return parseJson<LoginResult>(res);
+}
+
+/** The public CAPTCHA gate description for the unauthenticated forms. */
+export type CaptchaChallenge = {
+  enabled: boolean;
+  provider?: "turnstile" | "hcaptcha";
+  site_key?: string;
+};
+
+export async function fetchCaptchaChallenge() {
+  const res = await fetch("/api/v1/captcha");
+  return parseJson<CaptchaChallenge>(res);
 }
 
 export async function loginChangePassword(newPassword: string) {
@@ -422,6 +443,45 @@ export async function testSmtp(to: string) {
     body: JSON.stringify({ to }),
   });
   return parseJson<{ ok: boolean; error?: string }>(res);
+}
+
+/** The CAPTCHA gate view (secret never returned; `secret_set` only). */
+export type CaptchaSettings = {
+  enabled: boolean;
+  provider: "turnstile" | "hcaptcha" | null;
+  site_key: string | null;
+  secret_set: boolean;
+  overridden: string[];
+};
+
+export async function fetchCaptchaSettings() {
+  const res = await fetch("/api/v1/admin/settings/captcha", {
+    credentials: "include",
+  });
+  return parseJson<CaptchaSettings>(res);
+}
+
+/** Same three-state PATCH semantics as the SMTP relay settings. */
+export async function updateCaptchaSettings(patch: {
+  provider?: string | null;
+  site_key?: string | null;
+  secret_key?: string | null;
+}) {
+  const res = await fetch("/api/v1/admin/settings/captcha", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(patch),
+  });
+  return parseJson<CaptchaSettings & { changed: string[]; cleared: string[] }>(res);
+}
+
+export async function resetCaptchaSettings() {
+  const res = await fetch("/api/v1/admin/settings/captcha", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ rows_deleted: number }>(res);
 }
 
 export async function fetchSsoSettings() {
@@ -965,11 +1025,11 @@ export async function revokeUserSessions(id: string) {
 
 // --- Password reset ---
 
-export async function requestPasswordReset(email: string) {
+export async function requestPasswordReset(email: string, captchaToken?: string) {
   const res = await fetch("/api/v1/password-reset/request", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email }),
+    body: JSON.stringify({ email, captcha_token: captchaToken || undefined }),
   });
   return parseJson<{ ok: boolean }>(res);
 }

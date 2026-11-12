@@ -225,6 +225,10 @@ pub fn router() -> Router<AppState> {
             get(get_smtp).patch(patch_smtp).delete(reset_smtp),
         )
         .route("/admin/settings/smtp/test", post(test_smtp))
+        .route(
+            "/admin/settings/captcha",
+            get(get_captcha).patch(patch_captcha).delete(reset_captcha),
+        )
 }
 
 /// `?fields=session_ttl_hours,lockout_minutes`, or no query for "all".
@@ -839,4 +843,271 @@ async fn test_smtp(
         Ok(()) => Ok(Json(json!({ "ok": true }))),
         Err(e) => Ok(Json(json!({ "ok": false, "error": e }))),
     }
+}
+
+// --- CAPTCHA gate settings ---
+//
+// Turnstile or hCaptcha on the unauthenticated doors (login, password-reset
+// request). Same three-state PATCH semantics and encrypted-secret handling as
+// the SMTP section; the gate is enabled only when provider, site key and
+// secret are all present, so a half-saved row cannot lock everyone out.
+
+/// `app_settings` keys this section owns, without the `captcha.` prefix.
+const CAPTCHA_FIELDS: &[&str] = &["provider", "site_key", "secret_key"];
+
+async fn captcha_overridden(pool: &PgPool) -> AppResult<Vec<&'static str>> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT key FROM app_settings WHERE key LIKE 'captcha.%'")
+            .fetch_all(pool)
+            .await?;
+    let mut fields: Vec<&'static str> = rows
+        .into_iter()
+        .filter_map(|(k,)| k.strip_prefix("captcha.").map(str::to_owned))
+        .filter_map(|f| CAPTCHA_FIELDS.iter().find(|known| **known == f).copied())
+        .collect();
+    fields.sort_unstable();
+    Ok(fields)
+}
+
+/// The view without the secret — provider + site key are public knowledge
+/// (the site key ships to every browser), but the secret never comes back.
+fn captcha_view(gate: &Option<crate::captcha::Enabled>) -> Value {
+    match gate {
+        Some(g) => json!({
+            "enabled": true,
+            "provider": g.provider.as_str(),
+            "site_key": g.site_key,
+            "secret_set": true,
+        }),
+        None => json!({
+            "enabled": false,
+            "provider": null,
+            "site_key": null,
+            "secret_set": false,
+        }),
+    }
+}
+
+async fn get_captcha(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let gate = crate::captcha::resolve(&state).await;
+    let mut view = captcha_view(&gate);
+    view["overridden"] = json!(captcha_overridden(&state.pool).await?);
+    Ok(Json(view))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaptchaPatch {
+    /// `turnstile` | `hcaptcha` — the same siteverify shape, one endpoint each.
+    #[serde(default, deserialize_with = "double_option")]
+    provider: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    site_key: Option<Option<String>>,
+    /// Write-only; stored encrypted like the SMTP password.
+    #[serde(default, deserialize_with = "double_option")]
+    secret_key: Option<Option<String>>,
+}
+
+async fn patch_captcha(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<CaptchaPatch>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+
+    let provider = match &body.provider {
+        Some(Some(v)) => {
+            let v = set_text(v.clone(), "provider")?;
+            if v != "off" && crate::captcha::Provider::parse(&v).is_none() {
+                return Err(AppError::bad_request(
+                    "provider must be \"off\", \"turnstile\" or \"hcaptcha\"",
+                ));
+            }
+            Some(if v == "off" {
+                String::new() // stored as an explicit off-marker
+            } else {
+                v
+            })
+        }
+        _ => None,
+    };
+    let site_key = match &body.site_key {
+        Some(Some(v)) => Some(set_text(v.clone(), "site_key")?),
+        _ => None,
+    };
+    let secret_key = match &body.secret_key {
+        Some(Some(v)) => {
+            if v.trim().is_empty() {
+                return Err(AppError::bad_request(
+                    "use null to clear the secret, not an empty string",
+                ));
+            }
+            if v.len() > 512 {
+                return Err(AppError::bad_request("secret is too long"));
+            }
+            Some(v.clone())
+        }
+        _ => None,
+    };
+
+    let before = crate::captcha::resolve(&state)
+        .await
+        .map(|g| json!({ "enabled": true, "provider": g.provider.as_str() }));
+    let mut changed: Vec<&'static str> = Vec::new();
+    let mut clear: Vec<&'static str> = Vec::new();
+
+    let mut tx = state.pool.begin().await?;
+    for (field, spec, value) in [
+        (
+            "provider",
+            body.provider.as_ref().map(|p| p.is_some()),
+            provider.clone().map(|v| json!(v)),
+        ),
+        (
+            "site_key",
+            body.site_key.as_ref().map(|p| p.is_some()),
+            site_key.clone().map(|v| json!(v)),
+        ),
+        (
+            "secret_key",
+            body.secret_key.as_ref().map(|p| p.is_some()),
+            secret_key
+                .clone()
+                .map(|v| json!(state.encryptor.encrypt(&v))),
+        ),
+    ] {
+        match (spec, value) {
+            (None, _) | (Some(false), None) => continue, // absent: untouched
+            (Some(false), _) => {
+                sqlx::query("DELETE FROM app_settings WHERE key = $1")
+                    .bind(format!("captcha.{field}"))
+                    .execute(&mut *tx)
+                    .await?;
+                clear.push(field);
+            }
+            (Some(true), Some(stored)) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO app_settings (key, value, updated_at)
+                    VALUES ($1, $2, NOW())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+                    "#,
+                )
+                .bind(format!("captcha.{field}"))
+                .bind(stored)
+                .execute(&mut *tx)
+                .await?;
+                changed.push(field);
+            }
+            (Some(true), None) => {
+                return Err(AppError::bad_request("invalid field value"));
+            }
+        }
+    }
+    tx.commit().await?;
+
+    let after = crate::captcha::resolve(&state)
+        .await
+        .map(|g| json!({ "enabled": true, "provider": g.provider.as_str() }));
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.captcha_update",
+            resource_type: "settings",
+            resource_id: Some("captcha".into()),
+            detail: json!({ "changed": changed, "cleared": clear, "before": before, "after": after }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    let gate = crate::captcha::resolve(&state).await;
+    let mut view = captcha_view(&gate);
+    view["changed"] = json!(changed);
+    view["cleared"] = json!(clear);
+    view["overridden"] = json!(captcha_overridden(&state.pool).await?);
+    Ok(Json(view))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaptchaReset {
+    fields: Option<String>,
+}
+
+async fn reset_captcha(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Query(query): Query<CaptchaReset>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+
+    let requested: Option<Vec<String>> = query.fields.map(|raw| {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
+    let before = crate::captcha::resolve(&state)
+        .await
+        .map(|g| json!({ "enabled": true, "provider": g.provider.as_str() }));
+    let deleted = match &requested {
+        Some(fields) => {
+            for field in fields {
+                if !CAPTCHA_FIELDS.contains(&field.as_str()) {
+                    return Err(AppError::bad_request(format!("unknown field {field}")));
+                }
+            }
+            let keys: Vec<String> = fields.iter().map(|f| format!("captcha.{f}")).collect();
+            sqlx::query("DELETE FROM app_settings WHERE key = ANY($1)")
+                .bind(&keys)
+                .execute(&state.pool)
+                .await?
+                .rows_affected()
+        }
+        None => sqlx::query("DELETE FROM app_settings WHERE key LIKE 'captcha.%'")
+            .execute(&state.pool)
+            .await?
+            .rows_affected(),
+    };
+
+    let after = crate::captcha::resolve(&state)
+        .await
+        .map(|g| json!({ "enabled": true, "provider": g.provider.as_str() }));
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.captcha_reset",
+            resource_type: "settings",
+            resource_id: Some("captcha".into()),
+            detail: json!({
+                "fields": requested,
+                "rows_deleted": deleted,
+                "before": before,
+                "after": after,
+            }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    let gate = crate::captcha::resolve(&state).await;
+    let mut view = captcha_view(&gate);
+    view["rows_deleted"] = json!(deleted);
+    view["overridden"] = json!(captcha_overridden(&state.pool).await?);
+    Ok(Json(view))
 }

@@ -5,15 +5,18 @@ import UiButton from "@/components/ui/UiButton.vue";
 import {
   createApiToken,
   fetchApiTokens,
+  fetchCaptchaSettings,
   fetchMfaSettings,
   fetchRuntimeSettings,
   fetchSignInSettings,
   fetchSmtpSettings,
   fetchSsoSettings,
   me,
+  resetCaptchaSettings,
   resetSmtpSettings,
   revokeApiToken,
   testSmtp,
+  updateCaptchaSettings,
   updateMfaSettings,
   updateRuntimeSettings,
   updateSignInSettings,
@@ -125,6 +128,11 @@ onMounted(async () => {
   }
   try {
     await refreshSmtp();
+  } catch {
+    /* surfaced when the operator interacts with the section */
+  }
+  try {
+    await refreshCaptcha();
   } catch {
     /* surfaced when the operator interacts with the section */
   }
@@ -365,6 +373,70 @@ async function onResetSmtp() {
     error.value = e instanceof Error ? e.message : "SMTP reset failed";
   } finally {
     smtpSaving.value = false;
+  }
+}
+
+// --- CAPTCHA gate ---
+//
+// Same three-state semantics as the relay settings. The secret is write-only;
+// the site key ships to every browser, so it is shown in plain text.
+
+const captcha = ref<{
+  enabled: boolean;
+  provider: string | null;
+  site_key: string;
+  secret_set: boolean;
+  overridden: string[];
+} | null>(null);
+const captchaSecret = ref("");
+const captchaSaving = ref(false);
+const captchaSaved = ref(false);
+
+async function refreshCaptcha() {
+  const res = await fetchCaptchaSettings();
+  captcha.value = {
+    enabled: res.enabled,
+    provider: res.provider,
+    site_key: res.site_key ?? "",
+    secret_set: res.secret_set,
+    overridden: res.overridden,
+  };
+}
+
+async function onSaveCaptcha() {
+  error.value = "";
+  captchaSaved.value = false;
+  captchaSaving.value = true;
+  try {
+    if (!captcha.value) return;
+    const patch: Record<string, string | null> = {};
+    // provider "off" is the explicit disable; empty selection clears.
+    patch.provider = captcha.value.provider || null;
+    patch.site_key = captcha.value.site_key || null;
+    if (captchaSecret.value) patch.secret_key = captchaSecret.value;
+    const res = await updateCaptchaSettings(patch);
+    await refreshCaptcha();
+    captchaSecret.value = "";
+    captchaSaved.value = true;
+    captcha.value.overridden = res.overridden;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "CAPTCHA save failed";
+  } finally {
+    captchaSaving.value = false;
+  }
+}
+
+async function onResetCaptcha() {
+  error.value = "";
+  captchaSaving.value = true;
+  try {
+    await resetCaptchaSettings();
+    await refreshCaptcha();
+    captchaSecret.value = "";
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "CAPTCHA reset failed";
+  } finally {
+    captchaSaving.value = false;
   }
 }
 </script>
@@ -736,6 +808,75 @@ async function onResetSmtp() {
           <p v-if="smtpTestResult" :class="smtpTestResult.ok ? 'type-meta text-[11px]' : 'field-error text-[12px]'">
             {{ smtpTestResult.ok ? "Sent — check the inbox." : `Failed: ${smtpTestResult.error}` }}
           </p>
+        </div>
+      </section>
+
+      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">CAPTCHA</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            A challenge on the sign-in and password-reset forms, against brute-force sprays.
+            Cloudflare Turnstile or hCaptcha — pick the provider and paste its site key and secret.
+            The gate is on only when provider, site key and secret are all present. The site key is
+            public (every browser renders it); the secret is stored encrypted and never shown.
+          </p>
+        </div>
+
+        <div v-if="captcha" class="space-y-3">
+          <label class="block">
+            <span class="type-label mb-1.5 block">Provider</span>
+            <select v-model="captcha.provider" class="field-input">
+              <option :value="null">Off (no challenge)</option>
+              <option value="turnstile">Cloudflare Turnstile</option>
+              <option value="hcaptcha">hCaptcha</option>
+            </select>
+          </label>
+
+          <label class="block">
+            <span class="type-label mb-1.5 block">Site key</span>
+            <input
+              v-model="captcha.site_key"
+              type="text"
+              class="field-input font-mono text-[12px]"
+              autocomplete="off"
+            />
+          </label>
+
+          <label class="block">
+            <span class="type-label mb-1.5 block">
+              Secret key
+              <span v-if="captcha.secret_set" class="ml-1 text-[10px] font-normal uppercase tracking-wide text-muted-foreground">
+                set
+              </span>
+            </span>
+            <input
+              v-model="captchaSecret"
+              type="password"
+              class="field-input font-mono text-[12px]"
+              :placeholder="captcha.secret_set ? 'leave blank to keep' : 'not set'"
+              autocomplete="new-password"
+            />
+          </label>
+
+          <p class="type-meta text-[11px]">
+            The gate applies to the next sign-in attempt — no redeploy. Test with a real sign-in
+            after saving; a wrong site key shows itself as an invisible/failed widget.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton size="sm" :disabled="captchaSaving || !captcha" @click="onSaveCaptcha">
+            {{ captchaSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <UiButton
+            size="sm"
+            variant="secondary"
+            :disabled="captchaSaving || !captcha"
+            @click="onResetCaptcha"
+          >
+            Reset to env
+          </UiButton>
+          <span v-if="captchaSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
       </section>
     </template>

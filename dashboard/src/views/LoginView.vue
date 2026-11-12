@@ -16,10 +16,16 @@ import {
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 import { loginWithPasskey } from "@/composables/usePasskeys";
+import { useCaptcha } from "@/composables/useCaptcha";
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+
+// The CAPTCHA gate renders only when the instance has a provider configured;
+// the composable resolves that on mount and hides itself otherwise.
+const captchaHost = ref<HTMLElement | null>(null);
+const captcha = useCaptcha();
 
 type Step = "password" | "mfa" | "enroll" | "password_change" | "recovery_codes";
 
@@ -123,10 +129,17 @@ async function handleLogin() {
   error.value = "";
   loading.value = true;
   try {
-    const res = await auth.login(email.value.trim(), password.value, oauthReturnTo());
+    const res = await auth.login(
+      email.value.trim(),
+      password.value,
+      oauthReturnTo(),
+      captcha.take() ?? undefined,
+    );
     await handleLoginResult(res);
+    captcha.reset(); // a consumed token must not be replayed
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Login failed";
+    captcha.reset();
   } finally {
     loading.value = false;
   }
@@ -237,6 +250,28 @@ onMounted(async () => {
   // The password step is the initial state, so `watch(step)` never fires for it.
   await nextTick();
   emailInput.value?.focus();
+  // The widget mounts into its placeholder only if the instance configured a
+  // provider; otherwise the div stays hidden and login sends no token.
+  if (captchaHost.value) {
+    try {
+      await captcha.mount(captchaHost.value);
+    } catch {
+      /* a broken widget script must not block the form; the server refuses
+         the login with a clear message if the gate is actually on */
+    }
+  }
+});
+
+// Coming back to the password form after an SSO detour: the placeholder is
+// fresh (v-if unmounted it), so give the composable its element then too.
+watch(step, async (s) => {
+  if (s === "password" && captchaHost.value) {
+    try {
+      await captcha.mount(captchaHost.value);
+    } catch {
+      /* as above */
+    }
+  }
 });
 
 onMounted(async () => {
@@ -339,6 +374,9 @@ function ssoStartUrl(code: string): string {
           </div>
         </div>
         <div v-if="error" class="field-error">{{ error }}</div>
+        <!-- The challenge renders here only when the instance configured a
+             provider; useCaptcha leaves the div empty otherwise. -->
+        <div v-show="captcha.enabled.value" ref="captchaHost" class="flex justify-center" />
         <UiButton type="submit" class="w-full" :disabled="loading">
           {{ loading ? "Signing in…" : "Sign in" }}
         </UiButton>

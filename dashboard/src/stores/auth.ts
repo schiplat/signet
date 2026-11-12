@@ -77,8 +77,13 @@ export const useAuthStore = defineStore("auth", () => {
     }
   }
 
-  async function login(email: string, password: string, returnTo?: string): Promise<LoginResult> {
-    const res = await apiLogin(email, password, returnTo);
+  async function login(
+    email: string,
+    password: string,
+    returnTo?: string,
+    captchaToken?: string,
+  ): Promise<LoginResult> {
+    const res = await apiLogin(email, password, returnTo, captchaToken);
     if (res.status === "ok") {
       user.value = res.user;
       loaded.value = true;

@@ -222,6 +222,8 @@
 | `SIGNET_EMAIL_FROM` | — | 邮件发件人 |
 | `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API 认证 token（可选，仅作首次启动种子；后续由后台 UI 管理） |
 | `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |
+| `SIGNET_CAPTCHA_PROVIDER` / `_SITE_KEY` / `_SECRET_KEY` | — | 登录/重置页 CAPTCHA（Turnstile 或 hCaptcha）；可在后台 Settings → CAPTCHA 配置（**DB > 环境变量**，secret 加密落库），三要素齐备才启用 |
+| `SIGNET_CAPTCHA_VERIFY_URL` | — | siteverify 端点覆盖（自托管兼容服务/测试用） |
 
 生产容器将 volume `signet_data` 挂到 `/app/data`（JWT / 加密密钥）；`build/` 与 `deploy/` 的 compose 分工见 [deploy.md](./deploy.md)。
 
