@@ -3,6 +3,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use std::net::SocketAddr;
 use std::time::Instant;
+use tracing::Instrument;
 
 use crate::http::extract::client_ip;
 use crate::http::request_id::RequestId;
@@ -10,6 +11,13 @@ use crate::http::request_id::RequestId;
 /// Single-line access log: one INFO line per request with method, path, query,
 /// client IP, status and latency. The correlation id is carried as a plain
 /// field so logs stay flat and greppable.
+///
+/// The whole request also runs inside an `http.request` span. Without the
+/// OTel layer installed the span costs nothing (no subscriber collects it);
+/// with it — `SIGNET_OTEL_ENDPOINT` — the span becomes the trace the collector
+/// sees, carrying method, route, client ip, status and latency. The
+/// `x-request-id` doubles as the span attribute of the same name, joining
+/// traces and logs on one field.
 pub async fn track(req: Request, next: Next) -> Response {
     let request_id = req
         .extensions()
@@ -34,8 +42,22 @@ pub async fn track(req: Request, next: Next) -> Response {
     req.extensions_mut()
         .insert(crate::http::extract::AuditIp(audit_ip));
 
+    let span = tracing::info_span!(
+        "http.request",
+        request_id = %request_id,
+        http.request.method = %method,
+        http.route = %path,
+        http.query = %query,
+        client.address = %ip,
+        // Response fields, recorded once the handler returns.
+        http.response.status_code = tracing::field::Empty,
+        signet.latency_ms = tracing::field::Empty,
+    );
     let start = Instant::now();
-    let resp = next.run(req).await;
+    let resp = next.run(req).instrument(span.clone()).await;
+    span.record("http.response.status_code", resp.status().as_u16());
+    span.record("signet.latency_ms", start.elapsed().as_millis() as u64);
+
     let latency_ms = start.elapsed().as_millis() as u64;
     let status = resp.status().as_u16();
 

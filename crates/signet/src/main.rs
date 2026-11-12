@@ -22,9 +22,25 @@ impl FormatTime for LocalTime {
     }
 }
 
-fn init_logger() {
+fn init_logger() -> Option<signet::otel::OtelGuard> {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,signet=debug"));
+
+    // OTel trace export is opt-in via SIGNET_OTEL_ENDPOINT; an exporter build
+    // failure is reported and the process boots with plain logs (see the
+    // module docs). The guard is returned to main: its Drop flushes batched
+    // spans, so it must outlive the server drain.
+    let otel = match signet::otel::init() {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("OTLP trace export could not start: {e:#}");
+            None
+        }
+    };
+    // The layer is built per branch so its subscriber generic is inferred
+    // against the subscriber that branch composes.
+    let otel_layer =
+        |o: &signet::otel::Otel| tracing_opentelemetry::layer().with_tracer(o.tracer.clone());
 
     let is_production = std::env::var("APP_ENV")
         .map(|v| v == "production")
@@ -34,6 +50,7 @@ fn init_logger() {
         // Production: flat single-line JSON for log aggregation.
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel.as_ref().map(otel_layer))
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -47,6 +64,7 @@ fn init_logger() {
         // Development: readable compact text with source location.
         tracing_subscriber::registry()
             .with(filter)
+            .with(otel.as_ref().map(otel_layer))
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_writer(std::io::stdout)
@@ -59,6 +77,8 @@ fn init_logger() {
             )
             .init();
     }
+
+    otel.map(|o| o.guard)
 }
 
 /// Resolves on SIGINT or SIGTERM. `axum::serve` then stops accepting and drains
@@ -95,7 +115,9 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_logger();
+    // Lives to the end of main: dropping it after the drain flushes the
+    // trace spans of requests the graceful shutdown was still serving.
+    let _otel_guard = init_logger();
 
     // No subcommand keeps the historical behaviour (read env, serve HTTP), so
     // existing container commands and deploy scripts keep working unchanged.

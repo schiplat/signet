@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod mfa;
 pub mod models;
 pub mod oidc;
+pub mod otel;
 pub mod outbound;
 pub mod outbox;
 pub mod roles;

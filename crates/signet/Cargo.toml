@@ -27,7 +27,11 @@ password-hash.workspace = true
 rand.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rsa.workspace = true
+opentelemetry.workspace = true
+opentelemetry-otlp.workspace = true
+opentelemetry_sdk.workspace = true
 rust-embed.workspace = true
+tracing-opentelemetry.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
@@ -56,3 +60,4 @@ lettre = { version = "0.11.23", default-features = false, features = ["smtp-tran
 [dev-dependencies]
 http-body-util.workspace = true
 tower.workspace = true
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
