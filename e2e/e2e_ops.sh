@@ -9,7 +9,7 @@ source "$(dirname "$0")/lib.sh"
 # creates is removed on exit.
 set -u
 
-OPS="${E2E_OPS:-http://192.168.39.132:8445}"
+OPS="${E2E_OPS:-http://127.0.0.1:8445}"
 OPS_METRICS_PORT="${E2E_OPS_METRICS_PORT:-9465}"
 DB="${E2E_DB_OPS:-signet_verify_ops}"
 BIN="$E2E_REPO/target/debug/signet"

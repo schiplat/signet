@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const CLIENT_RETURNING: &str = r#"
     id, client_id, redirect_uris, post_logout_redirect_uris,
-    grant_types, scopes, enabled,
+    grant_types, extra_claims, backchannel_logout_uri, scopes, enabled,
     ip_allowlist_enabled, allowed_cidrs, created_at, updated_at
 "#;
 
@@ -161,8 +161,8 @@ async fn create_client(
         )
         VALUES (
             $1, $2, $3, $4, $5,
-            $6, $7, $8, TRUE,
-            $9, $10
+            $6, $7, $8, $9, TRUE,
+            $10, $11
         )
         RETURNING {CLIENT_RETURNING}
         "#
