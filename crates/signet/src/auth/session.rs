@@ -219,6 +219,51 @@ pub async fn user_from_session_token(pool: &PgPool, token: &str) -> AppResult<Op
     Ok(user)
 }
 
+/// The `Authorization: Bearer` credential, when the request carries one.
+pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolves an admin API token to its owning user, mirroring the session
+/// loader's shape: expiry, revocation and owner status all gate the row, and
+/// `last_used_at` is throttled the same way so an active cron job does not
+/// turn every request into a write.
+pub async fn user_from_api_token(pool: &PgPool, token: &str) -> AppResult<Option<User>> {
+    let token_hash = sha256_hex(token);
+    let user = sqlx::query_as::<_, User>(&format!(
+        r#"
+        SELECT {}
+        FROM admin_api_tokens t
+        JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = $1
+          AND t.revoked_at IS NULL
+          AND (t.expires_at IS NULL OR t.expires_at > NOW())
+          AND u.status = 'active'
+        "#,
+        crate::models::user_cols_with("u")
+    ))
+    .bind(&token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    if user.is_some() {
+        let _ = sqlx::query(
+            "UPDATE admin_api_tokens SET last_used_at = NOW() \
+             WHERE token_hash = $1 AND (last_used_at IS NULL \
+                 OR last_used_at < NOW() - INTERVAL '60 seconds')",
+        )
+        .bind(&token_hash)
+        .execute(pool)
+        .await;
+    }
+    Ok(user)
+}
+
 pub fn session_cookie(token: &str, secure: bool, ttl_hours: i64) -> Cookie<'static> {
     let mut cookie = Cookie::build((SESSION_COOKIE, token.to_string()))
         .path("/")

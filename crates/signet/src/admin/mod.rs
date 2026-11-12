@@ -46,6 +46,11 @@ pub fn router() -> Router<AppState> {
             "/admin/scim/token",
             post(scim_generate_token).delete(scim_revoke_token),
         )
+        .route("/admin/tokens", get(list_api_tokens).post(create_api_token))
+        .route(
+            "/admin/tokens/{id}",
+            axum::routing::delete(revoke_api_token),
+        )
         .merge(clients::router())
 }
 
@@ -158,14 +163,172 @@ async fn scim_revoke_token(
     Ok(Json(json!({ "ok": true })))
 }
 
+// --- Admin API machine credentials (PAT) ---
+//
+// Bearer tokens that let automation call this API without a browser session.
+// A token carries no authority of its own: every call resolves its owning
+// user and applies their *current* role and status, so demoting or disabling
+// an admin retires their tokens on the next request. The plaintext is shown
+// once at creation; only the SHA-256 digest is stored.
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize)]
+struct AdminApiTokenRow {
+    id: Uuid,
+    name: String,
+    user_email: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    last_used_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Deserialize)]
+struct CreateApiTokenBody {
+    name: String,
+    /// Optional lifetime in days; absent means the token never expires.
+    #[serde(default)]
+    expires_in_days: Option<i64>,
+}
+
+async fn list_api_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Value>> {
+    require_admin_user(&state, &headers).await?;
+    let rows: Vec<AdminApiTokenRow> = sqlx::query_as(
+        r#"
+        SELECT t.id, t.name, u.email AS user_email, t.created_at,
+               t.last_used_at, t.expires_at, t.revoked_at
+        FROM admin_api_tokens t
+        JOIN users u ON u.id = t.user_id
+        ORDER BY t.created_at DESC
+        "#,
+    )
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(json!({ "tokens": rows })))
+}
+
+async fn create_api_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<CreateApiTokenBody>,
+) -> AppResult<Json<Value>> {
+    let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let name = body.name.trim();
+    if name.is_empty() || name.len() > 100 {
+        return Err(AppError::bad_request("name must be 1-100 characters"));
+    }
+    let expires_at = body
+        .expires_in_days
+        .map(|days| {
+            if !(1..=3650).contains(&days) {
+                return Err(AppError::bad_request(
+                    "expires_in_days must be between 1 and 3650",
+                ));
+            }
+            Ok(chrono::Utc::now() + chrono::Duration::days(days))
+        })
+        .transpose()?;
+
+    let plaintext = format!("sgn_pat_{}", random_token(32));
+    let hash = sha256_hex(&plaintext);
+    let id = Uuid::new_v4();
+    sqlx::query(
+        r#"
+        INSERT INTO admin_api_tokens (id, user_id, name, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(id)
+    .bind(actor.id)
+    .bind(name)
+    .bind(&hash)
+    .bind(expires_at)
+    .execute(&state.pool)
+    .await?;
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "api_token.create",
+            resource_type: "api_token",
+            resource_id: Some(id.to_string()),
+            detail: json!({ "name": name, "expires_at": expires_at }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({ "id": id, "token": plaintext })))
+}
+
+async fn revoke_api_token(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Value>> {
+    let actor = require_admin_user(&state, &headers).await?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let res = sqlx::query("UPDATE admin_api_tokens SET revoked_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::not_found("token not found"));
+    }
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "api_token.revoke",
+            resource_type: "api_token",
+            resource_id: Some(id.to_string()),
+            detail: json!({}),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Resolves the request's principal: a session cookie for browsers, or an
+/// `Authorization: Bearer` admin API token for automation. Both paths apply
+/// the same gates — owner active, not in must-change-password — and the
+/// `require_*` role checks on top stay unchanged, so a token's power is
+/// always exactly its owner's current role. A presented-but-invalid bearer
+/// fails the request rather than falling back to the cookie channel.
+async fn resolve_principal(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
+    if let Some(token) = crate::auth::session::bearer_token(headers) {
+        let user = crate::auth::session::user_from_api_token(&state.pool, token)
+            .await?
+            .ok_or_else(|| AppError::unauthorized("invalid or expired API token"))?;
+        if user.must_change_password {
+            return Err(AppError::forbidden("password change required"));
+        }
+        return Ok(user);
+    }
+    current_user(state, headers).await
+}
+
 pub(crate) async fn require_staff_user(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
-    let user = current_user(state, headers).await?;
+    let user = resolve_principal(state, headers).await?;
     require_staff(&user)?;
     Ok(user)
 }
 
 pub(crate) async fn require_admin_user(state: &AppState, headers: &HeaderMap) -> AppResult<User> {
-    let user = current_user(state, headers).await?;
+    let user = resolve_principal(state, headers).await?;
     require_admin_role(&user)?;
     Ok(user)
 }

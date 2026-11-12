@@ -3,15 +3,19 @@ import { computed, onMounted, ref } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import {
+  createApiToken,
+  fetchApiTokens,
   fetchMfaSettings,
   fetchRuntimeSettings,
   fetchSignInSettings,
   fetchSsoSettings,
   me,
+  revokeApiToken,
   updateMfaSettings,
   updateRuntimeSettings,
   updateSignInSettings,
   updateSsoSettings,
+  type ApiToken,
   type RuntimeSettings,
 } from "@/lib/api";
 import { joinList, splitList } from "@/lib/directoryMapping";
@@ -108,6 +112,13 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
+  // Non-fatal: a token list that fails to load still leaves the settings page
+  // usable, with the section showing its own error on save attempts.
+  try {
+    await refreshApiTokens();
+  } catch {
+    /* surfaced when the operator interacts with the section */
+  }
 });
 
 async function onSaveAllowlist() {
@@ -174,6 +185,74 @@ async function onSaveSso() {
     error.value = e instanceof Error ? e.message : "Save failed";
   } finally {
     ssoSaving.value = false;
+  }
+}
+
+// --- API tokens (machine credentials) ---
+//
+// The plaintext is returned by the server exactly once, so it is held in
+// `freshToken` and cleared the moment it is copied or dismissed — not kept in
+// component state longer than the operator needs it.
+
+const apiTokens = ref<ApiToken[]>([]);
+const newTokenName = ref("");
+const newTokenExpiryDays = ref<string>("");
+const freshToken = ref("");
+const tokenWorking = ref(false);
+
+function formatWhen(iso: string): string {
+  return new Date(iso).toLocaleString();
+}
+
+function copyFreshToken() {
+  navigator.clipboard.writeText(freshToken.value).then(
+    () => {
+      freshToken.value = "";
+    },
+    () => {
+      /* selection copy still works; keep the token visible */
+    },
+  );
+}
+
+async function refreshApiTokens() {
+  const res = await fetchApiTokens();
+  apiTokens.value = res.tokens;
+}
+
+async function onCreateToken() {
+  error.value = "";
+  const name = newTokenName.value.trim();
+  if (!name) return;
+  const days = newTokenExpiryDays.value ? Number(newTokenExpiryDays.value) : null;
+  if (days !== null && (!Number.isInteger(days) || days < 1 || days > 3650)) {
+    error.value = "Expiry must be a whole number of days (1-3650), or empty";
+    return;
+  }
+  tokenWorking.value = true;
+  try {
+    const res = await createApiToken(name, days);
+    freshToken.value = res.token;
+    newTokenName.value = "";
+    newTokenExpiryDays.value = "";
+    await refreshApiTokens();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Token creation failed";
+  } finally {
+    tokenWorking.value = false;
+  }
+}
+
+async function onRevokeToken(t: ApiToken) {
+  error.value = "";
+  tokenWorking.value = true;
+  try {
+    await revokeApiToken(t.id);
+    await refreshApiTokens();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Revoke failed";
+  } finally {
+    tokenWorking.value = false;
   }
 }
 </script>
@@ -343,6 +422,96 @@ async function onSaveSso() {
           </UiButton>
           <span v-if="ssoSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
+      </section>
+
+      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">API tokens</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            Bearer credentials for automation (<code class="text-[11px]">Authorization: Bearer
+            …</code> on <code class="text-[11px]">/api/v1/admin/*</code>). A token acts as the
+            account that created it: demoting or disabling that account, or revoking the token,
+            cuts access on the next call.
+          </p>
+        </div>
+
+        <!-- Shown once, then gone: the server stores only the digest. -->
+        <div v-if="freshToken" class="space-y-2 rounded-lg border border-border/40 px-4 py-3">
+          <p class="text-xs text-muted-foreground">
+            Copy this token now — it is never shown again.
+          </p>
+          <code class="block break-all font-mono text-[12px]">{{ freshToken }}</code>
+          <div class="flex gap-2">
+            <UiButton size="sm" variant="secondary" @click="copyFreshToken">
+              Copy
+            </UiButton>
+            <UiButton size="sm" variant="secondary" @click="freshToken = ''">
+              Done
+            </UiButton>
+          </div>
+        </div>
+
+        <div class="space-y-2">
+          <label class="type-label block" for="token-name">Token name</label>
+          <div class="flex gap-2">
+            <input
+              id="token-name"
+              v-model="newTokenName"
+              type="text"
+              class="field-input flex-1"
+              placeholder="ci-pipeline"
+              maxlength="100"
+            />
+            <input
+              v-model="newTokenExpiryDays"
+              type="number"
+              min="1"
+              max="3650"
+              class="field-input w-36 text-right font-mono text-[12px]"
+              placeholder="days (empty = never)"
+            />
+            <UiButton size="sm" :disabled="tokenWorking || !newTokenName.trim()" @click="onCreateToken">
+              {{ tokenWorking ? "Working…" : "Create" }}
+            </UiButton>
+          </div>
+        </div>
+
+        <div v-if="apiTokens.length" class="space-y-2">
+          <div
+            v-for="t in apiTokens"
+            :key="t.id"
+            class="flex items-center gap-3 rounded-lg border border-border/40 px-4 py-3"
+          >
+            <span class="flex-1">
+              <span class="block text-sm font-medium">
+                {{ t.name }}
+                <span
+                  v-if="t.revoked_at"
+                  class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                >revoked</span>
+                <span
+                  v-else-if="t.expires_at && new Date(t.expires_at) < new Date()"
+                  class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                >expired</span>
+              </span>
+              <span class="mt-0.5 block text-xs text-muted-foreground">
+                {{ t.user_email }} ·
+                last used {{ t.last_used_at ? formatWhen(t.last_used_at) : "never" }} ·
+                {{ t.expires_at ? `expires ${formatWhen(t.expires_at)}` : "no expiry" }}
+              </span>
+            </span>
+            <UiButton
+              v-if="!t.revoked_at"
+              size="sm"
+              variant="destructive"
+              :disabled="tokenWorking"
+              @click="onRevokeToken(t)"
+            >
+              Revoke
+            </UiButton>
+          </div>
+        </div>
+        <p v-else class="text-xs text-muted-foreground">No tokens yet.</p>
       </section>
     </template>
   </div>

@@ -326,6 +326,46 @@ export async function importUsers(
 /** Bulk CSV download; cookie-authenticated, so a plain link works. */
 export const USERS_EXPORT_URL = "/api/v1/admin/users/export";
 
+/** One row of GET /admin/tokens (the plaintext is never returned again). */
+export type ApiToken = {
+  id: string;
+  name: string;
+  user_email: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+};
+
+export async function fetchApiTokens() {
+  const res = await fetch("/api/v1/admin/tokens", {
+    credentials: "include",
+  });
+  return parseJson<{ tokens: ApiToken[] }>(res);
+}
+
+/** Creates a machine credential; `token` is shown exactly once. */
+export async function createApiToken(name: string, expiresInDays: number | null) {
+  const res = await fetch("/api/v1/admin/tokens", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      name,
+      ...(expiresInDays ? { expires_in_days: expiresInDays } : {}),
+    }),
+  });
+  return parseJson<{ id: string; token: string }>(res);
+}
+
+export async function revokeApiToken(id: string) {
+  const res = await fetch(`/api/v1/admin/tokens/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);

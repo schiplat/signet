@@ -83,6 +83,8 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**：SSO JIT 开户开关 `{ "jit_provision": bool }` |
 | `GET/PATCH` | `/api/v1/admin/settings/sign-in` | **admin**：登录白名单（邮箱域名），见 §14 |
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/runtime` | **admin**：运行时策略（token/会话有效期、登录锁定、密码策略、审计保留、限流）；优先级 **DB > 环境变量 > 默认**，DELETE 清除覆盖 |
+| `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问本表全部 admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
+| `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**：吊销（立即生效） |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
 
 ---
