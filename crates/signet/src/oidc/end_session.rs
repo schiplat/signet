@@ -149,6 +149,7 @@ fn verify_hint(state: &AppState, hint: &str) -> AppResult<HintClaims> {
     validation.validate_aud = false;
     let data = state
         .keys
+        .load()
         .verify::<Value>(hint, &validation)
         .map_err(|_| AppError::bad_request("invalid id_token_hint"))?;
     // Shape check: only an id_token may act as a logout hint. An access token

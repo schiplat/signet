@@ -515,6 +515,36 @@ async function onImportFile(event: Event) {
       error.value = 'Expected a JSON array of users, or {"users": [...]}';
       return;
     }
+    // Validate the whole batch first: dry_run runs every gate server-side and
+    // writes nothing, so a bad file is caught before any account changes.
+    const preview = await importUsers(users, false, true);
+    if (preview.errors.length) {
+      error.value =
+        `Import preview found ${preview.errors.length} problem row(s); nothing was written. ` +
+        preview.errors
+          .slice(0, 5)
+          .map((e) => `row ${e.row}: ${e.error}`)
+          .join("; ");
+      return;
+    }
+    const plan =
+      `Preview OK — would create ${preview.created.length}` +
+      (preview.updated.length
+        ? `, update ${preview.updated.length}`
+        : "") +
+      (preview.skipped.length
+        ? `, skip ${preview.skipped.length}`
+        : "") +
+      ". Commit this import?";
+    if (
+      !(await confirm({
+        title: "Import users?",
+        message: plan,
+        confirmText: "Import",
+      }))
+    ) {
+      return;
+    }
     const res = await importUsers(users, false);
     importSummary.value = `Created ${res.created.length}, skipped ${res.skipped.length}, failed ${res.errors.length}`;
     if (res.errors.length) {

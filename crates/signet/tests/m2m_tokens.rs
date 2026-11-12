@@ -136,6 +136,7 @@ async fn an_id_token_is_not_introspectable_as_an_access_token() {
     // Exactly what IdTokenClaims emits: no token_use, an at_hash, an aud.
     let id_token = state
         .keys
+        .load()
         .encode(&json!({
             "iss": state.config.issuer,
             "sub": sub,
@@ -161,6 +162,7 @@ async fn an_id_token_is_not_introspectable_as_an_access_token() {
     // shape): absence must be inactive, never "active by default".
     let bare = state
         .keys
+        .load()
         .encode(&json!({
             "iss": state.config.issuer,
             "sub": sub,
@@ -203,7 +205,7 @@ async fn client_credentials_mints_a_client_principal_without_a_refresh_token() {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[state.config.issuer.as_str()]);
     validation.validate_aud = false;
-    let data = decode::<Value>(token, state.keys.decoding(), &validation).expect("decode");
+    let data = decode::<Value>(token, state.keys.load().decoding(), &validation).expect("decode");
     assert_eq!(data.claims["sub"], json!(client_id));
     assert_eq!(data.claims["token_use"], json!("access"));
     assert!(data.claims.get("email").is_none());
@@ -247,7 +249,7 @@ async fn extra_claims_resolve_for_m2m_with_literals_and_abort_on_user_fields() {
     let mut validation = Validation::new(Algorithm::RS256);
     validation.validate_exp = false;
     validation.validate_aud = false;
-    let data = decode::<Value>(token, state.keys.decoding(), &validation).expect("decode");
+    let data = decode::<Value>(token, state.keys.load().decoding(), &validation).expect("decode");
     assert_eq!(data.claims["team"], json!("infra"));
     assert_eq!(data.claims["tier"], json!(2));
     assert_eq!(data.claims["trusted"], json!(true));
@@ -319,6 +321,7 @@ async fn a_disabled_user_token_introspects_as_inactive() {
     let now = chrono::Utc::now().timestamp();
     let token = state
         .keys
+        .load()
         .encode(&json!({
             "iss": state.config.issuer,
             "sub": sub,

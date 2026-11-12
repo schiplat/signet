@@ -129,6 +129,91 @@ async fn import_creates_skips_and_reports_row_errors_without_dying() {
 }
 
 #[tokio::test]
+async fn import_dry_run_classifies_everything_but_writes_nothing() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let (_, cookie) = common::admin_cookie(&state).await;
+
+    let existing = format!("{}@import.test", tag("dry-exist"));
+    let fresh = format!("{}@import.test", tag("dry-new"));
+    let dup = format!("{}@import.test", tag("dry-dup"));
+    sqlx::query(
+        "INSERT INTO users (id, sub, email, display_name, password_hash, status, role) \
+                 VALUES ($1, $2, $3, 'Pre', '', 'active', 'member')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4().to_string())
+    .bind(&existing)
+    .execute(&state.pool)
+    .await
+    .expect("insert the pre-existing user");
+
+    // update=false, so the pre-existing row is a skip; the repeated email has
+    // no database row behind it — only the batch itself "creates" it, which is
+    // exactly the case dry_run must catch without a write to consult.
+    let batch = json!({
+        "users": [
+            { "email": fresh, "display_name": "Would Create" },
+            { "email": dup, "display_name": "Dup First" },
+            { "email": dup, "display_name": "Dup Second" },
+            { "email": existing, "display_name": "Would Skip" },
+            { "email": format!("{}@import.test", tag("dry-badrole")), "role": "superuser" },
+            { "email": format!("{}@import.test", tag("dry-badpw")), "password": "short" },
+        ],
+        "update": false,
+        "dry_run": true,
+    });
+
+    let (status, body) =
+        call_admin(&state, &cookie, "POST", "/admin/users/import", Some(batch)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["dry_run"], json!(true), "{body}");
+    assert_eq!(body["created"].as_array().unwrap().len(), 2, "{body}");
+    // The pre-existing row skips — and so does the second duplicate row: a
+    // real run's SELECT would find the first duplicate's committed insert and
+    // take the same skip path. Dry run classifies it via the seen-set.
+    assert_eq!(body["skipped"].as_array().unwrap().len(), 2, "{body}");
+    assert!(body["skipped"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(existing)));
+    assert!(body["skipped"].as_array().unwrap().contains(&json!(dup)));
+    // Role escalation + weak password.
+    assert_eq!(body["errors"].as_array().unwrap().len(), 2, "{body}");
+
+    // Nothing landed in the database.
+    for email in [&fresh, &dup] {
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
+            .bind(email)
+            .fetch_one(&state.pool)
+            .await
+            .expect("count rows");
+        assert_eq!(count, 0, "dry run must not create {email}");
+    }
+    let display: String = sqlx::query_scalar("SELECT display_name FROM users WHERE email = $1")
+        .bind(&existing)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read pre-existing user");
+    assert_eq!(display, "Pre", "dry run must not update");
+
+    // And nothing landed in the audit trail either — a preview is not an
+    // attempt, so neither the per-row nor the aggregate event may appear.
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM audit_logs \
+         WHERE action IN ('user.create', 'user.import') \
+         AND (detail->>'email' = $1 OR detail->>'email' = $2)",
+    )
+    .bind(&fresh)
+    .bind(&dup)
+    .fetch_one(&state.pool)
+    .await
+    .expect("count audit rows");
+    assert_eq!(audit_count, 0, "dry run must not audit");
+}
+
+#[tokio::test]
 async fn import_update_mode_overwrites_profile_but_never_passwords() {
     let Some(state) = common::state().await else {
         return;

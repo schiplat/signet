@@ -321,7 +321,7 @@ async fn issue_client_credentials(
     let obj = claims.as_object_mut().expect("claims are an object");
     // No user: only literal extras can resolve here.
     crate::models::merge_extra_claims(obj, client.extra_claims.as_ref(), None)?;
-    let access_token = state.keys.encode(&claims)?;
+    let access_token = state.keys.load().encode(&claims)?;
 
     crate::metrics::inc_tokens_issued();
 
@@ -525,7 +525,7 @@ async fn build_token_response(
         client.extra_claims.as_ref(),
         Some(user),
     )?;
-    let access_token = state.keys.encode(&access_claims)?;
+    let access_token = state.keys.load().encode(&access_claims)?;
 
     let mut id_claims = serde_json::to_value(IdTokenClaims {
         iss: state.config.issuer.clone(),
@@ -558,7 +558,7 @@ async fn build_token_response(
     if let Some(at) = auth_time {
         id_claims.insert("auth_time".into(), json!(at));
     }
-    let id_token = state.keys.encode(&id_claims)?;
+    let id_token = state.keys.load().encode(&id_claims)?;
 
     let refresh = random_token(32);
     let refresh_hash = sha256_hex(&refresh);

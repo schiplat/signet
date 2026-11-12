@@ -114,16 +114,17 @@ docker compose -f deploy/docker-compose.yml exec -T signet \
 
 ## 4.5 签名密钥轮换
 
-`signet keys rotate` 生成新密钥、把旧密钥的**公钥**写入 `SIGNET_JWT_RETIRED_KEY_DIR`（默认 `./data/retired_keys`），并原子替换 `SIGNET_JWT_PRIVATE_KEY_PATH`。重启后：
+`signet keys rotate` 生成新密钥、把旧密钥的**公钥**写入 `SIGNET_JWT_RETIRED_KEY_DIR`（默认 `./data/retired_keys`），并原子替换 `SIGNET_JWT_PRIVATE_KEY_PATH`。运行中的实例每 30 秒轮询密钥文件指纹，**无需重启**即可热加载新密钥环：
 
 - 新签发的 access/id token 用新 `kid` 签名；
 - 旧密钥签发的 token 仍能验签，直到自然过期（JWKS 同时发布两把公钥，客户端按 `kid` 跟随）；
-- 旧私钥不再保留（只写公钥），轮换后的私钥暴露面不增加。
+- 旧私钥不再保留（只写公钥），轮换后的私钥暴露面不增加；
+- 密钥文件短暂缺失时热加载器**不会**生成替代密钥，保持当前密钥环并等待文件恢复。
 
 ```bash
 # 容器内（数据卷 /app/data 持久化两处路径）
 docker compose -f deploy/docker-compose.yml exec -T signet signet keys rotate
-docker compose -f deploy/docker-compose.yml restart signet
+# 无需 restart；约 30 秒内生效（也可立即重启加载）
 curl -s https://<issuer>/.well-known/jwks.json | jq '.keys[].kid'   # 应看到新旧两把
 ```
 
@@ -145,8 +146,7 @@ Signet 当前按**单活动实例**设计与验证：三块进程内状态——
 30 秒才被其他副本读到（其余所有状态——会话、SCIM、审计、同步互斥——都在数据库，
 天然多副本安全）。
 
-运行时设置已内置 30 秒后台重读：跨副本传播上限即该间隔；`signet keys rotate`
-仍需逐副本重启加载密钥环。需要水平扩展时，先做挑战/限流的共享存储设计再上副本，
+运行时设置与签名密钥环都已内置 30 秒后台重读：跨副本传播上限即该间隔（`signet keys rotate` 同样逐副本自动热加载，无需重启）。需要水平扩展时，先做挑战/限流的共享存储设计再上副本，
 不要直接挂 LB。
 
 两处"进程内状态"是有意的取舍，不是疏忽：

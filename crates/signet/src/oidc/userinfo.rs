@@ -34,6 +34,7 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
 
     let data = state
         .keys
+        .load()
         .verify::<AccessClaims>(token, &validation)
         .map_err(|_| AppError::unauthorized("invalid access_token"))?;
     if data.claims.token_use.as_deref() != Some("access") {

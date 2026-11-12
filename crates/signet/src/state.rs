@@ -4,6 +4,7 @@ use crate::crypto::encryption::Encryptor;
 use crate::crypto::keys::JwtKeys;
 use crate::http::ratelimit::RateLimiter;
 use crate::settings::RuntimeSettings;
+use arc_swap::ArcSwap;
 use sqlx::PgPool;
 use std::sync::{Arc, RwLock};
 use webauthn_rs::prelude::Webauthn;
@@ -24,7 +25,10 @@ pub struct AppState {
     /// Field names the database currently overrides; reported by the admin API
     /// so the UI can mark "inherited from environment" vs "set here".
     pub(crate) runtime_overridden: Arc<RwLock<Vec<&'static str>>>,
-    pub keys: Arc<JwtKeys>,
+    /// The signing key ring, behind an [`ArcSwap`]: reads are lock-free and
+    /// the background watcher (`crate::crypto::keys::spawn_key_watcher`) can
+    /// swap in a rotated ring without a restart. Load at the point of use.
+    pub keys: Arc<ArcSwap<JwtKeys>>,
     pub encryptor: Arc<Encryptor>,
     /// The pepper for client-secret digests.
     ///

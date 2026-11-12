@@ -303,14 +303,19 @@ export type ImportUserRow = {
   password?: string | null;
 };
 
-export async function importUsers(users: ImportUserRow[], update: boolean) {
+export async function importUsers(
+  users: ImportUserRow[],
+  update: boolean,
+  dryRun = false,
+) {
   const res = await fetch("/api/v1/admin/users/import", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
-    body: JSON.stringify({ users, update }),
+    body: JSON.stringify({ users, update, dry_run: dryRun }),
   });
   return parseJson<{
+    dry_run: boolean;
     created: string[];
     updated: string[];
     skipped: string[];

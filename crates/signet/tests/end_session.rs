@@ -46,6 +46,7 @@ fn id_token(state: &signet::state::AppState, sub: &str) -> String {
     let now = chrono::Utc::now().timestamp();
     state
         .keys
+        .load()
         .encode(&json!({
             "iss": state.config.issuer,
             "sub": sub,
@@ -74,6 +75,7 @@ async fn an_access_token_is_not_accepted_as_a_hint() {
     let now = chrono::Utc::now().timestamp();
     let access = state
         .keys
+        .load()
         .encode(&json!({
             "iss": state.config.issuer,
             "sub": sub,

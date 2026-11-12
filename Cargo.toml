@@ -9,6 +9,7 @@ license = "MIT"
 
 [workspace.dependencies]
 aes-gcm = "0.10"
+arc-swap = "1"
 anyhow = "1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["macros"] }

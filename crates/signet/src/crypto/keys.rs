@@ -208,11 +208,12 @@ fn load_retired(dir: &Path) -> Result<Vec<(String, Jwk, DecodingKey)>> {
 
 /// Generates a new signing key, retires the current one, and returns the new kid.
 ///
-/// The old key is published as a public PEM in `retired_dir` (the instance must
-/// be restarted to load it). The new key replaces `path` atomically — written to
+/// The old key is published as a public PEM in `retired_dir` (a running
+/// instance picks the ring up on its next poll — see [`spawn_key_watcher`] —
+/// and a restart loads it too). The new key replaces `path` atomically — written to
 /// a sibling `0600` file and renamed — so a crash mid-rotation cannot leave a
 /// truncated signing key behind. Nothing here touches the database: rotation is
-/// a file operation, and the boot-time key load is what makes it take effect.
+/// a file operation.
 pub fn rotate(path: &Path, retired_dir: &Path) -> Result<String> {
     let pem = std::fs::read_to_string(path)
         .with_context(|| format!("read the current signing key {}", path.display()))?;
@@ -280,4 +281,115 @@ pub fn prune_retired(dir: &Path, keep: usize) -> Result<usize> {
         removed += 1;
     }
     Ok(removed)
+}
+
+// --- hot reload ---
+
+/// How often the running instance re-checks the key files for rotation done
+/// out-of-band (`signet keys rotate`, or a peer instance sharing the data
+/// directory). Matches the runtime-settings poll cadence.
+pub const KEY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cheap fingerprint of everything the key ring loads: the active key's bytes
+/// plus the set of retired PEM filenames (those are named by kid, so a new
+/// retired key is always a new name; same-name rewrite means the same key).
+///
+/// A missing or unreadable active key is `Ok(None)` rather than an error: the
+/// watcher must never *generate* a replacement (a transient read failure or an
+/// operator mid-move would otherwise mint a new key), it should just wait for
+/// the file to come back.
+fn ring_fingerprint(path: &Path, retired_dir: &Path) -> std::io::Result<Option<String>> {
+    let pem = match std::fs::read_to_string(path) {
+        Ok(pem) => pem,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut retired: Vec<String> = match std::fs::read_dir(retired_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().and_then(|e| e.to_str()) == Some("pem"))
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(_) => Vec::new(), // no retired dir yet: nothing retired
+    };
+    let mut fingerprint = crate::crypto::util::sha256_hex(&pem);
+    retired.sort();
+    fingerprint.push('#');
+    fingerprint.push_str(&retired.join(","));
+    Ok(Some(fingerprint))
+}
+
+/// Reloads the ring from disk when the files changed since the last poll.
+///
+/// Returns whether a new ring was installed. `prev` carries the fingerprint
+/// across polls; the caller starts it at `None` so the first poll always
+/// syncs up with whatever is on disk. Reload failures keep the current ring —
+/// it still verifies every token it ever signed — and the next poll retries.
+pub fn reload_ring(
+    keys: &arc_swap::ArcSwap<JwtKeys>,
+    path: &Path,
+    retired_dir: &Path,
+    prev: &mut Option<String>,
+) -> bool {
+    let fingerprint = match ring_fingerprint(path, retired_dir) {
+        Ok(fp) => match fp {
+            Some(fp) => fp,
+            // Key file absent: never generate in the watcher path, just wait.
+            None => return false,
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, path = %path.display(), "key poll read failed; keeping current ring");
+            return false;
+        }
+    };
+    if Some(&fingerprint) == prev.as_ref() {
+        return false;
+    }
+    match JwtKeys::load_or_generate_with_retired(path, Some(retired_dir)) {
+        Ok(ring) => {
+            let old_kid = keys.load().kid.clone();
+            keys.store(Arc::new(ring));
+            *prev = Some(fingerprint);
+            tracing::info!(
+                old_kid = %old_kid,
+                new_kid = %keys.load().kid,
+                "signing key ring reloaded from disk"
+            );
+            true
+        }
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "key reload failed; keeping current ring (tokens it signed still verify)"
+            );
+            false
+        }
+    }
+}
+
+/// Background poller that hot-swaps the key ring when the key files change on
+/// disk, so `signet keys rotate` (or a peer replica rotating a shared data
+/// directory) takes effect without a restart.
+///
+/// There is a small TOCTOU window between the fingerprint read and the reload:
+/// a file deleted exactly in between would make the reload *generate* a fresh
+/// key. The rotation tooling writes via rename (the path is never absent), and
+/// even the pathological case self-heals — the generated key is written back
+/// and becomes the active key on disk on the next poll.
+pub fn spawn_key_watcher(state: crate::state::AppState) {
+    tokio::spawn(async move {
+        let path = state.config.jwt_private_key_path.clone();
+        let retired_dir = state.config.jwt_retired_key_dir.clone();
+        let mut prev: Option<String> = None;
+        let mut ticker = tokio::time::interval(KEY_POLL_INTERVAL);
+        ticker.tick().await; // boot already loaded the ring; sync the fingerprint
+        if let Ok(Some(fp)) = ring_fingerprint(&path, &retired_dir) {
+            prev = Some(fp);
+        }
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            reload_ring(&state.keys, &path, &retired_dir, &mut prev);
+        }
+    });
 }

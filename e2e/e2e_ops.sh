@@ -143,6 +143,20 @@ else
 fi
 check "retired public key written" "$(ls "$DATA/retired_keys" 2>/dev/null | wc -l)" "1"
 
+echo "== 5b. hot reload without restart =="
+# The watcher polls every 30s; the JWKS of the RUNNING instance must gain the
+# retired key on its own.
+HOT=""
+for _ in $(seq 1 50); do
+  HOT=$(jwks_field "len(keys)")
+  [ "$HOT" = "2" ] && break
+  sleep 1
+done
+check "running instance picked up the rotated ring" "$HOT" "2"
+R=$(curl -s -c "$J/admin3" -X POST "$OPS/api/v1/login" -H 'Content-Type: application/json' \
+  -d '{"email":"ops-admin@example.com","password":"OpsPassw0rdX"}')
+check "login works with the hot-reloaded ring" "$R" '"status":"ok"'
+
 stop_instance
 start_instance || { echo "FAIL: restart after rotation"; exit 1; }
 COUNT=$(jwks_field "len(keys)")

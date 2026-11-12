@@ -77,6 +77,10 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
     // publishes to its own process instantly; this is the cross-replica path).
     settings::spawn_refresher(state.clone());
 
+    // Pick up out-of-band key rotation (`signet keys rotate`, a peer replica
+    // on a shared data dir) without a restart.
+    crypto::keys::spawn_key_watcher(state.clone());
+
     // Durable webhook/email delivery with backoff (see the module docs).
     outbox::spawn(state.clone());
 
@@ -216,7 +220,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         config: Arc::new(cfg),
         settings: Arc::new(std::sync::RwLock::new(runtime)),
         runtime_overridden: Arc::new(std::sync::RwLock::new(overridden)),
-        keys: Arc::new(keys),
+        keys: Arc::new(arc_swap::ArcSwap::from_pointee(keys)),
         encryptor: Arc::new(encryptor),
         client_secret_key,
         rate_limiter: Arc::new(http::ratelimit::RateLimiter::new(rate_limit_per_minute)),

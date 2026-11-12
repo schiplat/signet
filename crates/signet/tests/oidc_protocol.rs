@@ -358,7 +358,7 @@ async fn the_id_token_carries_auth_time_from_the_code() {
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
     validation.set_issuer(&[state.config.issuer.as_str()]);
     validation.validate_aud = false;
-    let data = jsonwebtoken::decode::<Value>(id_token, state.keys.decoding(), &validation)
+    let data = jsonwebtoken::decode::<Value>(id_token, state.keys.load().decoding(), &validation)
         .expect("decode id token");
     let auth_time = data.claims["auth_time"].as_i64().expect("auth_time claim");
     let two_hours_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp();

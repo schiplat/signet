@@ -102,7 +102,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/admin/users/{id}/disable` | 冻结 |
 | `POST` | `/api/v1/admin/users/{id}/enable` | 解冻 |
 | `POST` | `/api/v1/admin/users/batch-disable` | 批量冻结 `{ "ids": [] }` |
-| `POST` | `/api/v1/admin/users/import` | **admin** 批量导入 `{ users: [...], update?: bool }`，≤1000 行；逐行校验、行级错误不中断批次；`update=true` 时更新已存在账号的资料（**不改密码**）；每行写 `user.create` 审计，另写一条 `user.import` 汇总 |
+| `POST` | `/api/v1/admin/users/import` | **admin** 批量导入 `{ users: [...], update?: bool, dry_run?: bool }`，≤1000 行；逐行校验、行级错误不中断批次；`update=true` 时更新已存在账号的资料（**不改密码**）；`dry_run=true` 时全量校验并返回与真实执行相同的分类结果（响应多一个 `dry_run: true` 字段），**不写任何数据、不写审计**（响应含 `created/updated/skipped/errors`）；真实导入每行写 `user.create` 审计，另写一条 `user.import` 汇总 |
 | `GET` | `/api/v1/admin/users/export` | **staff** 用户 CSV（邮箱/用户名/显示名/角色/状态/组/手机，公式中和） |
 | `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | 强制下线该用户全部会话 |
 

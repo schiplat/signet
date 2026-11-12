@@ -119,7 +119,10 @@ pub(crate) fn decode_access_token(
     validation.set_issuer(std::slice::from_ref(&state.config.issuer));
     validation.validate_exp = false;
     validation.validate_aud = false;
-    let data = state.keys.verify::<serde_json::Value>(token, &validation)?;
+    let data = state
+        .keys
+        .load()
+        .verify::<serde_json::Value>(token, &validation)?;
     let claims = data.claims;
     let string = |k: &str| {
         claims
@@ -150,7 +153,7 @@ pub(crate) fn decode_access_token(
 pub async fn fire_backchannel_logout(state: &AppState, user_id: Uuid) {
     fire_backchannel_logout_core(
         &state.pool,
-        &state.keys,
+        &state.keys.load(),
         state.config.issuer.as_str(),
         state.config.outbound_allow_private,
         user_id,

@@ -20,6 +20,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -1796,6 +1797,11 @@ struct ImportUsersBody {
     /// updated instead of being skipped. Passwords are never updated by import.
     #[serde(default)]
     update: bool,
+    /// When true, validate every row and report what *would* happen without
+    /// writing anything. The response carries the same created/updated/skipped/
+    /// errors shape as a real run, so the operator can review before committing.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// Bulk-creates (and optionally updates) users from a JSON array.
@@ -1804,6 +1810,11 @@ struct ImportUsersBody {
 /// row 297 — but every failure is reported with its index so the operator can
 /// fix and re-submit just those rows. Rows are attempted in order and a unique
 /// violation from a concurrent write surfaces as that row's error.
+///
+/// With `dry_run` the handler runs every validation gate and classifies each
+/// row exactly as a real run would, but performs no writes: no user rows and
+/// no audit events. In-batch duplicates are tracked locally, since a dry run
+/// cannot see an earlier row's insert in the database the way a real run does.
 async fn import_users(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1827,6 +1838,11 @@ async fn import_users(
     let mut updated: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
+    // Only populated under dry_run: rows the batch itself would create, so a
+    // later duplicate row is classified against them like a real run would be.
+    let mut seen_emails = HashSet::new();
+    let mut seen_usernames = HashSet::new();
+    let mut seen_phones = HashSet::new();
 
     for (idx, row) in body.users.into_iter().enumerate() {
         // Row-local capture so a per-row failure names the row, not the batch.
@@ -1847,11 +1863,19 @@ async fn import_users(
             continue;
         }
 
-        let existing: Option<(Uuid,)> =
+        // Under dry_run the seen-set stands in for the database: an earlier
+        // row's insert is not observable there, so a duplicate is reported as
+        // "already present" exactly as the real run's SELECT would find it.
+        // The placeholder id is never bound — dry_run skips every write.
+        let already_touched = body.dry_run && !seen_emails.insert(email.clone());
+        let existing: Option<(Uuid,)> = if already_touched {
+            Some((Uuid::nil(),))
+        } else {
             sqlx::query_as("SELECT id FROM users WHERE email = $1 OR username = $1")
                 .bind(&email)
                 .fetch_optional(&state.pool)
-                .await?;
+                .await?
+        };
 
         if let Some((id,)) = existing {
             if !body.update {
@@ -1862,6 +1886,10 @@ async fn import_users(
             let display_name = row.display_name.clone().unwrap_or_default();
             let groups = row.groups.clone().unwrap_or_default();
             let phone = normalize_phone(row.phone.clone())?;
+            if body.dry_run {
+                updated.push(email);
+                continue;
+            }
             let res = sqlx::query(
                 r#"
                 UPDATE users SET display_name = $2, role = $3, groups = $4, phone = $5,
@@ -1886,7 +1914,22 @@ async fn import_users(
         }
 
         // New row: same validation gates the single-create handler applies.
-        if let Err(e) = crate::admission::ensure_provision_allowed(
+        if body.dry_run {
+            // The shared admission helper audits every blocked attempt; a
+            // preview is not an attempt, so apply the same domain rule
+            // without the audit write.
+            let domains =
+                crate::admission::allowed_domains(&state.pool, &state.config.allowed_email_domains)
+                    .await?;
+            if !crate::admission::allows(&domains, &email) {
+                let msg = match crate::admission::domain_of(&email) {
+                    Some(domain) => format!("the {domain} email domain is not allowed"),
+                    None => "this email domain is not allowed".to_string(),
+                };
+                errors.push(json!({ "row": idx, "email": email, "error": msg }));
+                continue;
+            }
+        } else if let Err(e) = crate::admission::ensure_provision_allowed(
             &state,
             &email,
             crate::admission::via::ADMIN,
@@ -1901,6 +1944,9 @@ async fn import_users(
         let password_hash = match row.password.as_deref() {
             Some(pw) if !pw.is_empty() => {
                 match validate_password_strength(pw, state.rt().password_min_length) {
+                    // dry_run never stores the hash, so skip the expensive
+                    // argon2 pass; strength is what the preview reports on.
+                    Ok(()) if body.dry_run => String::new(),
                     Ok(()) => hash_password_offloaded(pw).await?,
                     Err(e) => {
                         errors.push(json!({ "row": idx, "email": email, "error": e.to_string() }));
@@ -1919,7 +1965,7 @@ async fn import_users(
                     .bind(u)
                     .fetch_one(&state.pool)
                     .await?;
-            if username_exists > 0 {
+            if username_exists > 0 || (body.dry_run && !seen_usernames.insert(u.clone())) {
                 errors.push(
                     json!({ "row": idx, "email": email, "error": "username already exists" }),
                 );
@@ -1927,7 +1973,9 @@ async fn import_users(
             }
         }
         if let Some(p) = &normalize_phone(row.phone.clone())? {
-            if phone_exists(&state.pool, p, None).await? {
+            if phone_exists(&state.pool, p, None).await?
+                || (body.dry_run && !seen_phones.insert(p.clone()))
+            {
                 errors.push(json!({ "row": idx, "email": email, "error": "phone already exists" }));
                 continue;
             }
@@ -1947,6 +1995,10 @@ async fn import_users(
         new_user.username = username.as_deref();
         new_user.phone = phone.as_deref();
         new_user.groups = &groups;
+        if body.dry_run {
+            created.push(email);
+            continue;
+        }
         match crate::models::insert_user(&state.pool, &new_user).await {
             // Per-row user.create events: the aggregate import event records
             // the batch, but the audit trail's promise is one traceable event
@@ -1979,29 +2031,32 @@ async fn import_users(
         }
     }
 
-    crate::audit::record_many(&state, per_row_events).await;
+    if !body.dry_run {
+        crate::audit::record_many(&state, per_row_events).await;
 
-    record(
-        &state,
-        AuditEvent {
-            actor: Some(actor),
-            action: "user.import",
-            resource_type: "user",
-            resource_id: None,
-            detail: json!({
-                "created": created.len(),
-                "updated": updated.len(),
-                "skipped": skipped.len(),
-                "errors": errors.len(),
-            }),
-            ip,
-            user_agent: crate::http::extract::user_agent(&headers),
-            client_id: None,
-        },
-    )
-    .await;
+        record(
+            &state,
+            AuditEvent {
+                actor: Some(actor),
+                action: "user.import",
+                resource_type: "user",
+                resource_id: None,
+                detail: json!({
+                    "created": created.len(),
+                    "updated": updated.len(),
+                    "skipped": skipped.len(),
+                    "errors": errors.len(),
+                }),
+                ip,
+                user_agent: crate::http::extract::user_agent(&headers),
+                client_id: None,
+            },
+        )
+        .await;
+    }
 
     Ok(Json(json!({
+        "dry_run": body.dry_run,
         "created": created,
         "updated": updated,
         "skipped": skipped,
