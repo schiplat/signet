@@ -367,7 +367,7 @@ async fn revoke_my_other_sessions(
             }
         }
         None => {
-            revoke_all_sessions(&state.pool, user.id).await?;
+            crate::auth::session::revoke_all_sessions_notifying(&state, user.id).await?;
         }
     }
     Ok(Json(json!({ "ok": true })))
@@ -698,7 +698,7 @@ async fn change_password(
     };
     let revoked_sessions = match session_id {
         Some(id) => revoke_other_sessions(&state.pool, user.id, id).await?,
-        None => revoke_all_sessions(&state.pool, user.id).await?,
+        None => crate::auth::session::revoke_all_sessions_notifying(&state, user.id).await?,
     };
     let revoked_tokens = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user.id).await?;
 

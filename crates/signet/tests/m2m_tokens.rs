@@ -115,6 +115,70 @@ async fn introspect(state: &signet::state::AppState, body: String) -> Value {
     value
 }
 
+/// Only an access token is introspectable. An id_token is signed by the same
+/// key with the same issuer and carries no `token_use` at all, so signature and
+/// `iss` cannot distinguish it — a resource server that trusted this response
+/// would accept an RP's session token as an API credential.
+#[tokio::test]
+async fn an_id_token_is_not_introspectable_as_an_access_token() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let (client_id, secret) = create_client(&state, &["client_credentials"], json!({})).await;
+    let user = common::create_user(&state.pool, "").await;
+    let sub: String = sqlx::query_scalar("SELECT sub FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read sub");
+
+    let now = chrono::Utc::now().timestamp();
+    // Exactly what IdTokenClaims emits: no token_use, an at_hash, an aud.
+    let id_token = state
+        .keys
+        .encode(&json!({
+            "iss": state.config.issuer,
+            "sub": sub,
+            "aud": client_id,
+            "exp": now + 300,
+            "iat": now,
+            "at_hash": "abc123",
+        }))
+        .expect("sign an id_token");
+    let (status, body) = introspect_raw(
+        &state,
+        format!("client_id={client_id}&client_secret={secret}&token={id_token}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["active"],
+        json!(false),
+        "an id_token must not introspect as an access token"
+    );
+
+    // Same for a token with no discriminator at all (e.g. a logout hint's
+    // shape): absence must be inactive, never "active by default".
+    let bare = state
+        .keys
+        .encode(&json!({
+            "iss": state.config.issuer,
+            "sub": sub,
+            "aud": client_id,
+            "exp": now + 300,
+            "iat": now,
+        }))
+        .expect("sign a bare token");
+    let (_, body) = introspect_raw(
+        &state,
+        format!("client_id={client_id}&client_secret={secret}&token={bare}"),
+    )
+    .await;
+    assert_eq!(body["active"], json!(false), "{body}");
+
+    common::delete_user(&state.pool, user).await;
+}
+
 #[tokio::test]
 async fn client_credentials_mints_a_client_principal_without_a_refresh_token() {
     let Some(state) = common::state().await else {

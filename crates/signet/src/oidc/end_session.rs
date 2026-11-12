@@ -151,6 +151,16 @@ fn verify_hint(state: &AppState, hint: &str) -> AppResult<HintClaims> {
         .keys
         .verify::<Value>(hint, &validation)
         .map_err(|_| AppError::bad_request("invalid id_token_hint"))?;
+    // Shape check: only an id_token may act as a logout hint. An access token
+    // is signed by the same key with the same issuer, so signature + `iss`
+    // cannot tell them apart — its `token_use` and missing `at_hash` can. An
+    // access token carries no RP session semantics, and accepting one would
+    // let a stolen API token drive a logout (and then authorize a redirect).
+    if data.claims.get("token_use").is_some()
+        || data.claims.get("at_hash").and_then(Value::as_str).is_none()
+    {
+        return Err(AppError::bad_request("id_token_hint is not an id_token"));
+    }
     let sub = data
         .claims
         .get("sub")

@@ -1,5 +1,4 @@
 use crate::auth::password::{hash_password_offloaded, record_password_history};
-use crate::auth::session::revoke_all_sessions;
 use crate::error::{AppError, AppResult};
 use crate::models::{insert_user, normalize_username, NewUser, User};
 use crate::state::AppState;
@@ -662,7 +661,7 @@ async fn record_user_write(
         // clients go with them — for a disabled user they are already dead in
         // effect (the exchange re-checks status), the revocation is about the
         // re-enable.
-        if let Err(e) = revoke_all_sessions(&state.pool, after.id).await {
+        if let Err(e) = crate::auth::session::revoke_all_sessions_notifying(state, after.id).await {
             tracing::error!(error = %e, user_id = %after.id, "failed to revoke sessions on scim disable");
         }
         if let Err(e) = crate::oidc::revoke_refresh_tokens_for_user(&state.pool, after.id).await {
@@ -989,7 +988,7 @@ async fn delete_user(
     .await?;
 
     if changed.is_some() {
-        revoke_all_sessions(&state.pool, existing.id).await?;
+        crate::auth::session::revoke_all_sessions_notifying(&state, existing.id).await?;
         // The delete deactivates, so the OAuth clients' refresh tokens go too —
         // dead in effect while disabled, and the revocation is what keeps a
         // later `active: true` from resurrecting them.

@@ -1,5 +1,4 @@
 use crate::auth::password::set_user_password;
-use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -205,7 +204,7 @@ async fn confirm_reset(
     // Recovery must end everything the old credential authorized: the sessions
     // (possibly the attacker's) and the refresh tokens delegated to OAuth
     // clients, which outlive passwords unless revoked explicitly.
-    revoke_all_sessions(&state.pool, user_id).await?;
+    crate::auth::session::revoke_all_sessions_notifying(&state, user_id).await?;
     crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user_id).await?;
 
     Ok(Json(json!({ "ok": true })))

@@ -129,6 +129,23 @@ pub async fn revoke_all_sessions(pool: &PgPool, user_id: Uuid) -> AppResult<u64>
     Ok(res.rows_affected())
 }
 
+/// [`revoke_all_sessions`] plus the back-channel notification RPs need.
+///
+/// Revocation without notification leaves the RP's own session alive until its
+/// access token expires: the IdP has decided the account is gone, but the
+/// downstream application keeps serving. Every *account-wide* revocation
+/// (password change/reset, admin disable, MFA reset, SCIM disable, email change)
+/// goes through here. There is deliberately no `revoke_other_sessions` sibling:
+/// "sign out my other devices" is not an account-wide sign-out, and telling RPs
+/// to drop the subject would also end the session the user is keeping.
+pub async fn revoke_all_sessions_notifying(state: &AppState, user_id: Uuid) -> AppResult<u64> {
+    let revoked = revoke_all_sessions(&state.pool, user_id).await?;
+    if revoked > 0 {
+        crate::oidc::fire_backchannel_logout(state, user_id).await;
+    }
+    Ok(revoked)
+}
+
 /// Revokes every session of each user in `user_ids`, in one statement.
 ///
 /// The batch sibling of [`revoke_all_sessions`], for the bulk paths: a delete

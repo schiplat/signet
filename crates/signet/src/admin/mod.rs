@@ -5,7 +5,6 @@ use crate::auth::current_user;
 use crate::auth::password::{
     hash_password_offloaded, record_password_history, set_user_password, validate_password_strength,
 };
-use crate::auth::session::revoke_all_sessions;
 use crate::crypto::util::{random_token, sha256_hex};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::AuditIp;
@@ -1257,7 +1256,7 @@ async fn update_user(
             // the usual reason to reach for it is "this account is compromised",
             // so the attacker's live session and any delegated refresh token
             // must die with the old credential, not at the next login.
-            revoke_all_sessions(&state.pool, id).await?;
+            crate::auth::session::revoke_all_sessions_notifying(&state, id).await?;
             crate::oidc::revoke_refresh_tokens_for_user(&state.pool, id).await?;
         }
     }
@@ -1313,7 +1312,7 @@ async fn update_user(
     }
 
     if status == "disabled" {
-        revoke_all_sessions(&state.pool, id).await?;
+        crate::auth::session::revoke_all_sessions_notifying(&state, id).await?;
     }
 
     record(
@@ -1543,7 +1542,7 @@ async fn revoke_user_sessions(
     if !actor.can_mutate_user(&target) {
         return Err(AppError::forbidden("cannot modify this user"));
     }
-    let revoked = revoke_all_sessions(&state.pool, id).await?;
+    let revoked = crate::auth::session::revoke_all_sessions_notifying(&state, id).await?;
     record(
         &state,
         AuditEvent {
@@ -1683,7 +1682,7 @@ pub async fn set_user_access(state: &AppState, id: Uuid, access: UserAccess) -> 
         tx.commit().await?;
     }
     if access == UserAccess::Disabled {
-        revoke_all_sessions(&state.pool, id).await?;
+        crate::auth::session::revoke_all_sessions_notifying(state, id).await?;
         // Same retirement rule as the password events: a disabled account's
         // delegated refresh tokens must not survive into a later re-enable.
         crate::oidc::revoke_refresh_tokens_for_user(&state.pool, id).await?;

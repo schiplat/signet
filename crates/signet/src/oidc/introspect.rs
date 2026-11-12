@@ -70,13 +70,25 @@ pub async fn introspect(
         Ok(claims) => claims,
         Err(_) => return Ok(inactive()),
     };
+    // Only an access token is introspectable. Everything else this issuer signs
+    // is a *different* credential with a different audience contract — an
+    // id_token belongs to the RP's session, a logout hint authorizes a logout —
+    // and a resource server must not accept one as an API token. Signature and
+    // issuer alone cannot say which kind arrived: they are identical on every
+    // token this instance mints, and an id_token carries no `token_use` at all.
+    // So the discriminator is required, not optional: absence is inactive.
+    if claims.token_use.as_deref() != Some("access") {
+        return Ok(inactive());
+    }
     if claims.exp < chrono::Utc::now().timestamp() {
         return Ok(inactive());
     }
 
-    // User token: the account must still exist and be active — this is the
-    // check local JWT verification skips.
-    if claims.token_use.as_deref() == Some("access") && claims.sub != claims.aud {
+    // A user token's subject must still exist and be active — the check local
+    // JWT verification skips. A client-credentials token (sub == aud, both the
+    // client id) has no user row; its client row was already checked when the
+    // caller authenticated, and `load_client` refuses a disabled client.
+    if claims.sub != claims.aud {
         let active: Option<String> = sqlx::query_scalar("SELECT status FROM users WHERE sub = $1")
             .bind(&claims.sub)
             .fetch_optional(&state.pool)

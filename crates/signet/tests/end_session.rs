@@ -38,6 +38,10 @@ async fn create_client(state: &signet::state::AppState) {
 }
 
 /// An id_token this issuer signed, for `sub`.
+///
+/// Carries `at_hash`, which is what marks it as an id_token: an access token is
+/// signed by the same key with the same issuer, so the shape is the only thing
+/// that distinguishes them.
 fn id_token(state: &signet::state::AppState, sub: &str) -> String {
     let now = chrono::Utc::now().timestamp();
     state
@@ -48,8 +52,55 @@ fn id_token(state: &signet::state::AppState, sub: &str) -> String {
             "aud": CLIENT_ID,
             "exp": now + 300,
             "iat": now,
+            "at_hash": "abc123",
         }))
         .expect("sign an id_token")
+}
+
+/// An access token is not a logout hint, even though this issuer signed it.
+#[tokio::test]
+async fn an_access_token_is_not_accepted_as_a_hint() {
+    let Some(state) = common::state().await else {
+        return;
+    };
+    let user = common::create_user(&state.pool, "").await;
+    let (cookie, _) = session_cookie_for(&state, user).await;
+    let sub: String = sqlx::query_scalar("SELECT sub FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read sub");
+
+    let now = chrono::Utc::now().timestamp();
+    let access = state
+        .keys
+        .encode(&json!({
+            "iss": state.config.issuer,
+            "sub": sub,
+            "aud": CLIENT_ID,
+            "exp": now + 3600,
+            "iat": now,
+            "scope": "openid",
+            "token_use": "access",
+        }))
+        .expect("sign an access token");
+    let uri = format!(
+        "/oauth/end_session?id_token_hint={}",
+        urlencoding::encode(&access)
+    );
+    let (status, _) = call(&state, "GET", &uri, Some(&cookie), None).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an access token must not drive a logout"
+    );
+    assert_eq!(
+        sessions_for(&state, user).await,
+        1,
+        "the session must survive the refused hint"
+    );
+
+    common::delete_user(&state.pool, user).await;
 }
 
 async fn session_cookie_for(state: &signet::state::AppState, user: Uuid) -> (String, String) {

@@ -10,9 +10,7 @@ pub use totp_util::{
 
 use crate::audit::{record, AuditEvent};
 use crate::auth::password::set_user_password;
-use crate::auth::session::{
-    cookie_value, create_sign_in_session, current_user, revoke_all_sessions, session_cookie,
-};
+use crate::auth::session::{cookie_value, create_sign_in_session, current_user, session_cookie};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::AuditIp;
 use crate::models::{user_by_id, PublicUser, User};
@@ -494,7 +492,7 @@ pub(crate) async fn force_password_change(
     // runs *before* the fresh sign-in session is created, so every existing
     // session and delegated refresh token dies here: nothing of the old
     // credential survives into the new one.
-    revoke_all_sessions(&state.pool, user.id).await?;
+    crate::auth::session::revoke_all_sessions_notifying(&state, user.id).await?;
     crate::oidc::revoke_refresh_tokens_for_user(&state.pool, user.id).await?;
 
     sqlx::query("UPDATE users SET must_change_password = FALSE, updated_at = NOW() WHERE id = $1")
@@ -1200,7 +1198,7 @@ async fn admin_reset_mfa(
     let target = user_by_id(&state.pool, id).await?;
     clear_user_mfa(&state.pool, id).await?;
     // Also kill sessions so they re-auth under policy
-    revoke_all_sessions(&state.pool, id).await?;
+    crate::auth::session::revoke_all_sessions_notifying(&state, id).await?;
     record(
         &state,
         AuditEvent {
