@@ -102,6 +102,8 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/admin/users/{id}/disable` | 冻结 |
 | `POST` | `/api/v1/admin/users/{id}/enable` | 解冻 |
 | `POST` | `/api/v1/admin/users/batch-disable` | 批量冻结 `{ "ids": [] }` |
+| `POST` | `/api/v1/admin/users/import` | **admin** 批量导入 `{ users: [...], update?: bool }`，≤1000 行；逐行校验、行级错误不中断批次；`update=true` 时更新已存在账号的资料（**不改密码**）；每行写 `user.create` 审计，另写一条 `user.import` 汇总 |
+| `GET` | `/api/v1/admin/users/export` | **staff** 用户 CSV（邮箱/用户名/显示名/角色/状态/组/手机，公式中和） |
 | `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | 强制下线该用户全部会话 |
 
 `groups` 为用户组（`TEXT[]`），会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`，供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
@@ -201,6 +203,21 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 - `GET/POST /oauth/end_session`：统一登出。GET 必须携带 `id_token_hint`（验签、`sub` 与会话一致）；POST 不需要（Lax cookie 不随跨站表单发送）。`post_logout_redirect_uri` 须在该客户端的白名单内才回跳，`client_id` 与 hint 的 `aud` 同时出现时须一致。
 - `POST /oauth/revoke`：RFC 7009 吊销端点。表单字段 `token`、可选 `token_type_hint`；客户端须以 Basic 或 `client_id`+`client_secret` 认证。仅吊销 refresh token（access token 为无状态 JWT，无法服务端吊销）。无论 token 是否存在均返回 200。
 - `POST /oauth/register`：RFC 7591 动态客户端注册。需 `Authorization: Bearer <token>` 或表单 `initial_access_token`（单次使用，由管理员签发）。返回 `client_id`/`client_secret`。
+- `POST /oauth/introspect`：RFC 7662 令牌自省。客户端以 Basic 或 `client_id`+`client_secret` 认证；body `{ token }`。返回 `{ active: bool, ... }`：`active=false` 覆盖签名无效、已过期、**用户已禁用/删除**、客户端已禁用——这是本地验签 JWT 给不了的能力。未知 token 不报错（§2.2）。
+- `POST /oauth/token` 的 `grant_type=client_credentials`：机器对机器（M2M）令牌。客户端须在注册时被授予该 grant；无刷新令牌、无用户 claim，`sub` = `client_id`，scope 收敛到客户端登记列表（body `scope` 只能子集）。
+
+**Authorization Code 附加参数**
+
+| 参数 | 说明 |
+|------|------|
+| `max_age`（秒） | 层次升级（step-up）。会话年龄超过该值时销毁会话并强制重登录；`prompt=none` 下回 `error=login_required`；`max_age=0` 恒需新登录 |
+| `code_challenge` / `code_challenge_method` | 恒为 `S256`，强制，无开关 |
+
+`id_token` 附加 claim：`auth_time`（本次认证时间，来自授权码）、`email_verified`。`access_token` 亦携带 `email_verified` 与客户端自定义 claim。
+
+**每客户端额外 claim**（`client_apps.extra_claims`，Dashboard → Clients 编辑）：JSON 对象，值可为字面量（字符串/数字/布尔）或占位符 `$sub` / `$email` / `$username` / `$display_name` / `$phone`；合并进该客户端的 `id_token`、`access_token` 与 `/oauth/userinfo` 响应。占位符无法解析时**中止签发**（不发出缺 claim 的令牌）；M2M（无用户）令牌只保留字面量。
+
+**Back-Channel Logout**（`client_apps.backchannel_logout_uri`）：用户会话被终结（登出 / `end_session` / 管理员强制下线 / 改密或换邮箱）时，向持有该用户授权的每个登记客户端 POST 表单 `logout_token=<签名 JWT>`（含 `events` 成员与 `sub`，`exp` 120 秒）。best-effort：失败只记日志，RP 可另经自省或短 access token TTL 兜底。
 
 > **scope 裁剪**：`id_token` 与 `/oauth/userinfo` 均按已授权 scope 下发 claim——`email` 需 `email` scope、`name` 需 `profile` scope、`phone_number` 需 `phone` scope、`groups` 需 `groups` scope，`sub` 恒有。
 
@@ -210,6 +227,13 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 |-----------|------|
 | `POST /api/v1/password-reset/request` | body `{ email }`；生成 30 分钟有效的重置 token 并经 SMTP 发送。**未配置 `SIGNET_SMTP_HOST` 时返回 503**（不再假装成功；开发态可开 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回 `{ ok: true }` 防枚举；投递失败返回 502 |
 | `POST /api/v1/password-reset/confirm` | body `{ token, new_password }`；校验 token、应用密码策略、吊销全部会话 |
+
+### 自助换邮箱（需已验证当前邮箱）
+
+| 方法/路径 | 说明 |
+|-----------|------|
+| `POST /api/v1/me/email/change-request` | session；body `{ new_email }`。校验邮箱格式、与当前不同、域名白名单、未被占用；生成 30 分钟单次 token 投递到**新地址**（走 outbox 队列）。当前邮箱 `email_verified=false` 时返回 403 |
+| `GET /api/v1/me/email/confirm?token=` | 无需登录（链接即凭证）；单次消费。成功 → `302 /settings?email_changed=1`，过期 → `302 /settings?email_error=expired`，已被占用 → `302 /settings?email_error=taken`。成功时置 `email_verified=TRUE`，吊销全部会话与 refresh token，并触发 back-channel logout |
 
 ## 8. Passkeys（WebAuthn）
 

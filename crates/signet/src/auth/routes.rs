@@ -840,7 +840,7 @@ async fn email_change_confirm(
     .fetch_optional(&state.pool)
     .await?;
     let Some((user_id, new_email)) = row else {
-        return Err(AppError::bad_request("invalid or expired change token"));
+        return Ok(confirm_redirect(&state, EmailChangeOutcome::Expired));
     };
 
     // The address may have been taken between request and confirmation.
@@ -850,7 +850,7 @@ async fn email_change_confirm(
             .fetch_one(&state.pool)
             .await?;
     if exists > 0 {
-        return Err(AppError::bad_request("email already exists"));
+        return Ok(confirm_redirect(&state, EmailChangeOutcome::Taken));
     }
 
     let updated = sqlx::query_as::<_, crate::models::User>(&format!(
@@ -892,8 +892,25 @@ async fn email_change_confirm(
     .await;
 
     tracing::info!(user_id = %user_id, %new_email, "email changed via verified link");
-    Ok(Json(json!({
-        "ok": true,
-        "message": "email updated; sign in again with the new address"
-    })))
+
+    // The confirm link is clicked in a mail client — a 302 to the dashboard
+    // with a query flag beats a raw JSON document.
+    Ok(confirm_redirect(&state, EmailChangeOutcome::Applied))
+}
+
+enum EmailChangeOutcome {
+    Applied,
+    Expired,
+    Taken,
+}
+
+fn confirm_redirect(state: &AppState, outcome: EmailChangeOutcome) -> axum::response::Response {
+    // Relative target: the confirm link is on this very origin.
+    let _ = state;
+    let target = match outcome {
+        EmailChangeOutcome::Applied => "/settings?email_changed=1",
+        EmailChangeOutcome::Expired => "/settings?email_error=expired",
+        EmailChangeOutcome::Taken => "/settings?email_error=taken",
+    };
+    axum::response::Redirect::temporary(target).into_response()
 }

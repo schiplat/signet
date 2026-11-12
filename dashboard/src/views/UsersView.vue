@@ -5,9 +5,11 @@ import PageHeader from "@/components/ui/PageHeader.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { buttonClass } from "@/components/ui/button";
 import { useServerList } from "@/composables/useServerList";
 import { confirm } from "@/lib/confirm";
 import {
+  USERS_EXPORT_URL,
   batchDisableUsers,
   checkEmail,
   checkPhone,
@@ -16,6 +18,7 @@ import {
   deleteUser,
   disableUser,
   enableUser,
+  importUsers,
   listUsers,
   resetUserMfa,
   revokeUserSessions,
@@ -35,6 +38,9 @@ const saving = ref(false);
 const searchQuery = ref("");
 const selected = ref<Set<string>>(new Set());
 const batching = ref(false);
+const importing = ref(false);
+const importInput = ref<HTMLInputElement | null>(null);
+const importSummary = ref<string | null>(null);
 
 const formEmail = ref("");
 const formUsername = ref("");
@@ -485,6 +491,47 @@ async function onDelete(u: PublicUser) {
   }
 }
 
+async function onImportFile(event: Event) {
+  importSummary.value = null;
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  error.value = "";
+  importing.value = true;
+  try {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await file.text());
+    } catch {
+      error.value = "The file is not valid JSON";
+      return;
+    }
+    // Accept either a bare array or `{ users: [...] }`.
+    const users = Array.isArray(parsed)
+      ? parsed
+      : (parsed as { users?: unknown }).users;
+    if (!Array.isArray(users)) {
+      error.value = 'Expected a JSON array of users, or {"users": [...]}';
+      return;
+    }
+    const res = await importUsers(users, false);
+    importSummary.value = `Created ${res.created.length}, skipped ${res.skipped.length}, failed ${res.errors.length}`;
+    if (res.errors.length) {
+      error.value = res.errors
+        .slice(0, 5)
+        .map((e) => `row ${e.row}: ${e.error}`)
+        .join("; ");
+    }
+    await refresh();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Import failed";
+  } finally {
+    importing.value = false;
+    if (importInput.value) importInput.value.value = "";
+  }
+}
+
 async function onBatchDisable() {
   if (selectedCount.value === 0) return;
   if (
@@ -527,6 +574,24 @@ async function onBatchDisable() {
         >
           {{ batching ? "Freezing…" : `Freeze selected (${selectedCount})` }}
         </UiButton>
+        <input
+          ref="importInput"
+          type="file"
+          accept="application/json,.json"
+          class="hidden"
+          @change="onImportFile"
+        />
+        <UiButton
+          size="sm"
+          variant="secondary"
+          :disabled="importing"
+          @click="importInput?.click()"
+        >
+          {{ importing ? "Importing…" : "Import JSON" }}
+        </UiButton>
+        <a :href="USERS_EXPORT_URL" :class="buttonClass('secondary', 'sm')">
+          Export CSV
+        </a>
         <UiButton size="sm" @click="openCreate">
           <Plus class="h-4 w-4" />
           New User
@@ -535,6 +600,7 @@ async function onBatchDisable() {
     </PageHeader>
 
     <p v-if="error" class="field-error">{{ error }}</p>
+    <p v-if="importSummary" class="type-meta text-[12px]">{{ importSummary }}</p>
 
     <div
       v-if="initialLoading"
@@ -649,6 +715,11 @@ async function onBatchDisable() {
                   >
                     <span class="inline-flex items-center gap-1.5">
                       {{ u.email }}
+                      <span
+                        v-if="u.email_verified"
+                        class="ml-1 align-middle text-[10px] text-muted-foreground"
+                        title="Email verified"
+                      >✓</span>
                       <button
                         type="button"
                         class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground"

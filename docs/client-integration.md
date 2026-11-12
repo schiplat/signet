@@ -358,6 +358,78 @@ curl -sS "$ISSUER/health"
 
 ---
 
+## 10.5 机器对机器（M2M）与自省
+
+### Client Credentials
+
+客户端在 Dashboard → Clients 新建/编辑时勾选 `client_credentials`，即可用自身凭据换票：
+
+```bash
+curl -u "$CLIENT_ID:$CLIENT_SECRET" -X POST "$ISSUER/oauth/token" \
+  -d 'grant_type=client_credentials&scope=openid'
+```
+
+- 无用户、无 `refresh_token`、无 `id_token`；`sub` 即 `client_id`。
+- `scope` 收敛到客户端登记列表：请求只能是子集，超出返回 `400 invalid_scope`。
+- 只用于"系统对系统"调用。令牌里没有用户身份，业务侧应以 `sub == client_id`
+  判定这是服务身份，绝不能当作某个用户处理。
+
+### 令牌自省（RFC 7662）
+
+资源服务器不想本地验签、或需要**吊销即时可见**时：
+
+```bash
+curl -u "$CLIENT_ID:$CLIENT_SECRET" -X POST "$ISSUER/oauth/introspect" \
+  -d "token=$ACCESS_TOKEN"
+# {"active":true,"sub":"...","client_id":"...","scope":"...",
+#  "token_use":"access","exp":...,"iat":...,"iss":"..."}
+```
+
+`active=false` 覆盖：签名无效、已过期、**用户已禁用或删除**、客户端已禁用。
+这是本地验签 JWT 给不了的语义——密码被改、账号被冻结后，旧 access token 在
+下一次自省时立即失效。未知令牌返回 `{"active":false}` 而非错误（§2.2）。
+
+### 层次升级（Step-up）
+
+敏感操作要求"刚刚重新认证过"时，在 authorize 上加 `max_age=<秒>`：
+
+- 会话年龄超过该值 → 会话被销毁，用户必须重新登录；
+- 配合 `prompt=none` → 回 `error=login_required`，静默续期自行放弃；
+- `max_age=0` → 恒需新登录。
+
+`id_token` 的 `auth_time` 是实际认证时间，RP 可据此自行判定（例如后台要求
+`auth_time` 在 5 分钟内，前台只要求登录过）。
+
+### 客户端自定义 claim
+
+Dashboard → Clients 的 **Extra claims**（JSON 对象）合并进该客户端的
+`id_token`、`access_token` 与 `/oauth/userinfo`：
+
+```json
+{ "team": "infra", "employee_id": "$username" }
+```
+
+`$sub` / `$email` / `$username` / `$display_name` / `$phone` 按用户解析；
+值无法解析时**签发中止**（不会发出缺少 claim 的令牌，RP 不会静默拿到空值）。
+M2M 令牌没有用户，只保留字面量。
+
+### Back-Channel Logout
+
+Clients 编辑页的 **Back-channel logout URL**。用户会话被终结时（登出、
+`end_session`、管理员强制下线、改密或换邮箱），Signet 向该地址 POST：
+
+```
+logout_token=<签名 JWT>
+```
+
+JWT 声明：`iss` / `aud`（= 该客户端）/ `sub`（用户）/ `iat` / `exp`（120 秒）/
+`jti` / `events: {"http://schemas.openid.net/event/backchannel-logout": {}}`。
+
+RP 验签（签名与 `iss`）、核对 `aud` 是自己、按 `sub` 清本地会话即可，不需要浏览器
+回跳。投递是 best-effort（失败不重试），RP 应配合短 access token TTL 或自省兜底。
+
+---
+
 ## 11. 当前未提供（客户端勿依赖）
 
 - 无 `client_secret` 的公共客户端换票  

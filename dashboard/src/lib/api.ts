@@ -292,6 +292,35 @@ export async function updateRuntimeSettings(patch: Partial<RuntimeSettings>) {
   }>(res);
 }
 
+/** One row of POST /admin/users/import. */
+export type ImportUserRow = {
+  email: string;
+  username?: string | null;
+  display_name?: string | null;
+  role?: string;
+  groups?: string[] | null;
+  phone?: string | null;
+  password?: string | null;
+};
+
+export async function importUsers(users: ImportUserRow[], update: boolean) {
+  const res = await fetch("/api/v1/admin/users/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ users, update }),
+  });
+  return parseJson<{
+    created: string[];
+    updated: string[];
+    skipped: string[];
+    errors: { row: number; email: string; error: string }[];
+  }>(res);
+}
+
+/** Bulk CSV download; cookie-authenticated, so a plain link works. */
+export const USERS_EXPORT_URL = "/api/v1/admin/users/export";
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);
@@ -572,6 +601,9 @@ export type AdminClient = {
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   grant_types: string[];
+  /** Static or $field claims merged into this client's tokens. */
+  extra_claims: Record<string, unknown> | null;
+  backchannel_logout_uri: string | null;
   scopes: string[];
   enabled: boolean;
   ip_allowlist_enabled: boolean;
@@ -595,6 +627,9 @@ export async function createClient(body: {
   client_secret?: string;
   redirect_uris: string[];
   post_logout_redirect_uris?: string[];
+  grant_types?: string[];
+  extra_claims?: Record<string, unknown> | null;
+  backchannel_logout_uri?: string | null;
   scopes?: string[];
   ip_allowlist_enabled?: boolean;
   allowed_cidrs?: string[];
@@ -613,6 +648,9 @@ export async function updateClient(
   body: {
     redirect_uris?: string[];
     post_logout_redirect_uris?: string[];
+    grant_types?: string[];
+    extra_claims?: Record<string, unknown> | null;
+    backchannel_logout_uri?: string | null;
     scopes?: string[];
     ip_allowlist_enabled?: boolean;
     allowed_cidrs?: string[];

@@ -1824,6 +1824,7 @@ async fn import_users(
     }
 
     let mut created: Vec<String> = Vec::new();
+    let mut per_row_events: Vec<crate::audit::AuditEvent> = Vec::new();
     let mut updated: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
@@ -1948,7 +1949,22 @@ async fn import_users(
         new_user.phone = phone.as_deref();
         new_user.groups = &groups;
         match crate::models::insert_user(&state.pool, &new_user).await {
-            Ok(_) => created.push(email),
+            // Per-row user.create events: the aggregate import event records
+            // the batch, but the audit trail's promise is one traceable event
+            // per account.
+            Ok(created_user) => {
+                per_row_events.push(crate::audit::AuditEvent {
+                    actor: Some(actor.clone()),
+                    action: "user.create",
+                    resource_type: "user",
+                    resource_id: Some(created_user.id.to_string()),
+                    detail: json!({ "via": "import", "email": email }),
+                    ip: ip.clone(),
+                    user_agent: crate::http::extract::user_agent(&headers),
+                    client_id: None,
+                });
+                created.push(email);
+            }
             Err(e) => {
                 let msg = match &e {
                     sqlx::Error::Database(db) if db.constraint() == Some("users_email_key") => {
@@ -1963,6 +1979,8 @@ async fn import_users(
             }
         }
     }
+
+    crate::audit::record_many(&state, per_row_events).await;
 
     record(
         &state,

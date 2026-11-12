@@ -35,12 +35,18 @@ const formClientId = ref("");
 const formRedirects = ref("");
 const formPostLogoutRedirects = ref("");
 const formScopes = ref("");
+const formGrants = ref<string[]>(["authorization_code", "refresh_token"]);
+const formExtraClaims = ref("");
+const formBackchannel = ref("");
 const formIpAllowlist = ref(true);
 const formAllowedCidrs = ref("");
 
 const editRedirects = ref("");
 const editPostLogoutRedirects = ref("");
 const editScopes = ref("");
+const editGrants = ref<string[]>([]);
+const editExtraClaims = ref("");
+const editBackchannel = ref("");
 const editIpAllowlist = ref(true);
 const editAllowedCidrs = ref("");
 
@@ -157,6 +163,9 @@ function openCreate() {
   formRedirects.value = "";
   formPostLogoutRedirects.value = "";
   formScopes.value = "";
+  formGrants.value = ["authorization_code", "refresh_token"];
+  formExtraClaims.value = "";
+  formBackchannel.value = "";
   formIpAllowlist.value = true;
   formAllowedCidrs.value = "";
   showCreate.value = true;
@@ -167,6 +176,11 @@ function openEdit(c: AdminClient) {
   editRedirects.value = c.redirect_uris.join("\n");
   editPostLogoutRedirects.value = (c.post_logout_redirect_uris || []).join("\n");
   editScopes.value = (c.scopes || []).join("\n");
+  editGrants.value = c.grant_types || [];
+  editExtraClaims.value = c.extra_claims
+    ? JSON.stringify(c.extra_claims, null, 2)
+    : "";
+  editBackchannel.value = c.backchannel_logout_uri || "";
   editIpAllowlist.value = c.ip_allowlist_enabled;
   editAllowedCidrs.value = (c.allowed_cidrs || []).join("\n");
 }
@@ -179,10 +193,23 @@ async function onCreate() {
     const post_logout_redirect_uris = parseLines(formPostLogoutRedirects.value);
     const scopes = parseLines(formScopes.value);
     const allowed_cidrs = parseLines(formAllowedCidrs.value);
+    let extra: Record<string, unknown> | null = null;
+    if (formExtraClaims.value.trim()) {
+      try {
+        extra = JSON.parse(formExtraClaims.value);
+      } catch {
+        error.value = "Extra claims must be valid JSON";
+        creating.value = false;
+        return;
+      }
+    }
     const res = await createClient({
       client_id: formClientId.value,
       redirect_uris,
       post_logout_redirect_uris,
+      grant_types: formGrants.value,
+      extra_claims: extra,
+      backchannel_logout_uri: formBackchannel.value.trim() || null,
       scopes: scopes.length ? scopes : undefined,
       ip_allowlist_enabled: formIpAllowlist.value,
       allowed_cidrs,
@@ -208,9 +235,22 @@ async function onSaveEdit() {
   error.value = "";
   saving.value = true;
   try {
+    let extra: Record<string, unknown> | null = null;
+    if (editExtraClaims.value.trim()) {
+      try {
+        extra = JSON.parse(editExtraClaims.value);
+      } catch {
+        error.value = "Extra claims must be valid JSON";
+        saving.value = false;
+        return;
+      }
+    }
     await updateClient(editing.value.id, {
       redirect_uris: parseLines(editRedirects.value),
       post_logout_redirect_uris: parseLines(editPostLogoutRedirects.value),
+      grant_types: editGrants.value,
+      extra_claims: extra,
+      backchannel_logout_uri: editBackchannel.value.trim() || null,
       scopes: parseLines(editScopes.value),
       ip_allowlist_enabled: editIpAllowlist.value,
       allowed_cidrs: parseLines(editAllowedCidrs.value),

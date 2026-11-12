@@ -4,13 +4,13 @@
 //! retires everything the old email authorized (sessions, refresh tokens,
 //! back-channel logout) because the email is a recovery channel.
 //!
+//! Confirm answers a mail-client click with a 302 to a dashboard flag
+//! (`/settings?email_changed=1`, `/settings?email_error=...`), so an assertion
+//! here reads the `Location`, never a JSON body.
+//!
 //! Test code never lives in `src/` — see `.cursor/rules/test-directory.mdc`.
 
 mod common;
-
-fn tag(prefix: &str) -> String {
-    format!("{}-{}", prefix, Uuid::new_v4().simple())
-}
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -19,13 +19,19 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+fn tag(prefix: &str) -> String {
+    format!("{}-{}", prefix, Uuid::new_v4().simple())
+}
+
+/// Drives one request against the auth router and returns status, `Location`
+/// and body.
 async fn call(
     state: &signet::state::AppState,
     method: &str,
     uri: &str,
     cookie: Option<&str>,
     body: Option<Value>,
-) -> (StatusCode, Value) {
+) -> (StatusCode, Option<String>, Value) {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
@@ -47,6 +53,11 @@ async fn call(
         .await
         .expect("router answers");
     let status = response.status();
+    let location = response
+        .headers()
+        .get(axum::http::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let bytes = response
         .into_body()
         .collect()
@@ -55,23 +66,25 @@ async fn call(
         .to_bytes();
     (
         status,
+        location,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
 }
 
-/// Seeds a change request with a **known** token (the real request enqueues the
-/// token into the encrypted outbox, so the test plants the row directly and
-/// exercises the confirm path end-to-end from the link click onwards).
+/// Seeds a change request with a **known** token.
+///
+/// The real request path enqueues the token into the encrypted outbox, so a
+/// test cannot read it back; planting the row directly exercises the confirm
+/// endpoint from the link click onwards, which is the security-relevant half.
 async fn seed_change(state: &signet::state::AppState, user: Uuid, token: &str, new_email: &str) {
-    // Earlier failed runs may have left rows with the same deterministic
-    // token; clear by hash, whatever user they belong to.
     let token_hash = signet::crypto::util::sha256_hex(token);
+    // Earlier failed runs may have left a row with the same deterministic
+    // token; clear by hash, whatever user it belongs to.
     sqlx::query("DELETE FROM email_change_tokens WHERE token_hash = $1")
         .bind(&token_hash)
         .execute(&state.pool)
         .await
         .expect("clear prior change tokens");
-
     sqlx::query(
         r#"
         INSERT INTO email_change_tokens (id, user_id, token_hash, new_email, expires_at)
@@ -80,7 +93,7 @@ async fn seed_change(state: &signet::state::AppState, user: Uuid, token: &str, n
     )
     .bind(Uuid::new_v4())
     .bind(user)
-    .bind(token_hash)
+    .bind(&token_hash)
     .bind(new_email)
     .execute(&state.pool)
     .await
@@ -93,19 +106,15 @@ async fn a_verified_user_can_request_and_confirm_a_change() {
         return;
     };
     let user = common::create_user(&state.pool, "").await;
-    let token = signet::auth::session::create_session(&state.pool, user, 1, None, None)
+    let session = signet::auth::session::create_session(&state.pool, user, 1, None, None)
         .await
         .expect("session");
-    let cookie = format!("{}={token}", signet::auth::session::SESSION_COOKIE);
-    let old_email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-        .bind(user)
-        .fetch_one(&state.pool)
-        .await
-        .expect("read email");
+    let cookie = format!("{}={session}", signet::auth::session::SESSION_COOKIE);
     let new_email = format!("{}@changed.test", tag("ok"));
 
-    // Request: goes into the outbox (SMTP may be unconfigured; that's fine).
-    let (status, body) = call(
+    // Request: the verification email goes into the outbox (SMTP may be
+    // unconfigured; that is the outbox worker's concern, not this endpoint's).
+    let (status, _, body) = call(
         &state,
         "POST",
         "/me/email/change-request",
@@ -126,7 +135,7 @@ async fn a_verified_user_can_request_and_confirm_a_change() {
     let client_ref = tag("client");
     sqlx::query(
         "INSERT INTO client_apps (id, client_id, client_secret_hash, redirect_uris) \
-                 VALUES ($1, $2, 'x', ARRAY['http://localhost/cb'])",
+         VALUES ($1, $2, 'x', ARRAY['http://localhost/cb'])",
     )
     .bind(Uuid::new_v4())
     .bind(&client_ref)
@@ -146,9 +155,8 @@ async fn a_verified_user_can_request_and_confirm_a_change() {
     .await
     .expect("seed refresh token");
 
-    // Confirm via the planted link token.
     seed_change(&state, user, "link-token-1", &new_email).await;
-    let (status, body) = call(
+    let (status, location, _) = call(
         &state,
         "GET",
         "/me/email/confirm?token=link-token-1",
@@ -156,7 +164,12 @@ async fn a_verified_user_can_request_and_confirm_a_change() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(
+        location.as_deref(),
+        Some("/settings?email_changed=1"),
+        "success lands on the dashboard flag"
+    );
 
     let (email, verified): (String, bool) =
         sqlx::query_as("SELECT email, email_verified FROM users WHERE id = $1")
@@ -182,41 +195,41 @@ async fn a_verified_user_can_request_and_confirm_a_change() {
     .expect("count refresh tokens");
     assert_eq!(tokens, 0, "refresh tokens die with the old email");
 
-    // Single use: a second confirmation is refused.
-    seed_change(&state, user, "link-token-2", &new_email).await;
-    let (status, _) = call(
+    // Single use: a second link (even a fresh one) is spent only once — and
+    // replaying this one reports `expired` via the redirect, not an error page.
+    let (status, location, _) = call(
         &state,
         "GET",
-        "/me/email/confirm?token=link-token-2",
+        "/me/email/confirm?token=link-token-1",
         None,
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location.as_deref(), Some("/settings?email_error=expired"));
 
     common::delete_user(&state.pool, user).await;
-    let _ = old_email;
 }
 
 #[tokio::test]
-async fn confirm_refuses_expired_taken_and_tampered_tokens() {
+async fn confirm_refuses_expired_and_taken_targets() {
     let Some(state) = common::state().await else {
         return;
     };
     let user = common::create_user(&state.pool, "").await;
     let taken = format!("{}@changed.test", tag("taken"));
 
-    // Expired.
+    // Expired window.
     seed_change(&state, user, "expired-token", &taken).await;
     sqlx::query(
         "UPDATE email_change_tokens SET expires_at = NOW() - INTERVAL '1 minute' \
-                 WHERE new_email = $1",
+         WHERE new_email = $1",
     )
     .bind(&taken)
     .execute(&state.pool)
     .await
     .expect("expire the token");
-    let (status, body) = call(
+    let (status, location, _) = call(
         &state,
         "GET",
         "/me/email/confirm?token=expired-token",
@@ -224,9 +237,30 @@ async fn confirm_refuses_expired_taken_and_tampered_tokens() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location.as_deref(), Some("/settings?email_error=expired"));
+
+    // Taken address: another account owns it by the time the link is clicked.
+    let other = common::create_user(&state.pool, "").await;
+    let taken_email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+        .bind(other)
+        .fetch_one(&state.pool)
+        .await
+        .expect("read the other user's email");
+    seed_change(&state, user, "taken-token", &taken_email).await;
+    let (status, location, _) = call(
+        &state,
+        "GET",
+        "/me/email/confirm?token=taken-token",
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::TEMPORARY_REDIRECT);
+    assert_eq!(location.as_deref(), Some("/settings?email_error=taken"));
 
     common::delete_user(&state.pool, user).await;
+    common::delete_user(&state.pool, other).await;
 }
 
 #[tokio::test]
@@ -234,10 +268,9 @@ async fn request_refuses_unverified_current_email_and_taken_new_email() {
     let Some(state) = common::state().await else {
         return;
     };
-    let _ = common::admin_cookie(&state).await;
     let user = common::create_user(&state.pool, "").await;
-    // Make the current address unverified: the flow requires a verified
-    // starting point (an admin can fix it, the user cannot self-serve).
+    // An unverified starting address cannot self-serve a change; an admin can
+    // fix that state, the user cannot.
     sqlx::query("UPDATE users SET email_verified = FALSE WHERE id = $1")
         .bind(user)
         .execute(&state.pool)
@@ -246,13 +279,12 @@ async fn request_refuses_unverified_current_email_and_taken_new_email() {
     let session = signet::auth::session::create_session(&state.pool, user, 1, None, None)
         .await
         .expect("session");
-    let cookie2 = format!("{}={session}", signet::auth::session::SESSION_COOKIE);
-
-    let (status, _) = call(
+    let cookie = format!("{}={session}", signet::auth::session::SESSION_COOKIE);
+    let (status, _, _) = call(
         &state,
         "POST",
         "/me/email/change-request",
-        Some(&cookie2),
+        Some(&cookie),
         Some(json!({ "new_email": format!("{}@changed.test", tag("x")) })),
     )
     .await;
@@ -265,26 +297,16 @@ async fn request_refuses_unverified_current_email_and_taken_new_email() {
         .fetch_one(&state.pool)
         .await
         .expect("read taken email");
-    let _ = call(
-        &state,
-        "POST",
-        "/me/email/change-request",
-        Some(&cookie2),
-        Some(json!({ "new_email": taken_email })),
-    )
-    .await;
-    // Still unverified → the forbidden gate fires first; flip it to reach the
-    // taken-address check. (The first request above was refused with 403.)
     sqlx::query("UPDATE users SET email_verified = TRUE WHERE id = $1")
         .bind(user)
         .execute(&state.pool)
         .await
         .expect("verify");
-    let (status, body) = call(
+    let (status, _, body) = call(
         &state,
         "POST",
         "/me/email/change-request",
-        Some(&cookie2),
+        Some(&cookie),
         Some(json!({ "new_email": taken_email })),
     )
     .await;
