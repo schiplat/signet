@@ -328,7 +328,7 @@ async fn logout(
         }
         destroy_session(&state.pool, &token).await?;
     }
-    let jar = jar.add(clear_session_cookie(state.config.cookie_secure));
+    let jar = jar.add(clear_session_cookie(state.cookie_secure()));
     Ok((jar, Json(json!({ "ok": true }))))
 }
 
@@ -819,7 +819,7 @@ async fn email_change_request(
 
     let link = format!(
         "{}/api/v1/me/email/confirm?token={token}",
-        state.config.public_base()
+        state.public_base()
     );
     crate::outbox::enqueue_email(
         &state,

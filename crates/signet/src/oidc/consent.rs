@@ -51,8 +51,8 @@ pub async fn consent(
     // Same carve-out as authorize: the issuer's own test-callback URI is a
     // permitted redirect for every client, or a first-time test drive would
     // die here after authorize accepted it.
-    let test_redirect =
-        crate::oidc::test_callback::test_callback_url(state.config.public_base(), &body.client_id);
+    let base = state.public_base();
+    let test_redirect = crate::oidc::test_callback::test_callback_url(&base, &body.client_id);
     if !client.redirect_uris.iter().any(|u| u == &body.redirect_uri)
         && body.redirect_uri != test_redirect
     {

@@ -806,7 +806,8 @@ async fn a_full_sync_creates_the_users_and_a_rerun_changes_nothing() {
         assert_eq!(ada, "ada@example.com", "the planner lowercases the email");
         let (username, display_name, groups): (Option<String>, String, Vec<String>) =
             sqlx::query_as(
-                "SELECT username, display_name, directory_groups FROM users WHERE email = $1",
+                "SELECT username, display_name, signet_group_names(directory_groups) AS directory_groups \
+                 FROM users WHERE email = $1",
             )
             .bind(&ada)
             .fetch_one(&state.pool)

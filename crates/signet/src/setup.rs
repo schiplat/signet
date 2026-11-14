@@ -124,7 +124,7 @@ async fn setup_admin(
     .await?;
     let jar = jar.add(session_cookie(
         &token,
-        state.config.cookie_secure,
+        state.cookie_secure(),
         state.rt().session_ttl_hours,
     ));
 

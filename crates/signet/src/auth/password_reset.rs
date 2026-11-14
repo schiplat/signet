@@ -108,10 +108,7 @@ async fn request_reset(
         .execute(&state.pool)
         .await?;
 
-        let link = format!(
-            "{}/reset-password?token={token}",
-            state.config.public_base()
-        );
+        let link = format!("{}/reset-password?token={token}", state.public_base());
         // The body carries the live token, so it is logged only behind the dev
         // opt-in — a reset link in a log stream is a working account takeover
         // for anyone who can read the logs.

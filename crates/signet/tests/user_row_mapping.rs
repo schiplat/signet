@@ -105,7 +105,10 @@ fn the_column_list_covers_every_field() {
         "updated_at",
     ] {
         assert!(
-            cols.split(',').any(|c| c.trim() == field),
+            cols.split(',').any(|c| {
+                let c = c.trim();
+                c == field || c.ends_with(&format!(" AS {field}"))
+            }),
             "USER_COLS must list `{field}`"
         );
     }
@@ -123,7 +126,17 @@ fn the_alias_helper_qualifies_every_column() {
     let qualified: Vec<&str> = aliased.split(',').map(str::trim).collect();
     assert_eq!(plain.len(), qualified.len());
     for (plain, qualified) in plain.iter().zip(qualified.iter()) {
-        assert_eq!(*qualified, format!("u.{plain}"));
+        // The two group columns are function calls, not bare columns: the
+        // alias goes inside the call and the output name stays `groups` /
+        // `directory_groups`.
+        let expected = if plain.starts_with("signet_group_names(groups)") {
+            "signet_group_names(u.groups) AS groups".to_string()
+        } else if plain.starts_with("signet_group_names(directory_groups)") {
+            "signet_group_names(u.directory_groups) AS directory_groups".to_string()
+        } else {
+            format!("u.{plain}")
+        };
+        assert_eq!(*qualified, expected);
     }
 }
 
@@ -149,7 +162,7 @@ async fn a_user_loads_through_the_scim_projection() {
         INSERT INTO users (id, sub, email, display_name, password_hash, status, role,
                            groups, external_id)
         VALUES ($1, $2, $3, 'Projection User', 'not-a-real-hash', 'active', 'member',
-                ARRAY['cn=ops'], 'upstream-7')
+                signet_group_ids(ARRAY['cn=ops']), 'upstream-7')
         "#,
     )
     .bind(user_id)
@@ -211,7 +224,8 @@ async fn seeded_user_with_session(pool: &PgPool) -> (Uuid, String) {
         r#"
         INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role,
                            directory_groups)
-        VALUES ($1, $2, $3, $4, 'Contract User', '', 'active', 'member', ARRAY['cn=ops'])
+        VALUES ($1, $2, $3, $4, 'Contract User', '', 'active', 'member',
+                signet_group_ids(ARRAY['cn=ops'], 'directory'))
         "#,
     )
     .bind(user_id)

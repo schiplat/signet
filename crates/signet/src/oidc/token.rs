@@ -310,7 +310,7 @@ async fn issue_client_credentials(
     let now = Utc::now();
     let access_exp = now + Duration::seconds(state.rt().access_token_ttl_secs);
     let mut claims = serde_json::json!({
-        "iss": state.config.issuer,
+        "iss": state.issuer(),
         "sub": client.client_id,
         "aud": client.client_id,
         "exp": access_exp.timestamp(),
@@ -504,7 +504,7 @@ async fn build_token_response(
     let id_exp = now + Duration::seconds(state.rt().id_token_ttl_secs);
 
     let mut access_claims = serde_json::to_value(AccessTokenClaims {
-        iss: state.config.issuer.clone(),
+        iss: state.issuer(),
         sub: user.sub.clone(),
         aud: client.client_id.clone(),
         exp: access_exp.timestamp(),
@@ -528,7 +528,7 @@ async fn build_token_response(
     let access_token = state.keys.load().encode(&access_claims)?;
 
     let mut id_claims = serde_json::to_value(IdTokenClaims {
-        iss: state.config.issuer.clone(),
+        iss: state.issuer(),
         sub: user.sub.clone(),
         aud: client.client_id.clone(),
         exp: id_exp.timestamp(),

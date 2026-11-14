@@ -99,11 +99,14 @@ async fn patch_members(
 
 /// The users carrying `name`, as the database sees it.
 async fn carriers(pool: &PgPool, name: &str) -> Vec<Uuid> {
-    sqlx::query_scalar("SELECT id FROM users WHERE groups @> ARRAY[$1::text] ORDER BY email")
-        .bind(name)
-        .fetch_all(pool)
-        .await
-        .expect("read the membership")
+    sqlx::query_scalar(
+        "SELECT u.id FROM users u JOIN scim_groups g ON g.id = ANY(u.groups) \
+         WHERE g.display_name = $1 AND g.deleted_at IS NULL ORDER BY u.email",
+    )
+    .bind(name)
+    .fetch_all(pool)
+    .await
+    .expect("read the membership")
 }
 
 /// Sorts a set of ids, so that two reads of the same membership compare equal

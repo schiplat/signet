@@ -12,7 +12,7 @@ defineEmits<{ toggle: [column: string] }>();
   <th class="px-5 py-2.5 text-left">
     <button
       type="button"
-      class="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground transition-colors hover:text-foreground"
+      class="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80 transition-colors hover:text-foreground"
       @click="$emit('toggle', column)"
     >
       {{ label }}

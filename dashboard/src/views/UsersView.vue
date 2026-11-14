@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { Check, Copy, Plus, Trash2, UserRound } from "@lucide/vue";
+import { Check, Copy, Download, LogOut, Power, PowerOff, ShieldCheck, Trash2, Upload, UserRound, UserRoundX } from "@lucide/vue";
 import { computed, onMounted, ref, watch } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
+import UsersToolbar from "@/components/directory/UsersToolbar.vue";
+import RowActionsMenu, { type RowActionItem } from "@/components/ui/RowActionsMenu.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
@@ -21,16 +23,43 @@ import {
   importUsers,
   listUsers,
   resetUserMfa,
+  removeGroupMember,
   revokeUserSessions,
   updateUser,
   type AdminUser,
   type AdminUserSortKey,
+  type ImportUserRow,
   type PublicUser,
   type UserRole,
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 
 const auth = useAuthStore();
+
+const props = withDefaults(
+  defineProps<{
+    /** Rendered inside Directory: no page header, compact action row. */
+    embedded?: boolean;
+    /** A group uuid, or "ungrouped"; absent means every user. */
+    groupId?: string | null;
+    includeDescendants?: boolean;
+    /** Prefills the new-user form with the selected group's name. */
+    groupName?: string | null;
+    groupSource?: "local" | "scim" | "directory" | null;
+    /** Bumped by the parent after membership writes to force a reload. */
+    refreshKey?: number;
+  }>(),
+  {
+    embedded: false,
+    groupId: null,
+    includeDescendants: false,
+    groupName: null,
+    groupSource: null,
+    refreshKey: 0,
+  },
+);
+const emit = defineEmits<{ membershipChanged: [] }>();
+
 const showCreate = ref(false);
 const editing = ref<PublicUser | null>(null);
 const creating = ref(false);
@@ -41,6 +70,11 @@ const batching = ref(false);
 const importing = ref(false);
 const importInput = ref<HTMLInputElement | null>(null);
 const importSummary = ref<string | null>(null);
+const showImport = ref(false);
+const pendingFileName = ref("");
+const pendingUsers = ref<ImportUserRow[] | null>(null);
+const importPreview = ref<Awaited<ReturnType<typeof importUsers>> | null>(null);
+const importError = ref("");
 
 const formEmail = ref("");
 const formUsername = ref("");
@@ -89,6 +123,8 @@ const {
         dir,
         limit,
         offset,
+        group_id: props.groupId,
+        include_descendants: props.includeDescendants,
       });
       return { items: rows, total: matched };
     },
@@ -96,6 +132,29 @@ const {
     initialDir: "desc",
     search: searchQuery,
   });
+
+// The directory tree is the filter: a new node starts a new result set.
+watch(
+  () => [props.groupId, props.includeDescendants] as const,
+  () => {
+    page.value = 1;
+    void reload();
+  },
+);
+watch(
+  () => props.refreshKey,
+  () => void reload(),
+);
+
+const exportUrl = computed(() => {
+  const qs = new URLSearchParams();
+  if (props.groupId) qs.set("group_id", props.groupId);
+  if (props.includeDescendants) qs.set("include_descendants", "true");
+  const suffix = qs.toString();
+  return suffix ? `${USERS_EXPORT_URL}?${suffix}` : USERS_EXPORT_URL;
+});
+
+defineExpose({ reload });
 
 const selectableOnPage = computed(() =>
   pageItems.value.filter(
@@ -261,7 +320,7 @@ function openCreate() {
   formPassword.value = "";
   formDisplayName.value = "";
   formRole.value = "member";
-  formGroups.value = "";
+  formGroups.value = props.groupName ?? "";
   formPhone.value = "";
   formMustChangePassword.value = false;
   emailCheckState.value = "idle";
@@ -491,20 +550,39 @@ async function onDelete(u: PublicUser) {
   }
 }
 
+function openImport() {
+  importError.value = "";
+  importPreview.value = null;
+  pendingUsers.value = null;
+  pendingFileName.value = "";
+  if (importInput.value) importInput.value.value = "";
+  showImport.value = true;
+}
+
+function closeImport() {
+  showImport.value = false;
+  importError.value = "";
+  importPreview.value = null;
+  pendingUsers.value = null;
+  if (importInput.value) importInput.value.value = "";
+}
+
 async function onImportFile(event: Event) {
-  importSummary.value = null;
+  importError.value = "";
+  importPreview.value = null;
+  pendingUsers.value = null;
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
+  pendingFileName.value = file.name;
 
-  error.value = "";
   importing.value = true;
   try {
     let parsed: unknown;
     try {
       parsed = JSON.parse(await file.text());
     } catch {
-      error.value = "The file is not valid JSON";
+      importError.value = "The file is not valid JSON";
       return;
     }
     // Accept either a bare array or `{ users: [...] }`.
@@ -512,40 +590,41 @@ async function onImportFile(event: Event) {
       ? parsed
       : (parsed as { users?: unknown }).users;
     if (!Array.isArray(users)) {
-      error.value = 'Expected a JSON array of users, or {"users": [...]}';
+      importError.value = 'Expected a JSON array of users, or {"users": [...]}';
+      return;
+    }
+    if (users.length === 0) {
+      importError.value = "The file contains no users";
       return;
     }
     // Validate the whole batch first: dry_run runs every gate server-side and
     // writes nothing, so a bad file is caught before any account changes.
-    const preview = await importUsers(users, false, true);
+    const preview = await importUsers(users as ImportUserRow[], false, true);
     if (preview.errors.length) {
-      error.value =
-        `Import preview found ${preview.errors.length} problem row(s); nothing was written. ` +
+      importError.value =
+        `${preview.errors.length} problem row(s) found; nothing was written. ` +
         preview.errors
           .slice(0, 5)
           .map((e) => `row ${e.row}: ${e.error}`)
           .join("; ");
       return;
     }
-    const plan =
-      `Preview OK — would create ${preview.created.length}` +
-      (preview.updated.length
-        ? `, update ${preview.updated.length}`
-        : "") +
-      (preview.skipped.length
-        ? `, skip ${preview.skipped.length}`
-        : "") +
-      ". Commit this import?";
-    if (
-      !(await confirm({
-        title: "Import users?",
-        message: plan,
-        confirmText: "Import",
-      }))
-    ) {
-      return;
-    }
-    const res = await importUsers(users, false);
+    pendingUsers.value = users as ImportUserRow[];
+    importPreview.value = preview;
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : "Import preview failed";
+  } finally {
+    importing.value = false;
+    if (importInput.value) importInput.value.value = "";
+  }
+}
+
+async function commitImport() {
+  if (!pendingUsers.value) return;
+  importError.value = "";
+  importing.value = true;
+  try {
+    const res = await importUsers(pendingUsers.value, false);
     importSummary.value = `Created ${res.created.length}, skipped ${res.skipped.length}, failed ${res.errors.length}`;
     if (res.errors.length) {
       error.value = res.errors
@@ -553,12 +632,78 @@ async function onImportFile(event: Event) {
         .map((e) => `row ${e.row}: ${e.error}`)
         .join("; ");
     }
+    closeImport();
     await refresh();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : "Import failed";
+    importError.value = e instanceof Error ? e.message : "Import failed";
   } finally {
     importing.value = false;
-    if (importInput.value) importInput.value.value = "";
+  }
+}
+
+// Row actions: Edit stays inline (frequent); the rest live in the menu.
+function rowActions(u: PublicUser): RowActionItem[] {
+  if (!canMutate(u)) return [];
+  const items: RowActionItem[] = [];
+  if (u.status === "active" && u.id !== auth.user?.id) {
+    items.push({ key: "disable", label: "Freeze", icon: PowerOff });
+  }
+  if (u.status === "disabled" && u.can_enable) {
+    items.push({ key: "enable", label: "Unfreeze", icon: Power });
+  }
+  if (u.status === "active") {
+    items.push({
+      key: "revoke",
+      label: "Revoke sessions",
+      icon: LogOut,
+      title: "Sign out all active sessions",
+    });
+  }
+  if (auth.isAdmin && u.totp_enabled) {
+    items.push({ key: "reset-mfa", label: "Reset 2FA", icon: ShieldCheck });
+  }
+  if (
+    props.groupId &&
+    props.groupId !== "ungrouped" &&
+    props.groupSource === "local" &&
+    canMutate(u)
+  ) {
+    items.push({
+      key: "remove-group",
+      label: "Remove from this group",
+      icon: UserRoundX,
+    });
+  }
+  if (auth.canDeleteUsers && u.id !== auth.user?.id) {
+    items.push({
+      key: "delete",
+      label: "Delete",
+      icon: Trash2,
+      danger: true,
+      separator: true,
+    });
+  }
+  return items;
+}
+
+function onRowAction(u: PublicUser, key: string) {
+  if (key === "disable") void onDisable(u);
+  else if (key === "enable") void onEnable(u);
+  else if (key === "revoke") void onRevokeSessions(u);
+  else if (key === "reset-mfa") void onResetMfa(u);
+  else if (key === "delete") void onDelete(u);
+  else if (key === "remove-group") void onRemoveFromGroup(u);
+}
+
+async function onRemoveFromGroup(u: PublicUser) {
+  if (!props.groupId) return;
+  error.value = "";
+  try {
+    await removeGroupMember(props.groupId, u.id);
+    await reload();
+    emit("membershipChanged");
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Remove from group failed";
   }
 }
 
@@ -591,41 +736,19 @@ async function onBatchDisable() {
 <template>
   <div class="space-y-6">
     <PageHeader
+      v-if="!embedded"
       title="Users"
       description="Manage Signet accounts. Freeze/edit for staff; delete is admin-only."
     >
       <template #actions>
-        <UiButton
-          v-if="selectedCount > 0"
-          size="sm"
-          variant="destructive"
-          :disabled="batching"
-          @click="onBatchDisable"
-        >
-          {{ batching ? "Freezing…" : `Freeze selected (${selectedCount})` }}
-        </UiButton>
-        <input
-          ref="importInput"
-          type="file"
-          accept="application/json,.json"
-          class="hidden"
-          @change="onImportFile"
+        <UsersToolbar
+          :selected-count="selectedCount"
+          :batching="batching"
+          :export-url="exportUrl"
+          @freeze="onBatchDisable"
+          @import-json="openImport"
+          @create="openCreate"
         />
-        <UiButton
-          size="sm"
-          variant="secondary"
-          :disabled="importing"
-          @click="importInput?.click()"
-        >
-          {{ importing ? "Importing…" : "Import JSON" }}
-        </UiButton>
-        <a :href="USERS_EXPORT_URL" :class="buttonClass('secondary', 'sm')">
-          Export CSV
-        </a>
-        <UiButton size="sm" @click="openCreate">
-          <Plus class="h-4 w-4" />
-          New User
-        </UiButton>
       </template>
     </PageHeader>
 
@@ -640,9 +763,29 @@ async function onBatchDisable() {
     </div>
     <div
       v-else
-      class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm transition-opacity"
+      class="surface-card overflow-hidden transition-opacity"
       :class="loading ? 'opacity-60' : ''"
     >
+      <div
+        class="flex flex-wrap items-center justify-between gap-2 border-b border-border/30 px-5 py-3"
+      >
+        <input
+          v-model="searchQuery"
+          type="search"
+          placeholder="Search users…"
+          class="w-full max-w-xs rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/50 focus:ring-1 focus:ring-primary/10"
+        />
+        <UsersToolbar
+          v-if="embedded"
+          :selected-count="selectedCount"
+          :batching="batching"
+          :export-url="exportUrl"
+          @freeze="onBatchDisable"
+          @import-json="openImport"
+          @create="openCreate"
+        />
+      </div>
+
       <div
         v-if="total === 0 && !searchQuery.trim()"
         class="flex flex-col items-center justify-center py-16 text-muted-foreground"
@@ -650,27 +793,17 @@ async function onBatchDisable() {
         <UserRound class="mb-3 h-10 w-10 text-muted-foreground/20" />
         <p class="text-sm">No users</p>
       </div>
+      <div
+        v-else-if="pageItems.length === 0"
+        class="px-5 py-12 text-center text-sm text-muted-foreground"
+      >
+        No users match “{{ searchQuery }}”
+      </div>
       <template v-else>
-        <div class="border-b border-border/30 px-5 py-3">
-          <input
-            v-model="searchQuery"
-            type="search"
-            placeholder="Search users…"
-            class="w-full max-w-xs rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/50 focus:ring-1 focus:ring-primary/10"
-          />
-        </div>
-
-        <div
-          v-if="pageItems.length === 0"
-          class="px-5 py-12 text-center text-sm text-muted-foreground"
-        >
-          No users match “{{ searchQuery }}”
-        </div>
-        <template v-else>
           <div class="overflow-x-auto">
             <table class="w-full text-[13px]">
               <thead>
-                <tr class="border-b border-border/30 bg-muted/10">
+                <tr class="border-b border-border/50">
                   <th class="w-10 px-5 py-2.5 text-left">
                     <input
                       type="checkbox"
@@ -692,19 +825,16 @@ async function onBatchDisable() {
                     :indicator="sortIndicator('display_name')"
                     @toggle="toggleSort"
                   />
-                  <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
-                    Phone
-                  </th>
                   <SortableTh
                     label="Role"
                     column="role"
                     :indicator="sortIndicator('role')"
                     @toggle="toggleSort"
                   />
-                  <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                  <th class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                     MFA
                   </th>
-                  <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                  <th class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                     SSO
                   </th>
                   <SortableTh
@@ -713,19 +843,19 @@ async function onBatchDisable() {
                     :indicator="sortIndicator('status')"
                     @toggle="toggleSort"
                   />
-                  <th class="w-52 px-5 py-2.5 text-right text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                  <th class="px-5 py-2.5 text-right text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                     Actions
                   </th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-border/20">
+              <tbody>
                 <tr
                   v-for="u in pageItems"
                   :key="u.id"
                   :class="
                     u.status === 'disabled'
-                      ? 'bg-destructive/[0.04] text-muted-foreground hover:bg-destructive/[0.07]'
-                      : 'hover:bg-muted/5'
+                      ? 'border-b border-border/40 bg-destructive/[0.04] text-muted-foreground last:border-0 hover:bg-destructive/[0.07]'
+                      : 'border-b border-border/40 last:border-0 hover:bg-muted/5'
                   "
                 >
                   <td class="px-5 py-3">
@@ -792,7 +922,6 @@ async function onBatchDisable() {
                     </span>
                   </td>
                   <td class="px-5 py-3 text-xs">{{ u.display_name }}</td>
-                  <td class="px-5 py-3 text-xs">{{ u.phone || "—" }}</td>
                   <td class="px-5 py-3 text-xs">{{ u.role }}</td>
                   <td class="px-5 py-3 text-xs">
                     <span
@@ -861,69 +990,35 @@ async function onBatchDisable() {
                     </div>
                     <span v-else class="text-foreground">{{ u.status }}</span>
                   </td>
-                  <td class="space-x-1 whitespace-nowrap px-5 py-3 text-right">
+                  <td class="whitespace-nowrap px-5 py-3 text-right align-middle">
+                    <div class="flex items-center justify-end gap-1">
                     <UiButton
                       v-if="canMutate(u)"
                       variant="ghost"
                       size="sm"
+                      class="text-[13px] font-normal"
                       @click="openEdit(u)"
                     >
                       Edit
                     </UiButton>
-                    <UiButton
-                      v-if="u.status === 'active' && u.id !== auth.user?.id && canMutate(u)"
-                      variant="ghost"
-                      size="sm"
-                      @click="onDisable(u)"
-                    >
-                      Freeze
-                    </UiButton>
                     <!-- An Unfreeze that an upstream would override is not
                          offered: it returns 200, changes nothing, and the only
-                         thing the operator learns is that the button lies. -->
-                    <UiButton
-                      v-if="u.status === 'disabled' && canMutate(u) && u.can_enable"
-                      variant="ghost"
-                      size="sm"
-                      @click="onEnable(u)"
-                    >
-                      Unfreeze
-                    </UiButton>
+                         thing the operator learns is that the button lies. The
+                         hold stays visible inline — it is state, not an action. -->
                     <span
-                      v-else-if="u.status === 'disabled' && canMutate(u)"
-                      class="text-[11px] text-muted-foreground"
+                      v-if="u.status === 'disabled' && canMutate(u) && !u.can_enable"
+                      class="text-[13px] text-muted-foreground"
                       :title="`Disabled by ${u.disabled_by.join(', ')} — releasing the local hold would not bring the account back`"
                     >
                       Held upstream
                     </span>
-                    <UiButton
-                      v-if="u.status === 'active' && canMutate(u)"
-                      variant="ghost"
-                      size="sm"
-                      title="Sign out all active sessions"
-                      @click="onRevokeSessions(u)"
-                    >
-                      Revoke sessions
-                    </UiButton>
-                    <UiButton
-                      v-if="auth.isAdmin && u.totp_enabled"
-                      variant="ghost"
-                      size="sm"
-                      title="Reset 2FA"
-                      @click="onResetMfa(u)"
-                    >
-                      Reset 2FA
-                    </UiButton>
-                    <UiButton
-                      v-if="auth.canDeleteUsers && u.id !== auth.user?.id"
-                      variant="ghost"
-                      size="sm"
-                      title="Delete"
-                      @click="onDelete(u)"
-                    >
-                      <Trash2 class="h-3.5 w-3.5 text-destructive" />
-                      Delete
-                    </UiButton>
+                    <RowActionsMenu
+                      v-if="rowActions(u).length"
+                      :items="rowActions(u)"
+                      label="More actions"
+                      @select="(key) => onRowAction(u, key)"
+                    />
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -937,7 +1032,6 @@ async function onBatchDisable() {
             :range-label="rangeLabel"
           />
         </template>
-      </template>
     </div>
 
     <Teleport to="body">
@@ -1028,6 +1122,96 @@ async function onBatchDisable() {
               </UiButton>
             </div>
           </form>
+        </div>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div
+        v-if="showImport"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
+        <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="closeImport" />
+        <div
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+        >
+          <h3 class="mb-5 text-[15px] font-semibold">Import users from JSON</h3>
+
+          <div class="space-y-3">
+            <div>
+              <p class="mb-1 block text-[12px] font-medium">1. Get the template</p>
+              <p class="type-meta mb-2">
+                Only <span class="font-medium text-foreground">email</span> is
+                required; <code class="rounded bg-muted px-1 py-0.5 text-[11px]">username</code>,
+                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">display_name</code>,
+                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">role</code>
+                (member/manager/admin),
+                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">groups</code>,
+                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">phone</code> and
+                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">password</code>
+                are optional. Omit password for a passwordless (SSO/reset) account.
+              </p>
+              <a
+                href="/users-import-template.json"
+                download
+                :class="buttonClass('secondary', 'sm')"
+              >
+                <Download class="h-4 w-4" />
+                Download template
+              </a>
+            </div>
+
+            <div>
+              <p class="mb-1 block text-[12px] font-medium">2. Upload the filled-in file</p>
+              <input
+                ref="importInput"
+                type="file"
+                accept="application/json,.json"
+                class="hidden"
+                @change="onImportFile"
+              />
+              <UiButton
+                type="button"
+                variant="secondary"
+                size="sm"
+                :disabled="importing"
+                @click="importInput?.click()"
+              >
+                <Upload class="h-4 w-4" />
+                Choose JSON file…
+              </UiButton>
+              <span v-if="pendingFileName" class="ml-2 text-[12px] text-muted-foreground">
+                {{ pendingFileName }}
+              </span>
+            </div>
+          </div>
+
+          <p v-if="importError" class="field-error mt-4">{{ importError }}</p>
+
+          <div
+            v-if="importPreview"
+            class="mt-4 rounded-xl border border-border/50 bg-muted/40 p-3 text-[12px]"
+          >
+            Preview OK — would create
+            {{ importPreview.created.length }}<template v-if="importPreview.updated.length">,
+            update {{ importPreview.updated.length }}</template><template v-if="importPreview.skipped.length">,
+            skip {{ importPreview.skipped.length }}</template>.
+            Nothing is written until you confirm.
+          </div>
+
+          <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <UiButton type="button" variant="ghost" size="sm" @click="closeImport">
+              Cancel
+            </UiButton>
+            <UiButton
+              type="button"
+              size="sm"
+              :disabled="!importPreview || importing"
+              @click="commitImport"
+            >
+              {{ importing ? "Working…" : "Import" }}
+            </UiButton>
+          </div>
         </div>
       </div>
     </Teleport>

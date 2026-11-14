@@ -515,6 +515,150 @@ export async function resetBrandingSettings() {
   return parseJson<{ name: string; overridden: boolean }>(res);
 }
 
+// ── Groups / departments ─────────────────────────────────────────────────
+
+export type GroupKind = "group" | "department";
+export type GroupSource = "local" | "scim" | "directory";
+
+export type AdminGroup = {
+  id: string;
+  display_name: string;
+  parent_id: string | null;
+  kind: GroupKind;
+  /** Who owns the node: only `local` nodes are editable in the dashboard. */
+  source: GroupSource;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GroupMember = {
+  id: string;
+  email: string;
+  display_name: string;
+  status: string;
+};
+
+export async function listGroups() {
+  const res = await fetch("/api/v1/admin/groups", { credentials: "include" });
+  return parseJson<AdminGroup[]>(res);
+}
+
+export async function createGroup(body: {
+  name: string;
+  kind?: GroupKind;
+  parent_id?: string | null;
+}) {
+  const res = await fetch("/api/v1/admin/groups", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<AdminGroup>(res);
+}
+
+export async function updateGroup(
+  id: string,
+  body: {
+    name?: string;
+    kind?: GroupKind;
+    parent_id?: string | null;
+    /** Required to move to the root; an absent `parent_id` means "keep". */
+    clear_parent?: boolean;
+  },
+) {
+  const res = await fetch(`/api/v1/admin/groups/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<AdminGroup>(res);
+}
+
+export async function deleteGroup(id: string) {
+  const res = await fetch(`/api/v1/admin/groups/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean; released_members: number; children_moved_up: number }>(res);
+}
+
+export async function listGroupMembers(
+  id: string,
+  params: { q?: string; limit?: number; offset?: number } = {},
+) {
+  const qs = new URLSearchParams();
+  if (params.q) qs.set("q", params.q);
+  if (params.limit !== undefined) qs.set("limit", String(params.limit));
+  if (params.offset !== undefined) qs.set("offset", String(params.offset));
+  const suffix = qs.toString();
+  const res = await fetch(
+    `/api/v1/admin/groups/${id}/members${suffix ? `?${suffix}` : ""}`,
+    { credentials: "include" },
+  );
+  return parseJson<{
+    members: GroupMember[];
+    total: number;
+    limit: number;
+    offset: number;
+    source: GroupSource;
+  }>(res);
+}
+
+export async function addGroupMembers(id: string, userIds: string[]) {
+  const res = await fetch(`/api/v1/admin/groups/${id}/members`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ user_ids: userIds }),
+  });
+  return parseJson<{ ok: boolean; updated: number; total: number }>(res);
+}
+
+export async function removeGroupMember(id: string, userId: string) {
+  const res = await fetch(`/api/v1/admin/groups/${id}/members/${userId}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean; removed: number; total: number }>(res);
+}
+
+export type ServerSettings = {
+  issuer: string;
+  /** Where the effective value came from. */
+  source: "environment" | "database" | "default";
+  /** SIGNET_ISSUER is set: the dashboard field is read-only. */
+  env_locked: boolean;
+  /** Whether a saved issuer may be changed again without unlocking. */
+  allow_repeat_changes: boolean;
+  /** A value is saved and repeated changes are not allowed. */
+  locked: boolean;
+  /** Absolute links keep using this origin when set. */
+  public_base_url: string | null;
+};
+
+export async function fetchServerSettings() {
+  const res = await fetch("/api/v1/admin/settings/server", {
+    credentials: "include",
+  });
+  return parseJson<ServerSettings>(res);
+}
+
+export async function updateServerSettings(body: {
+  issuer?: string;
+  allow_repeat_changes?: boolean;
+}) {
+  const res = await fetch("/api/v1/admin/settings/server", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<ServerSettings>(res);
+}
+
 export async function fetchSsoSettings() {
   const res = await fetch("/api/v1/admin/settings/sso", { credentials: "include" });
   return parseJson<{ jit_provision: boolean }>(res);
@@ -604,6 +748,9 @@ export async function listUsers(params: {
   q?: string;
   sort?: AdminUserSortKey;
   dir?: "asc" | "desc";
+  /** A group uuid, or "ungrouped". Absent means all users. */
+  group_id?: string | null;
+  include_descendants?: boolean;
   limit?: number;
   offset?: number;
 } = {}) {
@@ -611,6 +758,8 @@ export async function listUsers(params: {
   if (params.q) qs.set("q", params.q);
   if (params.sort) qs.set("sort", params.sort);
   if (params.dir) qs.set("dir", params.dir);
+  if (params.group_id) qs.set("group_id", params.group_id);
+  if (params.include_descendants) qs.set("include_descendants", "true");
   if (params.limit != null) qs.set("limit", String(params.limit));
   if (params.offset != null) qs.set("offset", String(params.offset));
   const query = qs.toString();
@@ -792,6 +941,8 @@ export async function fetchAdminStats(clientId?: string) {
 export type AdminClient = {
   id: string;
   client_id: string;
+  /** Display name; '' when the client predates self-service registration. */
+  client_name: string;
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   grant_types: string[];
@@ -804,10 +955,30 @@ export type AdminClient = {
   allowed_cidrs: string[];
   created_at: string;
   updated_at: string;
+  /** User who self-registered the client; null for admin-created/unowned apps. */
+  owner_id: string | null;
+  /** Owner's email; null when unowned or when the owner account is gone. */
+  owner_email: string | null;
 };
 
 export type ClientCreated = {
   client: AdminClient;
+  client_secret: string;
+};
+
+export type SelfClient = {
+  id: string;
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  scopes: string[];
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SelfClientCreated = {
+  client: SelfClient;
   client_secret: string;
 };
 
@@ -889,6 +1060,56 @@ export async function rotateClientSecret(id: string) {
     credentials: "include",
   });
   return parseJson<ClientCreated>(res);
+}
+
+// ── Self-service clients (any signed-in user, /api/v1/me/clients) ─────────
+
+export async function listMyClients() {
+  const res = await fetch("/api/v1/me/clients", { credentials: "include" });
+  return parseJson<SelfClient[]>(res);
+}
+
+export async function createMyClient(body: {
+  client_name: string;
+  redirect_uris: string[];
+  scopes?: string[];
+}) {
+  const res = await fetch("/api/v1/me/clients", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<SelfClientCreated>(res);
+}
+
+export async function updateMyClient(
+  id: string,
+  body: { client_name?: string; redirect_uris?: string[] },
+) {
+  const res = await fetch(`/api/v1/me/clients/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(body),
+  });
+  return parseJson<SelfClient>(res);
+}
+
+export async function rotateMyClientSecret(id: string) {
+  const res = await fetch(`/api/v1/me/clients/${id}/rotate-secret`, {
+    method: "POST",
+    credentials: "include",
+  });
+  return parseJson<SelfClientCreated>(res);
+}
+
+export async function deleteMyClient(id: string) {
+  const res = await fetch(`/api/v1/me/clients/${id}`, {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ ok: boolean }>(res);
 }
 
 export type AuditLogItem = {

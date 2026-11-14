@@ -22,6 +22,12 @@ pub struct AppState {
     /// (a 30-second interval), so cross-replica propagation is bounded by that
     /// interval rather than "at next restart".
     pub(crate) settings: Arc<RwLock<RuntimeSettings>>,
+    /// The **effective** issuer: `SIGNET_ISSUER` when set (environment always
+    /// wins — it is the recovery path), else `app_settings.server.issuer`, else
+    /// the built-in default. Behind a lock because an administrator can change
+    /// it from the dashboard; read it through [`Self::issuer`], never from
+    /// `config.issuer` (that is only the boot-time fallback).
+    pub(crate) issuer: Arc<RwLock<String>>,
     /// Field names the database currently overrides; reported by the admin API
     /// so the UI can mark "inherited from environment" vs "set here".
     pub(crate) runtime_overridden: Arc<RwLock<Vec<&'static str>>>,
@@ -50,6 +56,38 @@ impl AppState {
             .settings
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The issuer every token, discovery document and public link must use.
+    pub fn issuer(&self) -> String {
+        self.issuer
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn publish_issuer(&self, next: String) {
+        *self
+            .issuer
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+    }
+
+    /// Whether cookies must carry `Secure`: forced by the environment, or the
+    /// effective issuer is https. Evaluated per response so a dashboard change
+    /// from http to https secures cookies immediately.
+    pub fn cookie_secure(&self) -> bool {
+        self.config.cookie_secure_forced || self.issuer().starts_with("https://")
+    }
+
+    /// The origin used for absolute links (reset links, SSO callbacks, test
+    /// drive): `SIGNET_PUBLIC_BASE_URL` when configured, else the effective
+    /// issuer. Same precedence the issuer itself follows.
+    pub fn public_base(&self) -> String {
+        self.config
+            .public_base_url
+            .clone()
+            .unwrap_or_else(|| self.issuer())
     }
 
     pub fn publish_settings(&self, next: RuntimeSettings) {

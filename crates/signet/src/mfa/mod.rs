@@ -255,10 +255,10 @@ async fn issue_session(
     let jar = jar
         .add(session_cookie(
             &token,
-            state.config.cookie_secure,
+            state.cookie_secure(),
             state.rt().session_ttl_hours,
         ))
-        .add(clear_mfa_cookie(state.config.cookie_secure));
+        .add(clear_mfa_cookie(state.cookie_secure()));
 
     crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
 
@@ -363,7 +363,7 @@ pub async fn challenge_password_change(
     via: &str,
 ) -> AppResult<(CookieJar, Json<Value>)> {
     let token = create_challenge(&state.pool, user.id, "change_password", None, via).await?;
-    let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
+    let jar = jar.add(mfa_cookie(&token, state.cookie_secure()));
     Ok((
         jar,
         Json(json!({
@@ -392,7 +392,7 @@ pub async fn begin_login_mfa_flow(
 
     if user.totp_enabled {
         let token = create_challenge(&state.pool, user.id, "login", None, via).await?;
-        let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
+        let jar = jar.add(mfa_cookie(&token, state.cookie_secure()));
         return Ok((
             jar,
             Json(json!({
@@ -403,7 +403,7 @@ pub async fn begin_login_mfa_flow(
 
     if global || user.mfa_required {
         let token = create_challenge(&state.pool, user.id, "enroll", None, via).await?;
-        let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
+        let jar = jar.add(mfa_cookie(&token, state.cookie_secure()));
         return Ok((
             jar,
             Json(json!({
@@ -416,7 +416,7 @@ pub async fn begin_login_mfa_flow(
         create_sign_in_session(state, &user, via, ip.as_deref(), user_agent.as_deref()).await?;
     let jar = jar.add(session_cookie(
         &token,
-        state.config.cookie_secure,
+        state.cookie_secure(),
         state.rt().session_ttl_hours,
     ));
     crate::auth::login_alert::track_login(state, &user, ip.as_deref(), user_agent.as_deref()).await;
@@ -825,10 +825,10 @@ async fn enroll_confirm_challenge(
     let jar = jar
         .add(session_cookie(
             &token,
-            state.config.cookie_secure,
+            state.cookie_secure(),
             state.rt().session_ttl_hours,
         ))
-        .add(clear_mfa_cookie(state.config.cookie_secure));
+        .add(clear_mfa_cookie(state.cookie_secure()));
 
     crate::auth::login_alert::track_login(
         &state,
@@ -913,7 +913,7 @@ async fn enroll_start_session(
     )
     .await?;
     let uri = otpauth_uri(&secret, "Signet", &user.email)?;
-    let jar = jar.add(mfa_cookie(&token, state.config.cookie_secure));
+    let jar = jar.add(mfa_cookie(&token, state.cookie_secure()));
     Ok((
         jar,
         Json(json!({
@@ -980,7 +980,7 @@ async fn enroll_confirm_session(
     .await;
 
     Ok((
-        jar.add(clear_mfa_cookie(state.config.cookie_secure)),
+        jar.add(clear_mfa_cookie(state.cookie_secure())),
         Json(json!({
             "ok": true,
             "user": PublicUser::from(user),
@@ -1115,7 +1115,7 @@ async fn rebind_start(
     .await?;
     let uri = otpauth_uri(&new_secret, "Signet", &user.email)?;
     Ok((
-        jar.add(mfa_cookie(&token, state.config.cookie_secure)),
+        jar.add(mfa_cookie(&token, state.cookie_secure())),
         Json(json!({
             "secret": new_secret,
             "otpauth_uri": uri,
@@ -1177,7 +1177,7 @@ async fn rebind_confirm(
     .await;
 
     Ok((
-        jar.add(clear_mfa_cookie(state.config.cookie_secure)),
+        jar.add(clear_mfa_cookie(state.cookie_secure())),
         Json(json!({
             "ok": true,
             "user": PublicUser::from(user),

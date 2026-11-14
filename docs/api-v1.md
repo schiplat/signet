@@ -30,6 +30,18 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `DELETE` | `/api/v1/me/consents/{client_id}` | 撤销对某应用的授权（连带吊销其 refresh token） |
 | `GET` | `/api/v1/me/activity` | 当前用户自己的活动记录（登录 + 账号/安全操作），`?page=&page_size=` 分页；并附 `summary`（上次登录 / 活跃会话 / 2FA·passkey / 已授权应用数） |
 
+### 自助客户端注册（任何登录用户，GitHub Developer settings 式）
+
+归属在 `client_apps.owner_id`：每个操作的 SQL 都限定 `owner_id = 当前用户`，查无一律 404（不泄露存在性）。注册默认形态与 RFC 7591 一致（`authorization_code` + `refresh_token`、PKCE、无 IP 白名单）。凭据带 Signet 前缀，便于日志/配置/扫描器识别：`client_id` 形如 `sgn_cl_…`，`client_secret` 形如 `sgn_cs_…`（一次性注册 token 为 `sgn_reg_…`）。`client_secret` 仅在创建/轮换响应中出现一次。管理员在 `/api/v1/admin/clients` 保持全局可见可管（`AdminClient` 新增 `client_name` 字段）。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/me/clients` | 当前用户拥有的应用列表 |
+| `POST` | `/api/v1/me/clients` | 注册新应用：`{client_name, redirect_uris, scopes?}`（name 必填 ≤200 字符；scopes 缺省 `openid profile email`）→ `{client, client_secret}` |
+| `PUT` | `/api/v1/me/clients/{id}` | 仅可改 `client_name` / `redirect_uris`（缺省字段保持原值） |
+| `POST` | `/api/v1/me/clients/{id}/rotate-secret` | 轮换 secret → `{client, client_secret}`（旧 secret 立即失效） |
+| `DELETE` | `/api/v1/me/clients/{id}` | 删除应用（级联清除该 client 的同意记录与 token） |
+
 ### 首次部署初始化（首次登录创建管理员）
 
 无任何 active `admin` 用户时，首次访问会跳转到 `/setup` 页面，在 Web 上创建首位管理员（替代早期由环境变量在启动时创建的方式）。
@@ -87,6 +99,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/smtp` | **admin**：SMTP 中继（host/port/username/password/from），**优先级 DB > 环境变量**，即时生效。PATCH 每字段三态：省略=不动、`null`=清除覆盖回退环境变量、值=设置；密码只写不读（GET 返回 `password_set`，落库为应用密钥加密的密文，`from` 校验 mailbox 格式）。审计 `settings.smtp_update` / `settings.smtp_reset`（不含密码） |
 | `POST` | `/api/v1/admin/settings/smtp/test` | **admin**：经当前生效中继发送测试邮件 `{ "to": "…" }`；返回 `{ ok, error? }`，transport 错误原样呈现（这是本端点存在的意义） |
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/captcha` | **admin**：登录/重置页 CAPTCHA（Turnstile/hCaptcha），**优先级 DB > 环境变量**；PATCH 三态同 SMTP；`secret_key` 只写不读（加密落库）；provider/site_key/secret 三要素齐备才启用，半配置状态=关闭。审计 `settings.captcha_update` / `settings.captcha_reset` |
+| `GET/PATCH` | `/api/v1/admin/settings/server` | **admin**：issuer（token 的 `iss`、discovery 与所有客户端配置的基准）。优先级 **`SIGNET_ISSUER` > DB > 默认**：环境变量存在时接口只读并在 PATCH 时返回 409。PATCH `{issuer?, allow_repeat_changes?}`：issuer 只接受纯 origin（http/https + host + 可选端口，无 path/query/fragment）；**首次保存后锁定**，再次修改需先把 `allow_repeat_changes` 置为 true（解锁动作单独审计）。保存即生效（本进程），对端副本 30s 内收敛；改 issuer 会使已发 token 失效、客户端与第三方 SSO 回调需同步更新。审计 `settings.issuer_update` / `settings.issuer_repeat_policy` |
 | `GET/PATCH/DELETE` | `/api/v1/admin/settings/branding` | **admin**：产品名（登录页/初始化向导/侧栏/标签页标题），**优先级 DB > `SIGNET_BRAND_NAME` > "Signet"**，即时生效；1–64 字符纯文本（禁控制字符）。审计 `settings.branding_update` / `settings.branding_reset` |
 | `GET` | `/api/v1/branding` | **公开**：`{"name": …}`，登录/重置/初始化页无需认证读取产品名 |
 | `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问本表全部 admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
@@ -101,7 +114,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/admin/users` | 分页列表。返回 `{ users, total, limit, offset }`；行内含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities` / `directory_sources` / `scim_managed` |
+| `GET` | `/api/v1/admin/users` | 分页列表。返回 `{ users, total, limit, offset }`；行内含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities` / `directory_sources` / `scim_managed`。可选 `group_id=<uuid\|ungrouped>` 只返回该组成员（`ungrouped` = 两组均为空）；`include_descendants=true` 递归包含子部门/子组 |
 | `GET` | `/api/v1/admin/users/email-check?email=` | 邮箱查重，返回 `{ "exists": bool }` |
 | `GET` | `/api/v1/admin/users/phone-check?phone=&exclude_id=` | 手机查重，返回 `{ "exists": bool }`（`exclude_id` 可选，编辑时排除自身） |
 | `POST` | `/api/v1/admin/users` | 创建（可带 `groups`、`phone`） |
@@ -111,12 +124,28 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST` | `/api/v1/admin/users/{id}/enable` | 解冻 |
 | `POST` | `/api/v1/admin/users/batch-disable` | 批量冻结 `{ "ids": [] }` |
 | `POST` | `/api/v1/admin/users/import` | **admin** 批量导入 `{ users: [...], update?: bool, dry_run?: bool }`，≤1000 行；逐行校验、行级错误不中断批次；`update=true` 时更新已存在账号的资料（**不改密码**）；`dry_run=true` 时全量校验并返回与真实执行相同的分类结果（响应多一个 `dry_run: true` 字段），**不写任何数据、不写审计**（响应含 `created/updated/skipped/errors`）；真实导入每行写 `user.create` 审计，另写一条 `user.import` 汇总 |
-| `GET` | `/api/v1/admin/users/export` | **staff** 用户 CSV（邮箱/用户名/显示名/角色/状态/组/手机，公式中和） |
+| `GET` | `/api/v1/admin/users/export` | **staff** 用户 CSV（邮箱/用户名/显示名/角色/状态/组/手机，公式中和）；支持与列表相同的 `group_id` / `include_descendants` 过滤 |
 | `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | 强制下线该用户全部会话 |
 
-`groups` 为用户组（`TEXT[]`），会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`，供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
+`groups` 在 API 中仍是**组名数组**（写入时经 `signet_group_ids()` 解析成内部 id；未知名字自动创建 `local` 组），读取时由 `signet_group_names()` 还原为名字。它会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`（仅直接成员，不继承父部门），供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
 
 列表额外字段：`provisioned_via`（如 `sso_jit` 表示第三方 JIT 开户，否则 `null`）、`has_password`、`sso_identities`（`[{ provider_code, display_name, provider_type }]`，已绑定的第三方）。
+
+### 组与部门（staff；删除仅 admin）
+
+组与部门是同一棵树（`kind = group | department`）。`source` 决定可编辑性：`local` 可改名/成员/删除；`scim`、`directory` 可移动但名称、成员与存在性归来源。详见 [groups.md](./groups.md)。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/admin/groups` | 扁平节点列表：`id, display_name, parent_id, kind, source, member_count, created_at, updated_at` |
+| `POST` | `/api/v1/admin/groups` | `{name, kind?, parent_id?}`；重名 409 |
+| `PUT` | `/api/v1/admin/groups/{id}` | `{name?, kind?, parent_id?, clear_parent?}`；移动拒环；`parent_id` 省略=保持、`clear_parent=true`=移到根；非 `local` 改名 409 |
+| `DELETE` | `/api/v1/admin/groups/{id}` | **admin** 且仅 `local`；子节点上移、成员释放、行置墓碑 |
+| `GET` | `/api/v1/admin/groups/{id}/members?q=&limit=&offset=` | 直接成员分页（email/display_name 搜索） |
+| `POST` | `/api/v1/admin/groups/{id}/members` | `{user_ids:[uuid]}` 加入；非 `local` 409 |
+| `DELETE` | `/api/v1/admin/groups/{id}/members/{user_id}` | 移除；非 `local` 409 |
+
+审计：`group.create/update/delete/member_add/member_remove`。
 
 **`GET /admin/users` 分页契约**：
 

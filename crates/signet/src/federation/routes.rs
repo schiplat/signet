@@ -486,12 +486,7 @@ async fn start(
             SsoError::Upstream
         })?;
 
-    let cookie = sso_cookie(
-        STATE_COOKIE,
-        &state_value,
-        state.config.cookie_secure,
-        10 * 60,
-    );
+    let cookie = sso_cookie(STATE_COOKIE, &state_value, state.cookie_secure(), 10 * 60);
     Ok((jar.add(cookie), Redirect::to(&url)).into_response())
 }
 
@@ -996,7 +991,7 @@ async fn finish_sign_in(
             },
         )
         .await;
-        let jar = jar.add(crate::mfa::mfa_cookie(&token, state.config.cookie_secure));
+        let jar = jar.add(crate::mfa::mfa_cookie(&token, state.cookie_secure()));
         // The gate page keeps `return_to`: when the SPA finishes the MFA
         // continuation it bounces the browser back into the authorize flow.
         let url = login_url(next, return_to.as_deref());
@@ -1035,7 +1030,7 @@ async fn finish_sign_in(
     };
     let session = crate::auth::session::session_cookie(
         &token,
-        state.config.cookie_secure,
+        state.cookie_secure(),
         state.rt().session_ttl_hours,
     );
 

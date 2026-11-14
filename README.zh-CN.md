@@ -18,8 +18,8 @@
 
 ```bash
 # 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.5.0/signet-0.5.0-macos-arm64
-chmod +x signet-0.5.0-macos-arm64 && mv signet-0.5.0-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.0/signet-0.6.0-macos-arm64
+chmod +x signet-0.6.0-macos-arm64 && mv signet-0.6.0-macos-arm64 signet
 
 # 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
 docker run -d --name signet-db -p 5433:5432 \
@@ -69,7 +69,7 @@ SIGNET_ISSUER=http://localhost:8443
 | 配置 | 说明 |
 |------|------|
 | `SIGNET_DATABASE_URL` | PostgreSQL 连接串（上面的值即内置默认值，与本地 dev `db` 容器一致） |
-| `SIGNET_ISSUER` | 客户端访问本服务的公开 origin；不能以 `/` 结尾。生产必须设为真实 HTTPS 域名（issuer 为 https 时自动启用 `Secure` Cookie） |
+| `SIGNET_ISSUER` | 客户端访问本服务的公开 origin；不能以 `/` 结尾。生产必须设为真实 HTTPS 域名（issuer 为 https 时自动启用 `Secure` Cookie）。设置后优先级高于 **Dashboard → Settings → Server identity** 并使该字段只读（作为改错后的恢复通道）；不设置则可在 Web 端配置 |
 | `SIGNET_HTTP_BIND` | HTTP 监听地址；默认 `0.0.0.0:8443` |
 | `SIGNET_TRUSTED_PROXIES` | 仅反向代理后需要：允许断言 `X-Forwarded-For` 的代理 IP/CIDR，逗号分隔 |
 | 密钥 | `./data/jwt_private.pem` 与 `./data/encryption.key` 首次启动自动生成——**务必备份**：丢失或轮换会使已签发 token 失效、已存 TOTP 无法解密 |
@@ -99,6 +99,10 @@ cargo run
 
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard：用户、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
+- **组/部门组织树**：Dashboard → Directory 管理一棵 `department` / `group` 树，含成员、移动、改名与防环校验；OIDC `groups` claim 只下发直接组名。SCIM/目录同步的节点会出现在树里，但名称与成员仍归来源管理
+- **客户端自助注册**：任何登录用户可在 Dashboard → My apps 注册并管理自己的应用（应用名 + 回调地址），按 owner 隔离、secret 只显示一次；管理员仍可全局管理（Name / Owner 列）
+- **Issuer 可在 Web 端配置**：Dashboard → Settings → Server identity（审计 + 首次保存后锁定）；`SIGNET_ISSUER` 环境变量优先，作为改错后的恢复通道
+- **首次使用引导**：Overview 为管理员展示实时检查面板（issuer 可达性/HTTPS、SMTP 完整性、首个启用客户端），必填步骤未通过前不可关闭
 - **运行时策略**（token/会话有效期、登录锁定、密码策略、审计保留、限流）在后台修改，落库即生效，无需重新部署
 - **签名密钥轮换**（`signet keys rotate` / `keys prune`），JWKS 同时发布新旧公钥，已签发 token 不受影响
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
@@ -120,6 +124,7 @@ cargo run
 | [docs/directory-sync.md](./docs/directory-sync.md) | **目录同步**（LDAP / HTTP JSON 拉取、bind 直通、定时调度、`signet sync` CLI） |
 | [docs/directory-mapping-ux.md](./docs/directory-mapping-ux.md) | 目录同步字段映射交互设计（含实现记录） |
 | [docs/deploy.md](./docs/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
+| [CHANGELOG.md](./CHANGELOG.md) | 版本变更与破坏性改动 |
 
 ## 本地开发
 
@@ -213,7 +218,7 @@ cd .. && cargo build -p signet
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 
-发版示例：`git tag -a v0.5.0 -m v0.5.0 && git push origin v0.5.0`。
+发版示例：`git tag -a v0.6.0 -m v0.6.0 && git push origin v0.6.0`。
 
 构建与部署布局见 [`docs/deploy.md`](./docs/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。

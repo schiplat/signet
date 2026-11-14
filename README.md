@@ -19,8 +19,8 @@ Three ways to get a server running. **The release binary is the recommended way*
 ```bash
 # 1. Download the asset for your platform from GitHub Releases (grab the
 #    latest tag there), e.g.:
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.5.0/signet-0.5.0-macos-arm64
-chmod +x signet-0.5.0-macos-arm64 && mv signet-0.5.0-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.0/signet-0.6.0-macos-arm64
+chmod +x signet-0.6.0-macos-arm64 && mv signet-0.6.0-macos-arm64 signet
 
 # 2. Start a PostgreSQL matching the built-in default connection string
 #    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
@@ -73,7 +73,7 @@ SIGNET_ISSUER=http://localhost:8443
 | Setting | Notes |
 |---------|-------|
 | `SIGNET_DATABASE_URL` | PostgreSQL connection string (the value above is the built-in default, matching the dev `db` container) |
-| `SIGNET_ISSUER` | Public origin clients use to reach this IdP; must not end with `/`. Set it to the real HTTPS domain in production — an https issuer also turns on `Secure` cookies |
+| `SIGNET_ISSUER` | Public origin clients use to reach this IdP; must not end with `/`. Set it to the real HTTPS domain in production — an https issuer also turns on `Secure` cookies. When set it wins over **Dashboard → Settings → Server identity** and makes that field read-only (the recovery path); leave it unset to manage the issuer from the dashboard |
 | `SIGNET_HTTP_BIND` | HTTP listen address; default `0.0.0.0:8443` |
 | `SIGNET_TRUSTED_PROXIES` | Only behind a reverse proxy: comma-separated proxy IPs/CIDRs allowed to assert `X-Forwarded-For` |
 | Keys | `./data/jwt_private.pem` and `./data/encryption.key` are auto-generated on first boot — **back them up**: losing or rotating them invalidates issued tokens and stored TOTP secrets |
@@ -103,6 +103,10 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 
 - OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
 - Dashboard: users, clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
+- **Groups & departments as one tree**: Dashboard → Directory manages an organisational tree (`department` / `group`), membership and move/rename with cycle protection; the OIDC `groups` claim publishes direct group names. SCIM- and directory-owned nodes appear in the tree but stay managed by their source
+- **Self-service OAuth clients**: any signed-in user can register and manage their own app (name + redirect URIs) under Dashboard → My apps — owner-scoped, secret shown once, admins keep global control (Name / Owner columns)
+- **Web-managed issuer**: the public issuer can be set in Dashboard → Settings → Server identity (audited, locked after the first change); `SIGNET_ISSUER` still wins as the recovery path
+- **First-run setup guide**: Overview shows administrators a live check panel (issuer reachability/HTTPS, SMTP completeness, first enabled client) until the required steps pass
 - **Runtime policies** (token/session lifetimes, lockout, password policy, audit retention, rate limit) edited in the dashboard — DB-backed, no redeploy
 - **Signing-key rotation** (`signet keys rotate` / `keys prune`) with a JWKS key ring that keeps outstanding tokens verifiable
 - **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
@@ -123,6 +127,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 | [docs/dashboard.md](./docs/dashboard.md) | Dashboard pages & permissions |
 | [docs/directory-sync.md](./docs/directory-sync.md) | **Directory sync** (LDAP / HTTP JSON pull, bind-through login, scheduler, `signet sync` CLI) |
 | [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
+| [CHANGELOG.md](./CHANGELOG.md) | Release notes and breaking changes |
 
 ## Local development
 
@@ -218,7 +223,7 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 
-Tag a release (example): `git tag -a v0.5.0 -m v0.5.0 && git push origin v0.5.0`.
+Tag a release (example): `git tag -a v0.6.0 -m v0.6.0 && git push origin v0.6.0`.
 
 Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).

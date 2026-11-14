@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { AppWindow, Check, Copy, Plus, Trash2 } from "@lucide/vue";
+import { AppWindow, KeyRound, Plus, Power, PowerOff, Trash2 } from "@lucide/vue";
 import { computed, onMounted, ref } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
+import ClientSecretDialog from "@/components/ui/ClientSecretDialog.vue";
+import RowActionsMenu, { type RowActionItem } from "@/components/ui/RowActionsMenu.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
@@ -38,7 +40,8 @@ const formScopes = ref("");
 const formGrants = ref<string[]>(["authorization_code", "refresh_token"]);
 const formExtraClaims = ref("");
 const formBackchannel = ref("");
-const formIpAllowlist = ref(true);
+const formIpAllowlist = ref(false);
+const formAdvancedOpen = ref(false);
 const formAllowedCidrs = ref("");
 
 const editRedirects = ref("");
@@ -57,46 +60,40 @@ const secretDialog = ref<{
   client: Pick<AdminClient, "redirect_uris" | "post_logout_redirect_uris" | "scopes">;
 } | null>(null);
 const rotatingId = ref<string | null>(null);
-const copiedField = ref<"id" | "secret" | "both" | "config" | null>(null);
-let copiedTimer: ReturnType<typeof setTimeout> | null = null;
 
-// The issuer handed out with the onboarding config. The public discovery
-// document is the one source of truth (an operator may have set a
-// SIGNET_PUBLIC_BASE_URL different from the dashboard origin).
+// Row actions live in the shared menu component: the table wrapper is an
+// overflow container, so its teleported menu is the only placement that is
+// not clipped.
+function rowActions(c: AdminClient): RowActionItem[] {
+  const items: RowActionItem[] = [
+    {
+      key: "rotate",
+      label: rotatingId.value === c.id ? "Rotating…" : "Rotate secret",
+      icon: KeyRound,
+      disabled: rotatingId.value === c.id,
+    },
+    {
+      key: "toggle",
+      label: c.enabled ? "Disable" : "Enable",
+      icon: c.enabled ? PowerOff : Power,
+    },
+  ];
+  if (auth.canDeleteClients) {
+    items.push({ key: "delete", label: "Delete", icon: Trash2, danger: true, separator: true });
+  }
+  return items;
+}
+
+function onRowAction(c: AdminClient, key: string) {
+  if (key === "rotate") void onRotate(c);
+  else if (key === "toggle") void onToggle(c);
+  else if (key === "delete") void onDelete(c);
+}
+
+// Test drive builds an absolute authorize URL against the real issuer; the
+// public discovery document is the one source of truth (an operator may have
+// set a SIGNET_PUBLIC_BASE_URL different from the dashboard origin).
 const issuer = ref("");
-const configTab = ref<"env" | "toml">("env");
-
-const envSnippet = computed(() => {
-  const d = secretDialog.value;
-  if (!d) return "";
-  const lines = [
-    `OIDC_ISSUER=${issuer.value || "https://sso.example.com"}`,
-    `OIDC_CLIENT_ID=${d.clientId}`,
-    `OIDC_CLIENT_SECRET=${d.secret}`,
-    `OIDC_REDIRECT_URI=${d.client.redirect_uris[0] ?? ""}`,
-    `OIDC_SCOPES=${(d.client.scopes || ["openid"]).join(" ")}`,
-  ];
-  const postLogout = d.client.post_logout_redirect_uris?.[0];
-  if (postLogout) lines.push(`OIDC_POST_LOGOUT_REDIRECT_URI=${postLogout}`);
-  return lines.join("\n");
-});
-
-const tomlSnippet = computed(() => {
-  const d = secretDialog.value;
-  if (!d) return "";
-  const scopes = (d.client.scopes || ["openid"]).map((s) => JSON.stringify(s)).join(", ");
-  const lines = [
-    "[oidc]",
-    `issuer = "${issuer.value || "https://sso.example.com"}"`,
-    `client_id = "${d.clientId}"`,
-    `client_secret = "${d.secret}"`,
-    `redirect_uri = "${d.client.redirect_uris[0] ?? ""}"`,
-    `scopes = [${scopes}]`,
-  ];
-  const postLogout = d.client.post_logout_redirect_uris?.[0];
-  if (postLogout) lines.push(`post_logout_redirect_uri = "${postLogout}"`);
-  return lines.join("\n");
-});
 
 const filtered = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
@@ -141,13 +138,14 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-  // Best-effort: the onboarding snippets need the issuer; discovery is public.
+  // Best-effort: the test-drive authorize URL needs the issuer; discovery is
+  // public.
   try {
     const res = await fetch("/.well-known/openid-configuration");
     const doc = await res.json();
     if (typeof doc.issuer === "string") issuer.value = doc.issuer;
   } catch {
-    /* fall back to the placeholder in the snippets */
+    /* fall back to the dashboard origin */
   }
 });
 
@@ -166,8 +164,9 @@ function openCreate() {
   formGrants.value = ["authorization_code", "refresh_token"];
   formExtraClaims.value = "";
   formBackchannel.value = "";
-  formIpAllowlist.value = true;
+  formIpAllowlist.value = false;
   formAllowedCidrs.value = "";
+  formAdvancedOpen.value = false;
   showCreate.value = true;
 }
 
@@ -221,7 +220,6 @@ async function onCreate() {
       title: "Client registered",
       client: res.client,
     };
-    configTab.value = "env";
     await refresh();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Create failed";
@@ -296,7 +294,6 @@ async function onRotate(c: AdminClient) {
       title: "Secret rotated",
       client: res.client,
     };
-    configTab.value = "env";
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Rotate failed";
   } finally {
@@ -322,25 +319,6 @@ async function onDelete(c: AdminClient) {
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Delete failed";
   }
-}
-
-async function copyText(text: string, field: "id" | "secret" | "both" | "config") {
-  try {
-    await navigator.clipboard.writeText(text);
-    copiedField.value = field;
-    if (copiedTimer) clearTimeout(copiedTimer);
-    copiedTimer = setTimeout(() => {
-      copiedField.value = null;
-    }, 1500);
-  } catch {
-    /* ignore */
-  }
-}
-
-function copyBoth() {
-  if (!secretDialog.value) return;
-  const { clientId, secret } = secretDialog.value;
-  void copyText(`client_id=${clientId}\nclient_secret=${secret}`, "both");
 }
 
 const B64URL = (buf: ArrayBuffer | Uint8Array) =>
@@ -394,7 +372,7 @@ async function onTestDrive(c: AdminClient) {
     <p v-if="error" class="field-error">{{ error }}</p>
 
     <div v-if="loading" class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
-    <div v-else class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
+    <div v-else class="surface-card overflow-hidden">
       <div
         v-if="clients.length === 0"
         class="flex flex-col items-center justify-center py-16 text-muted-foreground"
@@ -422,7 +400,7 @@ async function onTestDrive(c: AdminClient) {
           <div class="overflow-x-auto">
             <table class="w-full text-[13px]">
               <thead>
-                <tr class="border-b border-border/30 bg-muted/10">
+                <tr class="border-b border-border/50">
                   <SortableTh
                     label="Client ID"
                     column="client_id"
@@ -430,12 +408,22 @@ async function onTestDrive(c: AdminClient) {
                     @toggle="toggleSort"
                   />
                   <th
-                    class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground"
+                    class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
+                  >
+                    Name
+                  </th>
+                  <th
+                    class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
+                  >
+                    Owner
+                  </th>
+                  <th
+                    class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
                   >
                     Redirect URIs
                   </th>
                   <th
-                    class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground"
+                    class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
                   >
                     Scopes
                   </th>
@@ -446,25 +434,25 @@ async function onTestDrive(c: AdminClient) {
                     @toggle="toggleSort"
                   />
                   <th
-                    class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground"
+                    class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
                   >
                     Source IP
                   </th>
                   <th
-                    class="w-52 px-5 py-2.5 text-right text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground"
+                    class="px-5 py-2.5 text-right text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80"
                   >
                     Actions
                   </th>
                 </tr>
               </thead>
-              <tbody class="divide-y divide-border/20">
+              <tbody>
                 <tr
                   v-for="c in pageItems"
                   :key="c.id"
                   :class="
                     c.enabled
-                      ? 'hover:bg-muted/5'
-                      : 'bg-destructive/[0.04] text-muted-foreground hover:bg-destructive/[0.07]'
+                      ? 'border-b border-border/40 last:border-0 hover:bg-muted/5'
+                      : 'border-b border-border/40 bg-destructive/[0.04] text-muted-foreground last:border-0 hover:bg-destructive/[0.07]'
                   "
                 >
                   <td
@@ -477,6 +465,16 @@ async function onTestDrive(c: AdminClient) {
                       class="ml-2 align-middle text-[10px] font-semibold uppercase tracking-[0.06em] text-destructive"
                     >
                       Disabled
+                    </span>
+                  </td>
+                  <td class="px-5 py-3 text-xs">
+                    <span v-if="c.client_name" class="font-medium">{{ c.client_name }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-5 py-3 text-xs">
+                    <span v-if="c.owner_email" class="break-all">{{ c.owner_email }}</span>
+                    <span v-else class="text-muted-foreground" title="Created by an administrator">
+                      —
                     </span>
                   </td>
                   <td class="max-w-md px-5 py-3 text-xs text-muted-foreground">
@@ -521,36 +519,27 @@ async function onTestDrive(c: AdminClient) {
                     </template>
                     <span v-else class="text-muted-foreground">Unrestricted</span>
                   </td>
-                  <td class="space-x-1 whitespace-nowrap px-5 py-3 text-right">
+                  <td class="whitespace-nowrap px-5 py-3 text-right align-middle">
+                    <div class="flex items-center justify-end gap-1">
                     <UiButton
                       v-if="c.enabled"
                       variant="ghost"
                       size="sm"
+                      class="text-[13px] font-normal"
                       :title="'Run a full authorize round trip against this client in a new tab'"
                       @click="onTestDrive(c)"
                     >
                       Test drive
                     </UiButton>
-                    <UiButton variant="ghost" size="sm" @click="openEdit(c)">Edit</UiButton>
-                    <UiButton
-                      variant="ghost"
-                      size="sm"
-                      :disabled="rotatingId === c.id"
-                      @click="onRotate(c)"
-                    >
-                      Rotate
+                    <UiButton variant="ghost" size="sm" class="text-[13px] font-normal" @click="openEdit(c)">
+                      Edit
                     </UiButton>
-                    <UiButton variant="ghost" size="sm" @click="onToggle(c)">
-                      {{ c.enabled ? "Disable" : "Enable" }}
-                    </UiButton>
-                    <UiButton
-                      v-if="auth.canDeleteClients"
-                      variant="ghost"
-                      size="sm"
-                      @click="onDelete(c)"
-                    >
-                      <Trash2 class="h-3.5 w-3.5 text-destructive" />
-                    </UiButton>
+                    <RowActionsMenu
+                      :items="rowActions(c)"
+                      label="More actions"
+                      @select="(key) => onRowAction(c, key)"
+                    />
+                    </div>
                   </td>
                 </tr>
               </tbody>
@@ -573,7 +562,11 @@ async function onTestDrive(c: AdminClient) {
         <div
           class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
         >
-          <h3 class="mb-5 text-[15px] font-semibold">Register Client</h3>
+          <h3 class="mb-1 text-[15px] font-semibold">Register Client</h3>
+          <p class="type-meta mb-5">
+            Fields marked <span class="text-red-500">*</span> are required. Everything else has a
+            safe default.
+          </p>
           <form class="space-y-4" @submit.prevent="onCreate">
             <div>
               <label class="mb-1 block text-[12px] font-medium">
@@ -600,6 +593,16 @@ async function onTestDrive(c: AdminClient) {
               />
               <p class="type-meta mt-1">One URI per line</p>
             </div>
+            <button
+              type="button"
+              class="flex w-full items-center justify-between rounded-lg border border-border/40 px-3 py-2 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+              @click="formAdvancedOpen = !formAdvancedOpen"
+            >
+              <span>Advanced options</span>
+              <span class="text-[11px]">{{ formAdvancedOpen ? "Hide" : "Show" }}</span>
+            </button>
+
+<template v-if="formAdvancedOpen">
             <div>
               <label class="mb-1 block text-[12px] font-medium">
                 Post-logout Redirect URIs
@@ -626,7 +629,7 @@ async function onTestDrive(c: AdminClient) {
               <input v-model="formIpAllowlist" type="checkbox" class="mt-0.5 rounded" />
               <span>
                 <span class="block text-[12px] font-medium">Restrict by source IP</span>
-                <span class="type-meta">Default on. Only listed IPs/CIDRs may call authorize/token.</span>
+                <span class="type-meta">Off by default. When on, only listed IPs/CIDRs may call authorize/token.</span>
               </span>
             </label>
             <div v-if="formIpAllowlist">
@@ -641,6 +644,7 @@ async function onTestDrive(c: AdminClient) {
                 class="field-input min-h-[5rem] resize-y py-2 font-mono text-xs"
               />
             </div>
+</template>
             <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">
                 Cancel
@@ -661,6 +665,13 @@ async function onTestDrive(c: AdminClient) {
           class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Edit {{ editing.client_id }}</h3>
+          <p
+            v-if="editing.owner_email"
+            class="type-meta mb-4 rounded-lg bg-muted/50 px-3 py-2"
+          >
+            Owned by <span class="font-medium text-foreground">{{ editing.owner_email }}</span> —
+            they can edit and delete this app from My apps.
+          </p>
           <form class="space-y-4" @submit.prevent="onSaveEdit">
             <div>
               <label class="mb-1 block text-[12px] font-medium">Redirect URIs</label>
@@ -725,108 +736,6 @@ async function onTestDrive(c: AdminClient) {
       </div>
     </Teleport>
 
-    <Teleport to="body">
-      <div v-if="secretDialog" class="fixed inset-0 z-50 flex items-center justify-center">
-        <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="secretDialog = null" />
-        <div
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
-        >
-          <h3 class="mb-2 text-[15px] font-semibold">{{ secretDialog.title }}</h3>
-          <p class="type-meta mb-4">
-            Copy the client secret now — it will not be shown again.
-          </p>
-          <div class="space-y-3">
-            <div>
-              <p class="type-label mb-1">Client ID</p>
-              <div class="flex items-start gap-2 rounded-lg bg-muted px-3 py-2">
-                <p class="min-w-0 flex-1 break-all font-mono text-xs">
-                  {{ secretDialog.clientId }}
-                </p>
-                <UiButton
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 shrink-0"
-                  :title="copiedField === 'id' ? 'Copied' : 'Copy client ID'"
-                  @click="copyText(secretDialog.clientId, 'id')"
-                >
-                  <Check v-if="copiedField === 'id'" class="h-3.5 w-3.5" />
-                  <Copy v-else class="h-3.5 w-3.5" />
-                </UiButton>
-              </div>
-            </div>
-            <div>
-              <p class="type-label mb-1">Client Secret</p>
-              <div class="flex items-start gap-2 rounded-lg bg-muted px-3 py-2">
-                <p class="min-w-0 flex-1 break-all font-mono text-xs">
-                  {{ secretDialog.secret }}
-                </p>
-                <UiButton
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 shrink-0"
-                  :title="copiedField === 'secret' ? 'Copied' : 'Copy client secret'"
-                  @click="copyText(secretDialog.secret, 'secret')"
-                >
-                  <Check v-if="copiedField === 'secret'" class="h-3.5 w-3.5" />
-                  <Copy v-else class="h-3.5 w-3.5" />
-                </UiButton>
-              </div>
-            </div>
-
-            <div class="rounded-lg border border-border/50">
-              <div class="flex items-center justify-between border-b border-border/30 px-3 py-2">
-                <div class="flex gap-1 text-xs">
-                  <button
-                    type="button"
-                    class="rounded-md px-2 py-1"
-                    :class="configTab === 'env' ? 'bg-muted font-medium' : 'text-muted-foreground'"
-                    @click="configTab = 'env'"
-                  >
-                    .env
-                  </button>
-                  <button
-                    type="button"
-                    class="rounded-md px-2 py-1"
-                    :class="configTab === 'toml' ? 'bg-muted font-medium' : 'text-muted-foreground'"
-                    @click="configTab = 'toml'"
-                  >
-                    config.toml
-                  </button>
-                </div>
-                <UiButton
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  class="h-7 w-7 shrink-0"
-                  :title="copiedField === 'config' ? 'Copied' : 'Copy snippet'"
-                  @click="copyText(configTab === 'env' ? envSnippet : tomlSnippet, 'config')"
-                >
-                  <Check v-if="copiedField === 'config'" class="h-3.5 w-3.5" />
-                  <Copy v-else class="h-3.5 w-3.5" />
-                </UiButton>
-              </div>
-              <pre class="max-h-56 overflow-auto px-3 py-2.5 font-mono text-[11px] leading-5">{{
-                configTab === "env" ? envSnippet : tomlSnippet
-              }}</pre>
-              <p class="border-t border-border/30 px-3 py-2 text-[11px] text-muted-foreground">
-                Hand this whole snippet to the subsystem — it already matches this client's
-                registered redirect URIs, scopes and logout address. The secret appears only
-                here and only once.
-              </p>
-            </div>
-          </div>
-          <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
-            <UiButton type="button" variant="ghost" size="sm" @click="copyBoth">
-              <Check v-if="copiedField === 'both'" class="h-3.5 w-3.5" />
-              <Copy v-else class="h-3.5 w-3.5" />
-              {{ copiedField === "both" ? "Copied" : "Copy ID + secret" }}
-            </UiButton>
-            <UiButton type="button" size="sm" @click="secretDialog = null">Done</UiButton>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <ClientSecretDialog :dialog="secretDialog" @close="secretDialog = null" />
   </div>
 </template>

@@ -29,7 +29,8 @@ pub async fn userinfo(State(state): State<AppState>, headers: HeaderMap) -> AppR
     // it here would put a blocking PEM read and an RSA parse inside an async
     // handler on the endpoint clients call per API request.
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(std::slice::from_ref(&state.config.issuer));
+    let issuer = state.issuer();
+    validation.set_issuer(std::slice::from_ref(&issuer));
     validation.validate_aud = false;
 
     let data = state

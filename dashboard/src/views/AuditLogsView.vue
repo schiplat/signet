@@ -161,7 +161,7 @@ function deviceLabel(row: AuditLogItem) {
 
     <p v-if="error" class="field-error">{{ error }}</p>
 
-    <div class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm">
+    <div class="surface-card overflow-hidden">
       <div class="flex flex-wrap items-center gap-3 border-b border-border/30 px-5 py-3">
         <input
           v-model="searchQuery"
@@ -230,7 +230,7 @@ function deviceLabel(row: AuditLogItem) {
         <div class="overflow-x-auto">
           <table class="w-full text-[13px]">
             <thead>
-              <tr class="border-b border-border/30 bg-muted/10">
+              <tr class="border-b border-border/50">
                 <SortableTh
                   label="Time"
                   column="created_at"
@@ -249,10 +249,10 @@ function deviceLabel(row: AuditLogItem) {
                   :indicator="sortIndicator('ip')"
                   @toggle="toggleSort"
                 />
-                <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                <th class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                   App
                 </th>
-                <th class="px-5 py-2.5 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                <th class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                   Device
                 </th>
                 <SortableTh
@@ -275,11 +275,11 @@ function deviceLabel(row: AuditLogItem) {
                 />
               </tr>
             </thead>
-            <tbody class="divide-y divide-border/20">
+            <tbody>
               <tr
                 v-for="row in items"
                 :key="row.id"
-                class="cursor-pointer hover:bg-muted/5"
+                class="cursor-pointer border-b border-border/40 last:border-0 hover:bg-muted/5"
                 @click="openDetail(row)"
               >
                 <td class="whitespace-nowrap px-5 py-3 text-xs text-muted-foreground">

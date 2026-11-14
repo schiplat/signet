@@ -7,11 +7,14 @@
 //! every value reports where it came from.
 //!
 //! What deliberately stays in the environment: the database URL, listen address,
-//! key file paths, the issuer, the trusted-proxy list and the outbound-private
-//! switch. Those are needed *before* the database can be read, are network/trust
-//! boundaries rather than policy, or (the issuer) break every client if changed
-//! wrongly and cannot be repaired from the dashboard — the same tail risk as the
-//! last administrator. See `Config` for their rationale.
+//! key file paths, the trusted-proxy list and the outbound-private switch. Those
+//! are needed *before* the database can be read or are network/trust boundaries
+//! rather than policy. See `Config` for their rationale.
+//!
+//! The issuer is the one exception with a stricter contract (see the "Server
+//! identity" section below): it can be set from the dashboard, but the
+//! environment always wins when present (recovery path), and the first save
+//! locks the field until an administrator explicitly allows repeated changes.
 //!
 //! Changes apply live. The one exception would be something baked into a
 //! long-lived object at boot; today nothing in [`RuntimeSettings`] is, and the
@@ -207,6 +210,14 @@ pub fn spawn_refresher(state: AppState) {
             state.publish_settings(next);
             state.replace_overridden(overridden);
             state.rate_limiter.set_limit(next.rate_limit_per_minute);
+            // The issuer is not part of the Copy snapshot: it lives behind its
+            // own lock because token minting/validation read it per request.
+            match effective_issuer(&state.pool, &state.config).await {
+                Ok(issuer) => state.publish_issuer(issuer),
+                Err(e) => {
+                    tracing::warn!(error = %e, "issuer refresh failed; keeping the last value")
+                }
+            }
         }
     });
 }
@@ -234,6 +245,10 @@ pub fn router() -> Router<AppState> {
             get(get_branding)
                 .patch(patch_branding)
                 .delete(reset_branding),
+        )
+        .route(
+            "/admin/settings/server",
+            get(get_server).patch(patch_server),
         )
 }
 
@@ -455,6 +470,237 @@ async fn patch_runtime(
         "changed": changed,
         "overridden": state.overridden(),
     })))
+}
+
+// --- Server identity: the issuer -------------------------------------------
+//
+// The issuer is the setting whose wrongness breaks the most at once: every
+// token carries it as `iss`, every client's discovery URL is derived from it,
+// and third-party SSO callbacks are composed from it. It therefore gets a
+// stricter contract than runtime policy:
+//
+//   * The environment always wins. `SIGNET_ISSUER` being set makes the
+//     dashboard field read-only, and also means a value saved by mistake can
+//     always be repaired from outside the database.
+//   * The first save locks the field. Further edits need
+//     `server.issuer_allow_repeat` switched on explicitly (an audited action),
+//     so a stray click cannot silently rotate the identity of the deployment.
+//   * Changes apply immediately in this process; peer replicas converge via the
+//     30-second refresher like every other DB-backed setting. A rolling
+//     restart after the change closes the mixed-issuer window on HA setups.
+//
+// Validated harder than the environment variable (kept lenient for existing
+// deployments): the dashboard accepts a bare origin only — http(s), host,
+// optional port, no path/query/fragment/credentials.
+
+const ISSUER_KEY: &str = "server.issuer";
+const ISSUER_ALLOW_REPEAT_KEY: &str = "server.issuer_allow_repeat";
+
+#[derive(Debug, Serialize)]
+struct ServerSettings {
+    issuer: String,
+    /// Where the effective value came from: `environment`, `database` or
+    /// `default`. The UI uses it for the badge and to disable editing.
+    source: &'static str,
+    env_locked: bool,
+    allow_repeat_changes: bool,
+    /// A value is stored and repeated changes are not allowed: editing needs
+    /// `allow_repeat_changes` turned on first.
+    locked: bool,
+    /// `SIGNET_PUBLIC_BASE_URL` when configured: absolute links then keep using
+    /// it, so changing the issuer alone does not move them.
+    public_base_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerPatch {
+    issuer: Option<String>,
+    allow_repeat_changes: Option<bool>,
+}
+
+async fn stored_issuer(pool: &PgPool) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT value #>> '{}' FROM app_settings WHERE key = $1")
+        .bind(ISSUER_KEY)
+        .fetch_optional(pool)
+        .await
+}
+
+async fn issuer_allow_repeat(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    let stored: Option<bool> =
+        sqlx::query_scalar("SELECT (value #>> '{}')::boolean FROM app_settings WHERE key = $1")
+            .bind(ISSUER_ALLOW_REPEAT_KEY)
+            .fetch_optional(pool)
+            .await?;
+    Ok(stored.unwrap_or(false))
+}
+
+/// Precedence: environment > database > built-in default.
+///
+/// Also used by the boot path and the refresher; propagation to peer replicas
+/// is bounded by the refresh interval, exactly like runtime policy.
+pub async fn effective_issuer(pool: &PgPool, cfg: &Config) -> Result<String, sqlx::Error> {
+    if cfg.issuer_from_env {
+        return Ok(cfg.issuer.clone());
+    }
+    Ok(stored_issuer(pool)
+        .await?
+        .unwrap_or_else(|| cfg.issuer.clone()))
+}
+
+async fn server_settings(state: &AppState) -> AppResult<ServerSettings> {
+    let env_locked = state.config.issuer_from_env;
+    let stored = stored_issuer(&state.pool).await?;
+    let allow_repeat = issuer_allow_repeat(&state.pool).await?;
+    let (issuer, source) = if env_locked {
+        (state.config.issuer.clone(), "environment")
+    } else {
+        match &stored {
+            Some(v) => (v.clone(), "database"),
+            None => (state.config.issuer.clone(), "default"),
+        }
+    };
+    Ok(ServerSettings {
+        issuer,
+        source,
+        env_locked,
+        allow_repeat_changes: allow_repeat,
+        locked: !env_locked && stored.is_some() && !allow_repeat,
+        public_base_url: state.config.public_base_url.clone(),
+    })
+}
+
+/// A bare origin only: scheme, host, optional port. The environment variable
+/// stays more lenient so existing deployments keep booting; anything typed in
+/// the dashboard is held to this shape because a path here would be glued onto
+/// every OIDC endpoint.
+fn normalize_issuer(raw: &str, cookie_secure_forced: bool) -> AppResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::bad_request("issuer is required"));
+    }
+    let url = url::Url::parse(trimmed)
+        .map_err(|_| AppError::bad_request("issuer must be an absolute http(s) URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(AppError::bad_request("issuer must use http or https"));
+    }
+    if url.host_str().is_none() {
+        return Err(AppError::bad_request("issuer must include a host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::bad_request("issuer must not contain credentials"));
+    }
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err(AppError::bad_request(
+            "issuer must be an origin only (no path, query or fragment)",
+        ));
+    }
+    if cookie_secure_forced && url.scheme() == "http" {
+        return Err(AppError::bad_request(
+            "SIGNET_COOKIE_SECURE forces Secure cookies, so the issuer must be https",
+        ));
+    }
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+async fn upsert_setting(pool: &PgPool, key: &str, value: Value) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn get_server(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    Ok(Json(json!(server_settings(&state).await?)))
+}
+
+async fn patch_server(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<ServerPatch>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let before = server_settings(&state).await?;
+
+    // A signal from the environment disables this whole section: the variable
+    // is the recovery path, and silently letting the database disagree with it
+    // would make the effective issuer depend on which instance answered.
+    if before.env_locked && (body.issuer.is_some() || body.allow_repeat_changes.is_some()) {
+        return Err(AppError::conflict(
+            "issuer is managed by SIGNET_ISSUER; change the environment variable instead",
+        ));
+    }
+
+    let mut issuer_change: Option<(String, String)> = None;
+    if let Some(raw) = body.issuer.as_deref() {
+        if before.env_locked {
+            return Err(AppError::conflict(
+                "issuer is managed by SIGNET_ISSUER; change the environment variable instead",
+            ));
+        }
+        if before.locked {
+            return Err(AppError::conflict(
+                "issuer is locked; enable allow_repeat_changes first",
+            ));
+        }
+        let next = normalize_issuer(raw, state.config.cookie_secure_forced)?;
+        if next != before.issuer {
+            upsert_setting(&state.pool, ISSUER_KEY, json!(next)).await?;
+            issuer_change = Some((before.issuer.clone(), next));
+        }
+    }
+
+    let mut policy_change = false;
+    if let Some(allow) = body.allow_repeat_changes {
+        if allow != before.allow_repeat_changes {
+            upsert_setting(&state.pool, ISSUER_ALLOW_REPEAT_KEY, json!(allow)).await?;
+            policy_change = true;
+        }
+    }
+
+    if issuer_change.is_some() || policy_change {
+        let effective = effective_issuer(&state.pool, &state.config).await?;
+        state.publish_issuer(effective.clone());
+
+        let (action, detail) = match &issuer_change {
+            Some((old, new)) => (
+                "settings.issuer_update",
+                json!({ "before": old, "after": new, "allow_repeat_changes": before.allow_repeat_changes }),
+            ),
+            None => (
+                "settings.issuer_repeat_policy",
+                json!({ "allowed": body.allow_repeat_changes }),
+            ),
+        };
+        record(
+            &state,
+            AuditEvent {
+                actor: Some(actor),
+                action,
+                resource_type: "settings",
+                resource_id: Some("issuer".into()),
+                detail,
+                ip,
+                user_agent: crate::http::extract::user_agent(&headers),
+                client_id: None,
+            },
+        )
+        .await;
+    }
+
+    Ok(Json(json!(server_settings(&state).await?)))
 }
 
 // --- SMTP relay settings ---

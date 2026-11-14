@@ -103,11 +103,12 @@ pub async fn test_callback(
     if row.expires_at < chrono::Utc::now() {
         return Ok(fail("the code has expired".into()));
     }
-    if row.redirect_uri != test_callback_url(state.config.public_base(), &client_id) {
+    let base = state.public_base();
+    if row.redirect_uri != test_callback_url(&base, &client_id) {
         return Ok(fail(format!(
             "the code was issued for another client ({} vs {})",
             row.redirect_uri,
-            test_callback_url(state.config.public_base(), &client_id)
+            test_callback_url(&base, &client_id)
         )));
     }
 

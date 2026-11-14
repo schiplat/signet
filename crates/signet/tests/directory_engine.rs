@@ -102,7 +102,7 @@ async fn stored(pool: &PgPool, source_id: Uuid, external_id: &str) -> Option<Sto
         r#"
         SELECT u.id, u.sub, u.email, u.username, u.display_name, u.password_hash, u.status,
                u.role, u.provisioned_via, u.local_disabled, u.directory_disabled, u.scim_disabled,
-               u.directory_groups, u.updated_at
+               signet_group_names(u.directory_groups) AS directory_groups, u.updated_at
         FROM directory_entries e JOIN users u ON u.id = e.user_id
         WHERE e.source_id = $1 AND e.external_id = $2
         "#,

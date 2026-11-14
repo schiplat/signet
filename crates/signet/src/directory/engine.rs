@@ -673,6 +673,36 @@ pub async fn apply_plan(
     }
     crate::audit::record_many(state, trouble).await;
 
+    // A full run that owned groups is the only run that may prune: an upstream
+    // group that disappeared leaves a directory-owned node with no members. The
+    // sweep spares nodes with children (an admin may have organised local groups
+    // under one) and tombstones rather than deletes, so a mistaken upstream
+    // change can be inspected afterwards.
+    if plan.reconciled && plan.groups_owned {
+        let pruned = sqlx::query(
+            r#"
+            UPDATE scim_groups g
+            SET deleted_at = NOW(), updated_at = NOW()
+            WHERE g.source = 'directory'
+              AND g.source_id = $1
+              AND g.deleted_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM users u WHERE u.directory_groups @> ARRAY[g.id]
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM scim_groups c WHERE c.parent_id = g.id AND c.deleted_at IS NULL
+              )
+            "#,
+        )
+        .bind(row.id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected();
+        if pruned > 0 {
+            tracing::info!(source = %row.code, pruned, "pruned empty directory groups");
+        }
+    }
+
     Ok(())
 }
 
@@ -782,7 +812,7 @@ async fn insert_user(
                            groups, phone, provisioned_via, local_disabled, directory_groups,
                            must_change_password, mfa_required, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5, '', 'active', 'member',
-                ARRAY[]::text[], NULL, $6, FALSE, $7,
+                '{}'::uuid[], NULL, $6, FALSE, signet_group_ids($7, 'directory', $8),
                 FALSE, FALSE, NOW(), NOW())
         "#,
     )
@@ -793,6 +823,7 @@ async fn insert_user(
     .bind(&fields.display_name)
     .bind(&row.kind)
     .bind(change.groups.as_deref().unwrap_or(&[]))
+    .bind(row.id)
     .execute(&mut **tx)
     .await
     .map_err(|e| unique_violation(e, &change.external_id, &fields.email))?;
@@ -867,7 +898,8 @@ async fn update_user(
             directory_disabled = FALSE,
             status = CASE WHEN local_disabled OR scim_disabled THEN 'disabled' ELSE 'active' END,
             directory_groups = CASE WHEN scim_managed THEN directory_groups
-                                    ELSE COALESCE($5::text[], directory_groups) END,
+                                    WHEN $5::text[] IS NULL THEN directory_groups
+                                    ELSE signet_group_ids($5, 'directory', $6) END,
             updated_at = NOW()
         WHERE id = $1
         RETURNING (SELECT was FROM before), status
@@ -878,6 +910,7 @@ async fn update_user(
     .bind(&fields.username)
     .bind(&fields.display_name)
     .bind(change.groups.as_deref())
+    .bind(source_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(|e| unique_violation(e, &change.external_id, &fields.email))?;

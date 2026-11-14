@@ -138,7 +138,7 @@ async fn an_id_token_is_not_introspectable_as_an_access_token() {
         .keys
         .load()
         .encode(&json!({
-            "iss": state.config.issuer,
+            "iss": state.issuer(),
             "sub": sub,
             "aud": client_id,
             "exp": now + 300,
@@ -164,7 +164,7 @@ async fn an_id_token_is_not_introspectable_as_an_access_token() {
         .keys
         .load()
         .encode(&json!({
-            "iss": state.config.issuer,
+            "iss": state.issuer(),
             "sub": sub,
             "aud": client_id,
             "exp": now + 300,
@@ -203,7 +203,8 @@ async fn client_credentials_mints_a_client_principal_without_a_refresh_token() {
     // Decode: sub is the client itself, no user claims.
     let token = body["access_token"].as_str().expect("access token");
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(&[state.config.issuer.as_str()]);
+    let issuer = state.issuer();
+    validation.set_issuer(&[issuer.as_str()]);
     validation.validate_aud = false;
     let data = decode::<Value>(token, state.keys.load().decoding(), &validation).expect("decode");
     assert_eq!(data.claims["sub"], json!(client_id));
@@ -323,7 +324,7 @@ async fn a_disabled_user_token_introspects_as_inactive() {
         .keys
         .load()
         .encode(&json!({
-            "iss": state.config.issuer,
+            "iss": state.issuer(),
             "sub": sub,
             "aud": client_id,
             "exp": now + 3600,

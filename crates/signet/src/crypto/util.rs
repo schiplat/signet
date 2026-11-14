@@ -17,6 +17,19 @@ pub fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(buf)
 }
 
+/// Prefixed, scan-friendly credential tokens: `sgn_pat_…`, `sgn_cs_…`,
+/// `sgn_cl_…`, `sgn_reg_…`.
+///
+/// The prefix identifies a credential as Signet's the moment someone pastes it
+/// into a log, a config file or a support ticket, and gives secret scanners
+/// (gitleaks-style `sgn_[a-z]+_` rules) an anchor to match against — without
+/// changing the entropy of the random part. Only long-lived credentials
+/// handed to operators or other systems carry one; short-lived internal
+/// tokens (sessions, auth codes, one-time links) stay bare.
+pub fn prefixed_token(prefix: &str, bytes: usize) -> String {
+    format!("{prefix}_{}", random_token(bytes))
+}
+
 pub fn sha256_hex(input: &str) -> String {
     hex_encode(&Sha256::digest(input.as_bytes()))
 }
