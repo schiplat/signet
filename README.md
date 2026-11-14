@@ -102,7 +102,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 ## Features
 
 - OIDC IdP: authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
-- Dashboard: users, clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
+- Dashboard: a combined **Directory** (users + organisation tree), clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
 - **Groups & departments as one tree**: Dashboard → Directory manages an organisational tree (`department` / `group`), membership and move/rename with cycle protection; the OIDC `groups` claim publishes direct group names. SCIM- and directory-owned nodes appear in the tree but stay managed by their source
 - **Self-service OAuth clients**: any signed-in user can register and manage their own app (name + redirect URIs) under Dashboard → My apps — owner-scoped, secret shown once, admins keep global control (Name / Owner columns)
 - **Web-managed issuer**: the public issuer can be set in Dashboard → Settings → Server identity (audited, locked after the first change); `SIGNET_ISSUER` still wins as the recovery path
@@ -125,6 +125,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API** (unified `/api/v1/...`, incl. SSO federation) |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / recovery codes / global & per-user enforcement |
 | [docs/dashboard.md](./docs/dashboard.md) | Dashboard pages & permissions |
+| [docs/groups.md](./docs/groups.md) | **Groups & departments** (tree, membership, sources, API, claim semantics) |
 | [docs/directory-sync.md](./docs/directory-sync.md) | **Directory sync** (LDAP / HTTP JSON pull, bind-through login, scheduler, `signet sync` CLI) |
 | [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes and breaking changes |
@@ -174,7 +175,7 @@ In production/staging, Rust serves `dashboard/dist` via `rust-embed` (the folder
 
 ### 4. Account model
 
-- **No public registration**; staff accounts are provisioned under **Dashboard → Users** (frontend route `/users`, API `/api/v1/admin/users`)  
+- **No public registration**; staff accounts are provisioned under **Dashboard → Directory** (frontend route `/directory`, API `/api/v1/admin/users`)  
 - Roles: `admin` / `manager` / `member` (see design doc)  
 - First-run **`/setup`** page creates the initial `admin`  
 - Optional **MFA** (global or per-user enforced); users may self-enroll from the account menu  
@@ -237,5 +238,5 @@ migrations/             Postgres migrations (… audit client_id, identity feder
 build/                  Dockerfiles + local compose (image build, optional Postgres)
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 Production compose + env template (OSS config bundle)
-docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · directory-sync
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync
 ```
