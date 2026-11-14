@@ -98,7 +98,7 @@ cargo run
 ## 功能概览
 
 - OIDC IdP：authorize / token / PKCE / refresh / userinfo / JWKS / end_session / revoke
-- Dashboard：用户、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
+- Dashboard：合并的 **Directory**（用户 + 组织树）、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
 - **组/部门组织树**：Dashboard → Directory 管理一棵 `department` / `group` 树，含成员、移动、改名与防环校验；OIDC `groups` claim 只下发直接组名。SCIM/目录同步的节点会出现在树里，但名称与成员仍归来源管理
 - **客户端自助注册**：任何登录用户可在 Dashboard → My apps 注册并管理自己的应用（应用名 + 回调地址），按 owner 隔离、secret 只显示一次；管理员仍可全局管理（Name / Owner 列）
 - **Issuer 可在 Web 端配置**：Dashboard → Settings → Server identity（审计 + 首次保存后锁定）；`SIGNET_ISSUER` 环境变量优先，作为改错后的恢复通道
@@ -121,6 +121,7 @@ cargo run
 | [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API**（统一 `/api/v1/...`，含第三方登录） |
 | [docs/mfa.md](./docs/mfa.md) | TOTP / 恢复码 / 全局与用户强制策略 |
 | [docs/dashboard.md](./docs/dashboard.md) | 管理台页面与权限说明 |
+| [docs/groups.md](./docs/groups.md) | **组与部门**（组织树、成员、来源归属、API、claim 语义） |
 | [docs/directory-sync.md](./docs/directory-sync.md) | **目录同步**（LDAP / HTTP JSON 拉取、bind 直通、定时调度、`signet sync` CLI） |
 | [docs/directory-mapping-ux.md](./docs/directory-mapping-ux.md) | 目录同步字段映射交互设计（含实现记录） |
 | [docs/deploy.md](./docs/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
@@ -169,7 +170,7 @@ cd .. && cargo build -p signet
 
 ### 4. 账号模型
 
-- **无公开注册**；staff 在 **Dashboard → Users**（前端路由 `/users`，API `/api/v1/admin/users`）开户  
+- **无公开注册**；staff 在 **Dashboard → Directory**（前端路由 `/directory`，API `/api/v1/admin/users`）开户  
 - 角色：`admin` / `manager` / `member`（见设计文档）  
 - 首次运行经 **`/setup`** 页面创建首位 `admin`  
 - 可选 **MFA**（全局或按用户强制）；账户菜单可自愿绑定  
@@ -233,5 +234,5 @@ examples/               axum-oidc-client：业务系统接入 quickstart（可�
 build/                  Dockerfile + 本地 compose（镜像构建、可选 Postgres）
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 生产 compose + env 模板（OSS 配置包）
-docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · directory-sync
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync
 ```
