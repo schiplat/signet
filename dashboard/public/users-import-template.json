@@ -1,0 +1,14 @@
+[
+  {
+    "email": "alice@example.com",
+    "username": "alice",
+    "display_name": "Alice Chen",
+    "role": "member",
+    "groups": ["eng", "ops"],
+    "phone": "+86 138 0000 0000",
+    "password": "ChangeMe-2026"
+  },
+  {
+    "email": "bob@example.com"
+  }
+]

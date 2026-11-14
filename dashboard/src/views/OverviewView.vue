@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import {
+  AlertTriangle,
   AppWindow,
+  ArrowRight,
   ArrowUpRight,
+  Check,
   Boxes,
   Compass,
   DoorOpen,
@@ -15,6 +18,7 @@ import {
   Terminal,
   UserRoundCog,
   Users,
+  X,
 } from "@lucide/vue";
 import type { Component } from "vue";
 import { computed, onMounted, ref, watch } from "vue";
@@ -23,11 +27,317 @@ import DonutChart from "@/components/ui/DonutChart.vue";
 import HBarRank from "@/components/ui/HBarRank.vue";
 import LoginTrendChart from "@/components/ui/LoginTrendChart.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
-import { fetchAdminStats, listClients, type AdminStats, type AdminClient, type NameCount } from "@/lib/api";
+import UiButton from "@/components/ui/UiButton.vue";
+import {
+  fetchAdminStats,
+  fetchServerSettings,
+  fetchSmtpSettings,
+  listClients,
+  type AdminStats,
+  type AdminClient,
+  type NameCount,
+  type ServerSettings,
+  type SmtpSettings,
+} from "@/lib/api";
+import { useAuthStore } from "@/stores/auth";
 
 const loading = ref(true);
 const error = ref("");
 const stats = ref<AdminStats | null>(null);
+
+// --- first-run setup guide ------------------------------------------------
+//
+// Shown to administrators until they dismiss it. Every step is derived from
+// data that already exists (issuer source, SMTP configuration, registered
+// clients), so the guide never asks for the same value twice and cannot drift
+// from the real state. Dismissal is per user and per browser: a guide is a
+// convenience, not a deployment setting.
+const auth = useAuthStore();
+const serverSettings = ref<ServerSettings | null>(null);
+const smtp = ref<SmtpSettings | null>(null);
+const guideLoaded = ref(false);
+const guideDismissed = ref(false);
+
+const guideStorageKey = computed(
+  () => `signet.getStarted.dismissed.${auth.user?.id ?? "anonymous"}`,
+);
+
+type GuideStatus = "done" | "warning" | "todo";
+
+interface GuideStep {
+  key: string;
+  title: string;
+  detail: string;
+  status: GuideStatus;
+  /// Required for a usable deployment. The guide cannot be dismissed while one
+  /// of these is not `done`; email delivery is deliberately optional (a local
+  /// trial has no relay and still works).
+  required: boolean;
+  to?: string;
+  cta?: string;
+}
+
+const checkedAt = ref<Date | null>(null);
+
+/// `localhost` plain http is a legitimate local trial; anything else on http is
+/// a credential-in-the-clear warning rather than a hard error.
+function isLocalHost(host: string) {
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+/// Validates the *saved* issuer rather than merely its presence: a value that
+/// parses, matches the origin the admin is actually using, and uses https off
+/// localhost. The API already rejects a malformed origin; this catches the
+/// operational mismatch (dashboard on one URL, clients sent to another).
+function checkIssuer(): { status: GuideStatus; detail: string } {
+  const saved = serverSettings.value;
+  if (!saved) {
+    return {
+      status: "warning",
+      detail: "Could not read the issuer settings — open Settings to check them.",
+    };
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(saved.issuer);
+  } catch {
+    return { status: "warning", detail: "The saved issuer is not a valid URL." };
+  }
+  const origin = window.location.origin;
+  const trimmed = saved.issuer.replace(/\/$/, "");
+  // localhost is a working value for a local trial and a broken one for every
+  // client that is not on this machine — say so instead of calling it done.
+  if (isLocalHost(parsed.hostname)) {
+    return {
+      status: "warning",
+      detail: `${saved.issuer} is only reachable from this machine. Replace it with the address clients will use (for example https://sso.example.com) before connecting real applications.`,
+    };
+  }
+  if (saved.source === "default") {
+    return trimmed === origin
+      ? {
+          status: "done",
+          detail: `Using the built-in default ${saved.issuer}, which matches this dashboard.`,
+        }
+      : {
+          status: "todo",
+          detail: `Still on the built-in default ${saved.issuer}, but this dashboard is opened as ${origin}. Set the public URL clients will use.`,
+        };
+  }
+  if (parsed.protocol === "http:" && !isLocalHost(parsed.hostname)) {
+    return {
+      status: "warning",
+      detail: `${saved.issuer} is plain http — sign-in traffic and cookies would travel unencrypted. Use https outside local development.`,
+    };
+  }
+  if (trimmed !== origin) {
+    return {
+      status: "warning",
+      detail: `Saved as ${saved.issuer}, but this dashboard is opened as ${origin}. Clients are sent to the saved issuer — confirm DNS and the reverse proxy point both at this instance.`,
+    };
+  }
+  return {
+    status: "done",
+    detail: `Clients discover this server at ${saved.issuer}.`,
+  };
+}
+
+/// Checks the parts a password-reset actually needs: a relay plus a From
+/// address. `configured` alone can be true while a field is still empty.
+function checkSmtp(): { status: GuideStatus; detail: string } {
+  const saved = smtp.value;
+  if (!saved) {
+    return {
+      status: "warning",
+      detail: "Could not read the SMTP settings — open Settings to check them.",
+    };
+  }
+  if (!saved.configured) {
+    return {
+      status: "todo",
+      detail:
+        "No relay configured: password reset and email verification cannot be delivered. Optional for a local trial.",
+    };
+  }
+  if (!saved.host || !saved.from) {
+    return {
+      status: "warning",
+      detail: "Mail is marked configured, but the relay host or From address is missing — reset mail will fail.",
+    };
+  }
+  return {
+    status: "done",
+    detail: `Mail is sent through ${saved.host} as ${saved.from}.`,
+  };
+}
+
+/// `n > 0` is not enough: a disabled client refuses sign-in, and a redirect URI
+/// that is not http(s) can never complete a flow.
+function checkClients(): { status: GuideStatus; detail: string } {
+  if (clients.value.length === 0) {
+    return {
+      status: "todo",
+      detail: "Sign-in only becomes useful once a client is registered with a redirect URI.",
+    };
+  }
+  const enabled = clients.value.filter((c) => c.enabled);
+  if (enabled.length === 0) {
+    return {
+      status: "warning",
+      detail: `${clients.value.length} application(s) registered, but all are disabled — sign-in will be refused.`,
+    };
+  }
+  const broken = enabled.find(
+    (c) =>
+      c.redirect_uris.length === 0 ||
+      c.redirect_uris.some((u) => !/^https?:\/\//i.test(u) || u.includes("#")),
+  );
+  if (broken) {
+    return {
+      status: "warning",
+      detail: `"${broken.client_name || broken.client_id}" has a redirect URI that is missing, not http(s), or carries a fragment.`,
+    };
+  }
+  return {
+    status: "done",
+    detail: `${enabled.length} enabled application${enabled.length === 1 ? "" : "s"} with valid redirect URIs.`,
+  };
+}
+
+const guideSteps = computed<GuideStep[]>(() => {
+  const issuer = checkIssuer();
+  const mail = checkSmtp();
+  const client = checkClients();
+  return [
+    {
+      key: "admin",
+      title: "Administrator account",
+      detail: `Signed in as ${auth.user?.email ?? "an administrator"}.`,
+      status: "done",
+      required: true,
+    },
+    {
+      key: "issuer",
+      title: "Public issuer",
+      detail: issuer.detail,
+      status: issuer.status,
+      required: true,
+      to: "/settings",
+      cta: "Review issuer",
+    },
+    {
+      key: "email",
+      title: "Email delivery",
+      detail: mail.detail,
+      status: mail.status,
+      required: false,
+      to: "/settings",
+      cta: "Configure SMTP",
+    },
+    {
+      key: "client",
+      title: "First application",
+      detail: client.detail,
+      status: client.status,
+      required: true,
+      to: "/clients",
+      cta: "Register a client",
+    },
+  ];
+});
+
+const guideDone = computed(() => guideSteps.value.filter((s) => s.status === "done").length);
+const guideRequiredPending = computed(
+  () => guideSteps.value.filter((s) => s.required && s.status !== "done").length,
+);
+const guideCanDismiss = computed(() => guideRequiredPending.value === 0);
+const guideWarnings = computed(
+  () => guideSteps.value.filter((s) => s.status === "warning").length,
+);
+const guideAllDone = computed(() => guideDone.value === guideSteps.value.length);
+const showGuide = computed(
+  () => auth.isAdmin && guideLoaded.value && !guideDismissed.value,
+);
+const checkedLabel = computed(() =>
+  checkedAt.value
+    ? `Checked ${checkedAt.value.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "",
+);
+
+function statusColor(status: GuideStatus) {
+  return status === "done"
+    ? "hsl(152 42% 42%)"
+    : status === "warning"
+      ? "hsl(38 92% 45%)"
+      : "hsl(215 14% 82%)";
+}
+
+/// A tint of [`statusColor`] for the icon chip; `color-mix` is avoided to keep
+/// the value legible in older browser engines.
+function statusTint(status: GuideStatus) {
+  return status === "done"
+    ? "hsl(152 42% 42% / 0.12)"
+    : status === "warning"
+      ? "hsl(38 92% 45% / 0.14)"
+      : "transparent";
+}
+
+function statusLabel(status: GuideStatus) {
+  return status === "done" ? "Done" : status === "warning" ? "Needs attention" : "To do";
+}
+
+
+function readGuideDismissed() {
+  try {
+    guideDismissed.value = localStorage.getItem(guideStorageKey.value) === "1";
+  } catch {
+    guideDismissed.value = false;
+  }
+}
+
+function dismissGuide() {
+  // Required work first: a guide that can be dismissed while sign-in is still
+  // broken is a guide that will never be finished.
+  if (!guideCanDismiss.value) return;
+  guideDismissed.value = true;
+  try {
+    localStorage.setItem(guideStorageKey.value, "1");
+  } catch {
+    /* storage disabled: the guide simply returns next visit */
+  }
+}
+
+function reopenGuide() {
+  guideDismissed.value = false;
+  try {
+    localStorage.removeItem(guideStorageKey.value);
+  } catch {
+    /* ignore */
+  }
+}
+
+async function loadGuide() {
+  const [issuerRes, smtpRes] = await Promise.allSettled([
+    fetchServerSettings(),
+    fetchSmtpSettings(),
+  ]);
+  if (issuerRes.status === "fulfilled") serverSettings.value = issuerRes.value;
+  if (smtpRes.status === "fulfilled") smtp.value = smtpRes.value;
+  guideLoaded.value = true;
+  checkedAt.value = new Date();
+}
+
+/// Re-reads everything the checks depend on, so "looks correct" is measured
+/// against the server now rather than at page load.
+async function recheckGuide() {
+  guideLoaded.value = false;
+  try {
+    clients.value = await listClients();
+  } catch {
+    /* keep the previous list; the check reports what it has */
+  }
+  await loadGuide();
+}
 
 /** Chart range for the User logins trend (24h default, switched by KPI taps). */
 const loginRange = ref<"24h" | "7d" | "30d">("24h");
@@ -63,6 +373,10 @@ onMounted(async () => {
     clients.value = await listClients();
   } catch {
     // Non-fatal: the filter dropdown just stays with the default options.
+  }
+  if (auth.isAdmin) {
+    readGuideDismissed();
+    void loadGuide();
   }
 });
 
@@ -238,6 +552,14 @@ function formatShortTime(iso: string) {
       description="Global snapshot of Signet identity and connected applications."
     >
       <template #actions>
+        <UiButton
+          v-if="auth.isAdmin && guideLoaded && !showGuide && !guideAllDone"
+          variant="ghost"
+          size="sm"
+          @click="reopenGuide"
+        >
+          Setup guide · {{ guideDone }}/{{ guideSteps.length }}
+        </UiButton>
         <label class="flex items-center gap-2 text-xs text-muted-foreground">
           <Boxes class="h-3.5 w-3.5" />
           <span class="sr-only">Filter by app</span>
@@ -252,6 +574,163 @@ function formatShortTime(iso: string) {
         </label>
       </template>
     </PageHeader>
+
+    <section v-if="showGuide" class="surface-card overflow-hidden">
+      <div class="flex items-start justify-between gap-4 px-5 pb-5 pt-6">
+        <div class="min-w-0">
+          <p class="text-[10px] font-semibold uppercase tracking-[0.14em] text-primary/70">
+            First-run setup
+          </p>
+          <h2 class="mt-1.5 text-lg font-semibold tracking-tight">
+            {{ guideAllDone ? "You're all set" : "Finish setting up Signet" }}
+          </h2>
+          <p class="mt-1.5 max-w-2xl text-[12px] leading-relaxed text-muted-foreground">
+            {{
+              guideAllDone
+                ? "Every required check passes. Dismiss this guide — the same checks stay available from the header."
+                : "Required steps are verified against the live configuration. The guide can be dismissed once they pass."
+            }}
+          </p>
+        </div>
+
+        <div class="flex shrink-0 items-start gap-1">
+          <div class="pr-1 text-right">
+            <p
+              class="text-2xl font-semibold leading-none tabular-nums"
+              :class="guideAllDone ? 'text-emerald-600' : 'text-foreground'"
+            >
+              {{ guideDone }}<span class="text-sm font-normal text-muted-foreground/60">/{{ guideSteps.length }}</span>
+            </p>
+            <p class="mt-1 text-[10px] uppercase tracking-[0.08em] text-muted-foreground">
+              complete
+            </p>
+          </div>
+          <button
+            type="button"
+            class="-mr-1 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            :disabled="!guideCanDismiss"
+            :title="
+              guideCanDismiss
+                ? 'Hide the setup guide'
+                : 'Finish the required steps before dismissing'
+            "
+            @click="dismissGuide"
+          >
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <div class="px-5">
+        <div class="flex h-1 w-full gap-1">
+          <span
+            v-for="step in guideSteps"
+            :key="step.key"
+            class="h-1 flex-1 rounded-full transition-colors duration-300"
+            :style="{ background: statusColor(step.status) }"
+          />
+        </div>
+        <div
+          class="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground"
+        >
+          <span
+            v-if="guideWarnings"
+            class="inline-flex items-center gap-1 font-medium text-amber-600"
+          >
+            <AlertTriangle class="h-3 w-3" />
+            {{ guideWarnings }} needs attention
+          </span>
+          <span v-if="checkedLabel" class="tabular-nums">{{ checkedLabel }}</span>
+          <button
+            type="button"
+            class="font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+            :disabled="!guideLoaded"
+            @click="recheckGuide"
+          >
+            Re-check
+          </button>
+        </div>
+      </div>
+
+      <ul class="mt-4 space-y-1 px-2 pb-1">
+        <li
+          v-for="(step, i) in guideSteps"
+          :key="step.key"
+          class="flex items-start gap-3 rounded-xl px-3 py-2.5 transition-colors"
+          :class="step.status === 'warning' ? 'bg-amber-500/[0.07]' : 'hover:bg-card/70'"
+        >
+          <span
+            class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
+            :class="step.status === 'todo' ? 'bg-muted text-muted-foreground' : ''"
+            :style="
+              step.status === 'todo'
+                ? undefined
+                : { background: statusTint(step.status), color: statusColor(step.status) }
+            "
+          >
+            <Check v-if="step.status === 'done'" class="h-3.5 w-3.5" />
+            <AlertTriangle v-else-if="step.status === 'warning'" class="h-3.5 w-3.5" />
+            <template v-else>{{ i + 1 }}</template>
+          </span>
+
+          <div class="min-w-0 flex-1">
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <p class="text-[13px] font-medium">{{ step.title }}</p>
+              <span
+                class="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em]"
+                :class="
+                  step.status === 'done'
+                    ? 'text-emerald-700/80'
+                    : step.status === 'warning'
+                      ? 'bg-amber-500/12 text-amber-700'
+                      : 'bg-muted text-muted-foreground'
+                "
+              >
+                {{ statusLabel(step.status) }}
+              </span>
+              <span
+                v-if="!step.required"
+                class="text-[10px] uppercase tracking-[0.06em] text-muted-foreground/60"
+              >
+                optional
+              </span>
+            </div>
+            <p class="mt-0.5 text-[12px] leading-relaxed text-muted-foreground">
+              {{ step.detail }}
+            </p>
+          </div>
+
+          <RouterLink
+            v-if="step.status !== 'done' && step.to"
+            :to="step.to"
+            class="group mt-0.5 inline-flex shrink-0 items-center gap-1 text-[12px] font-medium text-foreground hover:underline"
+          >
+            {{ step.cta }}
+            <ArrowRight class="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+          </RouterLink>
+        </li>
+      </ul>
+
+      <div class="flex flex-wrap items-center justify-between gap-2 px-5 pb-5 pt-2">
+        <p class="text-[11px] text-muted-foreground">
+          <template v-if="guideCanDismiss">
+            Read-only checks. You can dismiss this guide.
+          </template>
+          <template v-else>
+            Required steps must pass before this guide can be dismissed.
+          </template>
+        </p>
+        <UiButton
+          size="sm"
+          variant="secondary"
+          :disabled="!guideCanDismiss"
+          :title="guideCanDismiss ? 'Hide the setup guide' : 'Finish the required steps first'"
+          @click="dismissGuide"
+        >
+          Dismiss guide
+        </UiButton>
+      </div>
+    </section>
 
     <p v-if="error" class="field-error">{{ error }}</p>
 

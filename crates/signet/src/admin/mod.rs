@@ -60,7 +60,7 @@ async fn integrations(
 ) -> AppResult<Json<serde_json::Value>> {
     let _ = require_admin_user(&state, &headers).await?;
     let scim_configured: bool = scim_token_configured(&state.pool).await?;
-    let base = state.config.public_base();
+    let base = state.public_base();
     Ok(Json(json!({
         "scim": {
             "enabled": scim_configured,
@@ -802,10 +802,59 @@ struct ListUsersQuery {
     q: Option<String>,
     sort: Option<String>,
     dir: Option<String>,
+    /// Restrict to one group (`uuid`) or to users in no group (`ungrouped`).
+    /// Absent means every user.
+    #[serde(default)]
+    group_id: Option<String>,
+    /// Expand a group to its whole subtree (departments); ignored for
+    /// `ungrouped` and when no group is selected.
+    #[serde(default)]
+    include_descendants: bool,
     #[serde(default)]
     limit: Option<i64>,
     #[serde(default)]
     offset: Option<i64>,
+}
+
+/// Resolves the dashboard's group filter into ids.
+///
+/// `include_descendants` walks the adjacency list once per request and returns
+/// the subtree as an array, which the list query then matches with `&&` — the
+/// GIN index answers that, whereas a per-row recursive join would not.
+async fn resolve_group_filter(
+    state: &AppState,
+    group_id: Option<&str>,
+    include_descendants: bool,
+) -> AppResult<(Option<Vec<Uuid>>, bool)> {
+    let Some(raw) = group_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((None, false));
+    };
+    if raw == "ungrouped" {
+        return Ok((None, true));
+    }
+    let id: Uuid = raw
+        .parse()
+        .map_err(|_| AppError::bad_request("invalid group_id"))?;
+    let ids = if include_descendants {
+        sqlx::query_scalar::<_, Uuid>(
+            r#"
+            WITH RECURSIVE sub AS (
+                SELECT id FROM scim_groups WHERE id = $1 AND deleted_at IS NULL
+                UNION ALL
+                SELECT g.id FROM scim_groups g
+                JOIN sub ON g.parent_id = sub.id
+                WHERE g.deleted_at IS NULL
+            )
+            SELECT id FROM sub
+            "#,
+        )
+        .bind(id)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        vec![id]
+    };
+    Ok((Some(ids), false))
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -840,6 +889,8 @@ async fn list_users(
             .map(str::trim)
             .filter(|needle| !needle.is_empty())
             .map(like_pattern);
+    let (group_ids, ungrouped) =
+        resolve_group_filter(&state, q.group_id.as_deref(), q.include_descendants).await?;
 
     // `u.id` breaks ties. Without it the order of rows sharing a sort key is
     // whatever the plan happens to produce, which differs between the page
@@ -847,19 +898,31 @@ async fn list_users(
     // `created_at`, and those are exactly the rows a page boundary can drop or
     // repeat.
     let page_sql = format!(
-        "SELECT {USER_COLS} FROM users u WHERE {USER_SEARCH_SQL} \
-         ORDER BY {column} {direction}, u.id ASC LIMIT $2 OFFSET $3"
+        "SELECT {USER_COLS} FROM users u \
+         WHERE {USER_SEARCH_SQL} \
+           AND ($2::uuid[] IS NULL OR u.groups && $2::uuid[] OR u.directory_groups && $2::uuid[]) \
+           AND (NOT $3 OR (cardinality(u.groups) = 0 AND cardinality(u.directory_groups) = 0)) \
+         ORDER BY {column} {direction}, u.id ASC LIMIT $4 OFFSET $5"
     );
-    let count_sql = format!("SELECT COUNT(*) FROM users u WHERE {USER_SEARCH_SQL}");
+    let count_sql = format!(
+        "SELECT COUNT(*) FROM users u \
+         WHERE {USER_SEARCH_SQL} \
+           AND ($2::uuid[] IS NULL OR u.groups && $2::uuid[] OR u.directory_groups && $2::uuid[]) \
+           AND (NOT $3 OR (cardinality(u.groups) = 0 AND cardinality(u.directory_groups) = 0))"
+    );
 
     let (users, total) = tokio::try_join!(
         sqlx::query_as::<_, User>(&page_sql)
             .bind(&pattern)
+            .bind(&group_ids)
+            .bind(ungrouped)
             .bind(limit)
             .bind(offset)
             .fetch_all(&state.pool),
         sqlx::query_scalar::<_, i64>(&count_sql)
             .bind(&pattern)
+            .bind(&group_ids)
+            .bind(ungrouped)
             .fetch_one(&state.pool),
     )?;
 
@@ -1435,7 +1498,7 @@ async fn update_user(
         r#"
         UPDATE users
         SET email = $2, display_name = $3, role = $4,
-            mfa_required = $5, must_change_password = $6, groups = $7, phone = $8,
+            mfa_required = $5, must_change_password = $6, groups = signet_group_ids($7), phone = $8,
             username = $9, local_disabled = $10,
             status = CASE WHEN $10 OR directory_disabled OR scim_disabled
                           THEN 'disabled' ELSE 'active' END,
@@ -2055,7 +2118,7 @@ async fn import_users(
             }
             let res = sqlx::query(
                 r#"
-                UPDATE users SET display_name = $2, role = $3, groups = $4, phone = $5,
+                UPDATE users SET display_name = $2, role = $3, groups = signet_group_ids($4), phone = $5,
                     updated_at = NOW()
                 WHERE id = $1
                 "#,
@@ -2227,6 +2290,13 @@ async fn import_users(
     })))
 }
 
+#[derive(Debug, Deserialize)]
+struct ExportUsersQuery {
+    group_id: Option<String>,
+    #[serde(default)]
+    include_descendants: bool,
+}
+
 /// CSV export of the user directory (same shape the list API returns).
 ///
 /// Formula-neutralizing like the audit export: user-chosen fields (emails,
@@ -2234,8 +2304,11 @@ async fn import_users(
 async fn export_users(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(q): Query<ExportUsersQuery>,
 ) -> AppResult<axum::response::Response> {
     require_staff_user(&state, &headers).await?;
+    let (group_ids, ungrouped) =
+        resolve_group_filter(&state, q.group_id.as_deref(), q.include_descendants).await?;
     #[derive(sqlx::FromRow)]
     struct ExportRow {
         email: String,
@@ -2247,8 +2320,14 @@ async fn export_users(
         phone: Option<String>,
     }
     let rows: Vec<ExportRow> = sqlx::query_as(
-        "SELECT email, username, display_name, role, status, groups, phone FROM users ORDER BY created_at",
+        "SELECT email, username, display_name, role, status, \
+                signet_group_names(groups) AS groups, phone FROM users u \
+         WHERE ($1::uuid[] IS NULL OR u.groups && $1::uuid[] OR u.directory_groups && $1::uuid[]) \
+           AND (NOT $2 OR (cardinality(u.groups) = 0 AND cardinality(u.directory_groups) = 0)) \
+         ORDER BY u.created_at",
     )
+    .bind(&group_ids)
+    .bind(ungrouped)
     .fetch_all(&state.pool)
     .await?;
 

@@ -356,7 +356,8 @@ async fn the_id_token_carries_auth_time_from_the_code() {
 
     let id_token = body["id_token"].as_str().expect("id token");
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
-    validation.set_issuer(&[state.config.issuer.as_str()]);
+    let issuer = state.issuer();
+    validation.set_issuer(&[issuer.as_str()]);
     validation.validate_aud = false;
     let data = jsonwebtoken::decode::<Value>(id_token, state.keys.load().decoding(), &validation)
         .expect("decode id token");

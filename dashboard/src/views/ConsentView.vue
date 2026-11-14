@@ -115,7 +115,7 @@ async function submit(allow: boolean) {
           <p class="type-meta">Signet is asking for your consent</p>
         </div>
 
-      <div class="rounded-2xl border border-border/50 bg-card p-5 shadow-sm">
+      <div class="surface-card p-5">
         <p class="text-sm font-medium">{{ clientId || "Application" }}</p>
         <p class="type-meta mt-0.5 break-all text-xs">{{ redirectUri }}</p>
 
@@ -190,7 +190,7 @@ async function submit(allow: boolean) {
           <p class="type-meta">You did not grant access to this application.</p>
         </div>
 
-        <div class="rounded-2xl border border-border/50 bg-card p-5 text-center shadow-sm">
+        <div class="surface-card p-5 text-center">
           <p class="text-sm text-muted-foreground">
             No permissions were shared with <span class="font-medium text-foreground">{{ clientId || "the application" }}</span>.
           </p>

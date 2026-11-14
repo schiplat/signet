@@ -1,6 +1,7 @@
 use crate::admin::{require_admin_user, require_staff_user};
 use crate::audit::{record, AuditEvent};
-use crate::crypto::util::random_token;
+use crate::crypto::util::prefixed_token;
+use crate::developer::{normalize_scopes, normalize_uris};
 use crate::error::{AppError, AppResult};
 use crate::http::extract::AuditIp;
 use crate::http::source_ip::normalize_cidrs;
@@ -15,9 +16,21 @@ use serde_json::json;
 use uuid::Uuid;
 
 const CLIENT_RETURNING: &str = r#"
-    id, client_id, redirect_uris, post_logout_redirect_uris,
+    id, client_id, client_name, redirect_uris, post_logout_redirect_uris,
     grant_types, extra_claims, backchannel_logout_uri, scopes, enabled,
-    ip_allowlist_enabled, allowed_cidrs, created_at, updated_at
+    ip_allowlist_enabled, allowed_cidrs, created_at, updated_at, owner_id
+"#;
+
+/// `CLIENT_RETURNING` with the `c.` alias the list query needs for its join.
+///
+/// `RETURNING` clauses cannot join, so the single-client endpoints return a
+/// NULL `owner_email` and [`with_owner_email`] fills it in. The list query is
+/// the one place the owner address comes straight out of SQL.
+const CLIENT_LIST_COLUMNS: &str = r#"
+    c.id, c.client_id, c.client_name, c.redirect_uris, c.post_logout_redirect_uris,
+    c.grant_types, c.extra_claims, c.backchannel_logout_uri, c.scopes, c.enabled,
+    c.ip_allowlist_enabled, c.allowed_cidrs, c.created_at, c.updated_at,
+    c.owner_id, u.email AS owner_email
 "#;
 
 pub fn router() -> Router<AppState> {
@@ -40,6 +53,9 @@ pub fn router() -> Router<AppState> {
 pub struct AdminClient {
     pub id: Uuid,
     pub client_id: String,
+    /// Display name; `''` for clients that predate self-service registration
+    /// or were created without one — the dashboard falls back to client_id.
+    pub client_name: String,
     pub redirect_uris: Vec<String>,
     pub post_logout_redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
@@ -51,6 +67,14 @@ pub struct AdminClient {
     pub allowed_cidrs: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// The user who self-registered this client; `None` for clients created by
+    /// an administrator (or whose owner was deleted). Ownership means "who may
+    /// manage it on the My apps page", not a restriction on the admin surface.
+    pub owner_id: Option<Uuid>,
+    /// Owner's email. Only the list query joins it; single-client responses
+    /// fill it through [`with_owner_email`], so the field is optional there.
+    #[sqlx(default)]
+    pub owner_email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,11 +121,28 @@ async fn list_clients(
 ) -> AppResult<Json<Vec<AdminClient>>> {
     require_staff_user(&state, &headers).await?;
     let rows = sqlx::query_as::<_, AdminClient>(&format!(
-        "SELECT {CLIENT_RETURNING} FROM client_apps ORDER BY created_at DESC"
+        "SELECT {CLIENT_LIST_COLUMNS} FROM client_apps c \
+         LEFT JOIN users u ON u.id = c.owner_id \
+         ORDER BY c.created_at DESC"
     ))
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(rows))
+}
+
+/// Fills `owner_email` on a single-client response.
+///
+/// The `RETURNING` clauses cannot join, so this is one extra query on admin
+/// mutations (rare) and keeps every response shape identical — the dashboard
+/// renders the Owner column from whichever endpoint produced the row.
+async fn with_owner_email(state: &AppState, client: &mut AdminClient) -> AppResult<()> {
+    if let Some(owner_id) = client.owner_id {
+        client.owner_email = sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+            .bind(owner_id)
+            .fetch_optional(&state.pool)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn create_client(
@@ -147,12 +188,12 @@ async fn create_client(
             }
             s
         }
-        _ => random_token(32),
+        _ => prefixed_token("sgn_cs", 32),
     };
     let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &plaintext);
     let id = Uuid::new_v4();
 
-    let client = sqlx::query_as::<_, AdminClient>(&format!(
+    let mut client = sqlx::query_as::<_, AdminClient>(&format!(
         r#"
         INSERT INTO client_apps (
             id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
@@ -211,6 +252,7 @@ async fn create_client(
     )
     .await;
 
+    with_owner_email(&state, &mut client).await?;
     Ok(Json(ClientCreated {
         client,
         client_secret: plaintext,
@@ -288,7 +330,7 @@ async fn update_client(
             .or(existing.extra_claims.as_ref()),
     )?;
 
-    let client = sqlx::query_as::<_, AdminClient>(&format!(
+    let mut client = sqlx::query_as::<_, AdminClient>(&format!(
         r#"
         UPDATE client_apps
         SET redirect_uris = $2,
@@ -346,6 +388,7 @@ async fn update_client(
     )
     .await;
 
+    with_owner_email(&state, &mut client).await?;
     Ok(Json(client))
 }
 
@@ -390,7 +433,7 @@ async fn disable_client(
 ) -> AppResult<Json<AdminClient>> {
     let actor = require_staff_user(&state, &headers).await?;
     let ip = crate::http::extract::audit_ip(audit_ip);
-    let client = set_enabled(&state, id, false).await?;
+    let mut client = set_enabled(&state, id, false).await?;
     record(
         &state,
         AuditEvent {
@@ -405,6 +448,7 @@ async fn disable_client(
         },
     )
     .await;
+    with_owner_email(&state, &mut client).await?;
     Ok(Json(client))
 }
 
@@ -416,7 +460,7 @@ async fn enable_client(
 ) -> AppResult<Json<AdminClient>> {
     let actor = require_staff_user(&state, &headers).await?;
     let ip = crate::http::extract::audit_ip(audit_ip);
-    let client = set_enabled(&state, id, true).await?;
+    let mut client = set_enabled(&state, id, true).await?;
     record(
         &state,
         AuditEvent {
@@ -431,6 +475,7 @@ async fn enable_client(
         },
     )
     .await;
+    with_owner_email(&state, &mut client).await?;
     Ok(Json(client))
 }
 
@@ -442,10 +487,10 @@ async fn rotate_secret(
 ) -> AppResult<Json<ClientCreated>> {
     let actor = require_staff_user(&state, &headers).await?;
     let ip = crate::http::extract::audit_ip(audit_ip);
-    let plaintext = random_token(32);
+    let plaintext = prefixed_token("sgn_cs", 32);
     let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &plaintext);
 
-    let client = sqlx::query_as::<_, AdminClient>(&format!(
+    let mut client = sqlx::query_as::<_, AdminClient>(&format!(
         r#"
         UPDATE client_apps
         SET client_secret_hash = $2, updated_at = NOW()
@@ -474,6 +519,7 @@ async fn rotate_secret(
     )
     .await;
 
+    with_owner_email(&state, &mut client).await?;
     Ok(Json(ClientCreated {
         client,
         client_secret: plaintext,
@@ -488,7 +534,7 @@ async fn create_registration_token(
 ) -> AppResult<Json<serde_json::Value>> {
     let actor = require_admin_user(&state, &headers).await?;
     let ip = crate::http::extract::audit_ip(audit_ip);
-    let plaintext = random_token(32);
+    let plaintext = prefixed_token("sgn_reg", 32);
     let token_hash = crate::crypto::util::sha256_hex(&plaintext);
     let expires_at = chrono::Utc::now() + chrono::Duration::hours(24);
 
@@ -630,44 +676,6 @@ fn normalize_client_id(raw: &str) -> AppResult<String> {
     Ok(id)
 }
 
-fn normalize_uris(uris: &[String]) -> AppResult<Vec<String>> {
-    let mut out = Vec::new();
-    for u in uris {
-        let t = u.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if !(t.starts_with("http://") || t.starts_with("https://")) {
-            return Err(AppError::bad_request(format!(
-                "redirect_uri must be http(s): {t}"
-            )));
-        }
-        // RFC 6749 §3.1.2: no fragment on a registered redirect URI.
-        if t.contains('#') {
-            return Err(AppError::bad_request(format!(
-                "redirect_uri must not contain a fragment: {t}"
-            )));
-        }
-        out.push(t.to_string());
-    }
-    if out.is_empty() {
-        return Err(AppError::bad_request("at least one redirect_uri required"));
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn normalize_scopes(scopes: Vec<String>) -> AppResult<Vec<String>> {
-    let mut out: Vec<String> = scopes
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    out.sort();
-    out.dedup();
-    if !out.iter().any(|s| s == "openid") {
-        return Err(AppError::bad_request("scopes must include openid"));
-    }
-    Ok(out)
-}
+// Redirect-URI and scope rules live in `developer::{normalize_uris,
+// normalize_scopes}` — the one shared copy across the admin surface, RFC 7591
+// registration and self-service registration.

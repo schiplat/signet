@@ -9,6 +9,7 @@ import {
   fetchCaptchaSettings,
   fetchMfaSettings,
   fetchRuntimeSettings,
+  fetchServerSettings,
   fetchSignInSettings,
   fetchSmtpSettings,
   fetchSsoSettings,
@@ -22,12 +23,15 @@ import {
   updateCaptchaSettings,
   updateMfaSettings,
   updateRuntimeSettings,
+  updateServerSettings,
   updateSignInSettings,
   updateSmtpSettings,
   updateSsoSettings,
   type ApiToken,
   type RuntimeSettings,
+  type ServerSettings,
 } from "@/lib/api";
+import { confirm } from "@/lib/confirm";
 import { useBrandingStore } from "@/stores/branding";
 import { joinList, splitList } from "@/lib/directoryMapping";
 
@@ -102,6 +106,99 @@ const allowlistLocksMeOut = computed(() => {
   return !domains.some((allowed) => mine === allowed || mine.endsWith(`.${allowed}`));
 });
 
+// --- Server identity: the issuer -----------------------------------------
+//
+// The environment always wins (read-only field) and the first save locks the
+// value: changing it invalidates outstanding tokens and every client config,
+// so it is deliberately harder to do by accident than a policy tweak.
+const server = ref<ServerSettings | null>(null);
+const serverIssuer = ref("");
+const serverSaving = ref(false);
+const serverSaved = ref(false);
+let serverSavedTimer: ReturnType<typeof setTimeout> | null = null;
+const normalizedServerIssuer = computed(() => serverIssuer.value.trim().replace(/\/+$/, ""));
+const serverDirty = computed(
+  () =>
+    server.value !== null &&
+    normalizedServerIssuer.value !== "" &&
+    normalizedServerIssuer.value !== server.value.issuer,
+);
+
+async function refreshServer() {
+  const res = await fetchServerSettings();
+  server.value = res;
+  serverIssuer.value = res.issuer;
+}
+
+function markServerSaved() {
+  serverSaved.value = true;
+  if (serverSavedTimer) clearTimeout(serverSavedTimer);
+  serverSavedTimer = setTimeout(() => {
+    serverSaved.value = false;
+  }, 2000);
+}
+
+async function onSaveServerIssuer() {
+  if (!server.value) return;
+  const next = normalizedServerIssuer.value;
+  if (!next || next === server.value.issuer) return;
+  if (
+    !(await confirm({
+      title: "Change the issuer?",
+      message:
+        `Every token minted so far stops validating (they carry the old iss), and every ` +
+        `client plus third-party SSO callback must be reconfigured to ${next}. ` +
+        `Sessions stay valid and you will not be signed out. Continue?`,
+      confirmText: "Change issuer",
+      danger: true,
+    }))
+  ) {
+    serverIssuer.value = server.value.issuer;
+    return;
+  }
+  error.value = "";
+  serverSaving.value = true;
+  try {
+    const res = await updateServerSettings({ issuer: next });
+    server.value = res;
+    serverIssuer.value = res.issuer;
+    markServerSaved();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Issuer save failed";
+    serverIssuer.value = server.value.issuer;
+  } finally {
+    serverSaving.value = false;
+  }
+}
+
+async function onToggleRepeat(allow: boolean) {
+  if (allow) {
+    if (
+      !(await confirm({
+        title: "Allow repeated issuer changes?",
+        message:
+          "The issuer can be edited again from this page. Each change invalidates outstanding " +
+          "tokens and requires every client to be reconfigured. Re-lock it when you are done.",
+        confirmText: "Allow",
+        danger: true,
+      }))
+    ) {
+      return;
+    }
+  }
+  error.value = "";
+  serverSaving.value = true;
+  try {
+    const res = await updateServerSettings({ allow_repeat_changes: allow });
+    server.value = res;
+    serverIssuer.value = res.issuer;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Update failed";
+  } finally {
+    serverSaving.value = false;
+  }
+}
+
 onMounted(async () => {
   try {
     const [mfa, sso, signIn, who, runtimeRes] = await Promise.all([
@@ -142,6 +239,11 @@ onMounted(async () => {
   }
   try {
     await refreshBranding();
+  } catch {
+    /* surfaced when the operator interacts with the section */
+  }
+  try {
+    await refreshServer();
   } catch {
     /* surfaced when the operator interacts with the section */
   }
@@ -304,15 +406,6 @@ const smtpSaving = ref(false);
 const smtpSaved = ref(false);
 const smtpTesting = ref(false);
 const smtpTestResult = ref<{ ok: boolean; error?: string } | null>(null);
-
-function smtpEdit() {
-  return {
-    host: smtp.value?.host ?? "",
-    port: smtp.value?.port ?? 587,
-    username: smtp.value?.username ?? "",
-    from: smtp.value?.from ?? "",
-  };
-}
 
 async function refreshSmtp() {
   const res = await fetchSmtpSettings();
@@ -511,7 +604,89 @@ async function onResetBranding() {
     <div v-if="loading" class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
 
     <template v-else>
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section v-if="server" class="surface-card max-w-xl space-y-5 p-6">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">Server identity</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            The issuer is the origin every token carries as <code>iss</code> and every client
+            discovers. Changing it invalidates outstanding tokens and requires each client (and
+            third-party SSO callback) to be reconfigured. Dashboard sessions are unaffected.
+          </p>
+        </div>
+
+        <div>
+          <label class="type-label mb-1.5 block" for="issuer">Issuer</label>
+          <input
+            id="issuer"
+            v-model="serverIssuer"
+            class="field-input font-mono text-[12px]"
+            :disabled="server.env_locked || server.locked"
+            placeholder="https://sso.example.com"
+          />
+          <p class="type-meta mt-1.5 text-[11px] leading-relaxed">
+            <span class="mr-2 inline-flex rounded-md bg-muted px-1.5 py-0.5 font-medium">
+              {{
+                server.source === "environment"
+                  ? "from environment"
+                  : server.source === "database"
+                    ? "saved here"
+                    : "default"
+              }}
+            </span>
+            <template v-if="server.env_locked">
+              Set by <code>SIGNET_ISSUER</code> — edit the environment and restart. This page
+              cannot override it.
+            </template>
+            <template v-else-if="server.locked">
+              Locked after the first change. Unlock below to edit again.
+            </template>
+            <template v-else>
+              Applies immediately; peer replicas converge within 30 seconds.
+            </template>
+          </p>
+          <p v-if="server.public_base_url" class="type-meta mt-1 text-[11px]">
+            Absolute links keep using <code>SIGNET_PUBLIC_BASE_URL</code> =
+            {{ server.public_base_url }}.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton
+            size="sm"
+            :disabled="serverSaving || server.env_locked || server.locked || !serverDirty"
+            @click="onSaveServerIssuer"
+          >
+            {{ serverSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <UiButton
+            v-if="server.locked"
+            size="sm"
+            variant="secondary"
+            :disabled="serverSaving"
+            @click="onToggleRepeat(true)"
+          >
+            Unlock to change
+          </UiButton>
+          <UiButton
+            v-if="!server.env_locked && server.allow_repeat_changes"
+            size="sm"
+            variant="ghost"
+            :disabled="serverSaving"
+            @click="onToggleRepeat(false)"
+          >
+            Re-lock
+          </UiButton>
+          <span v-if="serverSaved" class="text-xs text-muted-foreground">Saved</span>
+        </div>
+
+        <p class="rounded-lg bg-destructive/5 px-3 py-2 text-[11px] leading-relaxed text-destructive/90">
+          Impact: outstanding access / ID / refresh tokens stop validating; clients configured
+          with a different issuer lose discovery and sign-in; third-party SSO callback URLs
+          registered against this issuer must be updated.
+        </p>
+      </section>
+
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Security</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -539,7 +714,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Email domain allowlist</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -595,7 +770,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Runtime policies</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -638,7 +813,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">SSO / federation</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -667,7 +842,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">API tokens</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -757,7 +932,7 @@ async function onResetBranding() {
         <p v-else class="text-xs text-muted-foreground">No tokens yet.</p>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Email relay (SMTP)</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -870,7 +1045,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">CAPTCHA</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -939,7 +1114,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="max-w-xl space-y-5 rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card max-w-xl space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Branding</h2>
           <p class="mt-1 text-xs text-muted-foreground">

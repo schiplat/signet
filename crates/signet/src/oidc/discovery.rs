@@ -4,9 +4,9 @@ use axum::Json;
 use serde_json::{json, Value};
 
 pub async fn openid_configuration(State(state): State<AppState>) -> Json<Value> {
-    let issuer = &state.config.issuer;
+    let issuer = state.issuer();
     Json(json!({
-        "issuer": issuer,
+        "issuer": issuer.clone(),
         "authorization_endpoint": format!("{issuer}/oauth/authorize"),
         "token_endpoint": format!("{issuer}/oauth/token"),
         "revocation_endpoint": format!("{issuer}/oauth/revoke"),

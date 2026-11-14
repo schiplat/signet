@@ -1,4 +1,5 @@
-use crate::crypto::util::{random_token, sha256_hex};
+use crate::crypto::util::{prefixed_token, sha256_hex};
+use crate::developer::{normalize_scopes, normalize_uris};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 use axum::extract::{ConnectInfo, State};
@@ -21,7 +22,12 @@ pub struct RegisterBody {
     pub client_name: Option<String>,
     #[allow(dead_code)]
     pub grant_types: Option<Vec<String>>,
+    /// This service's native shape: a JSON array.
     pub scopes: Option<Vec<String>>,
+    /// RFC 7591 §2 uses the space-separated `scope` string, not an array.
+    /// Accepting it keeps conformant clients working without a translation
+    /// layer; `scopes` wins when both are present.
+    pub scope: Option<String>,
     #[serde(rename = "initial_access_token")]
     pub initial_access_token: Option<String>,
 }
@@ -54,13 +60,29 @@ pub async fn register(
     }
 
     let redirect_uris = normalize_uris(&body.redirect_uris)?;
+    let requested_scopes = body.scopes.or_else(|| {
+        body.scope
+            .map(|raw| raw.split_whitespace().map(str::to_string).collect())
+    });
     let scopes = normalize_scopes(
-        body.scopes
-            .unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]),
+        requested_scopes.unwrap_or_else(|| vec!["openid".into(), "profile".into(), "email".into()]),
     )?;
 
-    let client_id = format!("cl_{}", random_token(12));
-    let secret = random_token(32);
+    let client_name = body
+        .client_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = client_name {
+        if name.chars().count() > 200 {
+            return Err(AppError::bad_request(
+                "client_name must be at most 200 characters",
+            ));
+        }
+    }
+
+    let client_id = prefixed_token("sgn_cl", 12);
+    let secret = prefixed_token("sgn_cs", 32);
     let secret_hash = crate::auth::client_secret::digest(&state.client_secret_key, &secret);
     let id = Uuid::new_v4();
     let issued_at = chrono::Utc::now().timestamp();
@@ -70,12 +92,12 @@ pub async fn register(
         INSERT INTO client_apps (
             id, client_id, client_secret_hash, redirect_uris, post_logout_redirect_uris,
             grant_types, pkce_required, scopes, enabled,
-            ip_allowlist_enabled, allowed_cidrs
+            ip_allowlist_enabled, allowed_cidrs, client_name
         )
         VALUES (
             $1, $2, $3, $4, ARRAY[]::text[],
             ARRAY['authorization_code', 'refresh_token'],
-            TRUE, $5, TRUE, FALSE, ARRAY[]::text[]
+            TRUE, $5, TRUE, FALSE, ARRAY[]::text[], $6
         )
         "#,
     )
@@ -84,6 +106,7 @@ pub async fn register(
     .bind(secret_hash)
     .bind(&redirect_uris)
     .bind(&scopes)
+    .bind(client_name.unwrap_or(""))
     .execute(&state.pool)
     .await
     .map_err(|e| match e {
@@ -137,46 +160,6 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     v.strip_prefix("Bearer ").map(|s| s.trim().to_string())
 }
 
-fn normalize_uris(uris: &[String]) -> AppResult<Vec<String>> {
-    let mut out = Vec::new();
-    for u in uris {
-        let t = u.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if !(t.starts_with("http://") || t.starts_with("https://")) {
-            return Err(AppError::bad_request(format!(
-                "redirect_uri must be http(s): {t}"
-            )));
-        }
-        // RFC 6749 §3.1.2: a registered redirect URI must not carry a fragment.
-        // The exact-match comparison at authorize makes it harmless today, but
-        // accepting one stores a value no conformant client will ever send.
-        if t.contains('#') {
-            return Err(AppError::bad_request(format!(
-                "redirect_uri must not contain a fragment: {t}"
-            )));
-        }
-        out.push(t.to_string());
-    }
-    if out.is_empty() {
-        return Err(AppError::bad_request("at least one redirect_uri required"));
-    }
-    out.sort();
-    out.dedup();
-    Ok(out)
-}
-
-fn normalize_scopes(scopes: Vec<String>) -> AppResult<Vec<String>> {
-    let mut out: Vec<String> = scopes
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    out.sort();
-    out.dedup();
-    if !out.iter().any(|s| s == "openid") {
-        return Err(AppError::bad_request("scopes must include openid"));
-    }
-    Ok(out)
-}
+// Redirect-URI and scope rules live in `crate::developer::{normalize_uris,
+// normalize_scopes}` — the one shared copy across the admin surface, RFC 7591
+// registration and self-service registration.

@@ -14,7 +14,7 @@ defineProps<{
 <template>
   <div
     v-if="total > 0"
-    class="flex flex-col gap-2.5 border-t border-border px-3 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3 sm:px-3.5"
+    class="flex flex-col gap-2.5 border-t border-border/50 px-5 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
   >
     <p class="shrink-0 text-[11px] text-muted-foreground">{{ rangeLabel }}</p>
     <div

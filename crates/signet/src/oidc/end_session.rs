@@ -104,7 +104,7 @@ async fn finish(
             });
         }
         destroy_session(&state.pool, &token).await?;
-        jar.add(clear_session_cookie(state.config.cookie_secure))
+        jar.add(clear_session_cookie(state.cookie_secure()))
     } else {
         jar
     };
@@ -145,7 +145,8 @@ struct HintClaims {
 /// single-audience string is what this issuer emits.
 fn verify_hint(state: &AppState, hint: &str) -> AppResult<HintClaims> {
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(std::slice::from_ref(&state.config.issuer));
+    let issuer = state.issuer();
+    validation.set_issuer(std::slice::from_ref(&issuer));
     validation.validate_aud = false;
     let data = state
         .keys

@@ -3,9 +3,11 @@ use serde::Serialize;
 use uuid::Uuid;
 
 pub const USER_COLS: &str = "id, sub, email, username, display_name, password_hash, status, role, \
-    mfa_required, must_change_password, totp_enabled, totp_secret, groups, phone, \
+    mfa_required, must_change_password, totp_enabled, totp_secret, \
+    signet_group_names(groups) AS groups, phone, \
     provisioned_via, local_disabled, directory_disabled, scim_disabled, scim_managed, \
-    directory_groups, created_at, updated_at, external_id, email_verified";
+    signet_group_names(directory_groups) AS directory_groups, \
+    created_at, updated_at, external_id, email_verified";
 
 /// The rule that turns the three disable flags into `status`, as SQL.
 ///
@@ -51,9 +53,21 @@ pub fn status_from_flags(
 /// breaks the moment a column is added to `User` (the row then fails to map
 /// with `no column found for name: ...`, which surfaces as a 500).
 pub fn user_cols_with(alias: &str) -> String {
+    // The two group columns are expressions (`signet_group_names(...) AS ...`),
+    // not plain columns: the alias has to go inside the function call while the
+    // output name stays the bare column name `User` maps by.
     USER_COLS
         .split(',')
-        .map(|col| format!("{alias}.{}", col.trim()))
+        .map(|col| {
+            let col = col.trim();
+            if col.starts_with("signet_group_names(groups)") {
+                format!("signet_group_names({alias}.groups) AS groups")
+            } else if col.starts_with("signet_group_names(directory_groups)") {
+                format!("signet_group_names({alias}.directory_groups) AS directory_groups")
+            } else {
+                format!("{alias}.{col}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -298,7 +312,8 @@ where
         INSERT INTO users (id, sub, email, username, display_name, password_hash, status, role,
                            groups, phone, external_id, must_change_password, scim_disabled,
                            scim_managed, provisioned_via, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(), NOW())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, signet_group_ids($9), $10, $11, $12, $13, $14,
+                $15, NOW(), NOW())
         RETURNING {USER_COLS}
         "#
     ))

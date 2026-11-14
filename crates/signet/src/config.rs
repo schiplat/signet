@@ -14,8 +14,20 @@ pub struct Config {
     /// error rather than something to tune live.
     pub db_max_connections: u32,
     pub http_bind: SocketAddr,
+    /// `SIGNET_ISSUER` or the built-in default. The **effective** issuer may be
+    /// overridden at runtime by `app_settings.server.issuer`; read it through
+    /// [`crate::state::AppState::issuer`] at the point of use, never here.
     pub issuer: String,
-    pub cookie_secure: bool,
+    /// True when `SIGNET_ISSUER` was set. The environment always wins over the
+    /// dashboard value: it is the recovery path when a wrong issuer was saved
+    /// and also what makes the UI field read-only.
+    pub issuer_from_env: bool,
+    /// `SIGNET_COOKIE_SECURE` parsed as a boolean. The effective cookie flag is
+    /// `cookie_secure_forced || effective issuer is https` — see
+    /// [`crate::state::AppState::cookie_secure`]. Derived from the *runtime*
+    /// issuer so a dashboard change from http to https secures cookies without
+    /// a restart.
+    pub cookie_secure_forced: bool,
     /// Deployment opt-in letting outbound HTTP reach private/loopback/link-local
     /// addresses, for webhook receivers that live on a trusted intranet. Off by
     /// default: the server would otherwise be an SSRF proxy into its own network.
@@ -99,6 +111,7 @@ impl Config {
             .unwrap_or_else(|_| "0.0.0.0:8443".into())
             .parse()
             .context("invalid SIGNET_HTTP_BIND")?;
+        let issuer_from_env = env::var("SIGNET_ISSUER").is_ok();
         let issuer = env::var("SIGNET_ISSUER").unwrap_or_else(|_| "http://localhost:8443".into());
         if issuer.ends_with('/') {
             bail!("SIGNET_ISSUER must not end with '/'");
@@ -107,10 +120,12 @@ impl Config {
         // An https issuer means browsers only ever reach the service over TLS;
         // marking the session cookies Secure there is not something an operator
         // should have to remember (and localhost dev keeps its http default).
-        let cookie_secure = env::var("SIGNET_COOKIE_SECURE")
+        // The issuer half of the rule is applied at request time against the
+        // runtime issuer (`AppState::cookie_secure`), so a dashboard change to
+        // https takes effect immediately.
+        let cookie_secure_forced = env::var("SIGNET_COOKIE_SECURE")
             .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
-            .unwrap_or(false)
-            || issuer.starts_with("https://");
+            .unwrap_or(false);
 
         let trusted_proxies = match env::var("SIGNET_TRUSTED_PROXIES") {
             Err(_) => Vec::new(),
@@ -142,7 +157,8 @@ impl Config {
                 .unwrap_or(20),
             http_bind,
             issuer,
-            cookie_secure,
+            issuer_from_env,
+            cookie_secure_forced,
             outbound_allow_private,
             jwt_private_key_path,
             jwt_retired_key_dir,

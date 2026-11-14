@@ -51,8 +51,8 @@ curl -s -X POST "$ISSUER/oauth/register" \
 
 ```json
 {
-  "client_id": "cl_abc123...",
-  "client_secret": "5k...",
+  "client_id": "sgn_cl_abc123...",
+  "client_secret": "sgn_cs_5kQ...",
   "client_id_issued_at": 1755057600,
   "client_secret_expires_at": 0,
   "redirect_uris": ["http://localhost:3000/auth/callback"],
@@ -67,7 +67,7 @@ curl -s -X POST "$ISSUER/oauth/register" \
 | 字段 | 规则 |
 |------|------|
 | `redirect_uris` | 必填，至少 1 条；必须 `http(s)://` 开头；**不得含 `#` 片段**；去重排序 |
-| `scopes` | 可选；若提供必须包含 `openid` |
+| `scopes` / `scope` | 可选；若提供必须包含 `openid`。`scopes`（数组）为本服务原生形态；同时接受 RFC 7591 标准的空格分隔 `scope` 字符串，两者同时出现时以 `scopes` 为准 |
 | `client_name` | 可选展示名 |
 | `grant_types` | 请求字段当前忽略，固定写入 `authorization_code` + `refresh_token`；**存储的 grant 列表会在 authorize/token 处强制** |
 

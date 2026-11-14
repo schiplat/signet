@@ -79,11 +79,7 @@ pub(crate) async fn stash_pending_link(
         tracing::warn!(error = %err, provider = %provider_code, "failed to stash pending sso link");
         return jar;
     }
-    jar.add(pending_cookie(
-        &state_value,
-        state.config.cookie_secure,
-        15 * 60,
-    ))
+    jar.add(pending_cookie(&state_value, state.cookie_secure(), 15 * 60))
 }
 
 /// A stashed pending upstream identity, as surfaced to the signed-in user.
@@ -143,7 +139,7 @@ pub async fn confirm_pending_link(
     .bind(sha256_hex(&raw_state))
     .fetch_optional(&state.pool)
     .await?;
-    let jar = jar.add(clear_pending_cookie(state.config.cookie_secure));
+    let jar = jar.add(clear_pending_cookie(state.cookie_secure()));
     let Some((provider_code, subject, email, raw)) = row else {
         return Err(AppError::not_found("no pending sso identity"));
     };
@@ -254,7 +250,7 @@ pub async fn discard_pending_link(state: &AppState, jar: CookieJar) -> CookieJar
             .execute(&state.pool)
             .await;
     }
-    jar.add(clear_pending_cookie(state.config.cookie_secure))
+    jar.add(clear_pending_cookie(state.cookie_secure()))
 }
 
 /// Create a local `member` from a verified upstream email and return its id.

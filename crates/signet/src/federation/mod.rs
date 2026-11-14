@@ -95,7 +95,7 @@ pub async fn provider_allows(
 fn callback_url(state: &AppState, code: &str) -> String {
     format!(
         "{}{}{}",
-        state.config.public_base(),
+        state.public_base(),
         crate::API_PREFIX,
         callback_path(code)
     )

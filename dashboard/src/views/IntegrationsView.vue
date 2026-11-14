@@ -386,7 +386,7 @@ async function copyText(text: string): Promise<boolean> {
 
     <template v-else>
       <!-- Webhooks -->
-      <section class="rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card p-6">
         <div class="mb-4 flex items-center justify-between gap-3">
           <div>
             <h2 class="flex items-center gap-2 text-sm font-semibold tracking-tight">
@@ -484,7 +484,7 @@ async function copyText(text: string): Promise<boolean> {
       </section>
 
       <!-- Third-party sign-in (SSO providers) -->
-      <section class="rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card p-6">
         <div class="mb-4 flex items-center justify-between gap-3">
           <div>
             <h2 class="flex items-center gap-2 text-sm font-semibold tracking-tight">
@@ -595,7 +595,7 @@ async function copyText(text: string): Promise<boolean> {
       </section>
 
       <!-- SCIM -->
-      <section class="rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card p-6">
         <div class="mb-3 flex items-center justify-between gap-3">
           <div>
             <h2 class="flex items-center gap-2 text-sm font-semibold tracking-tight">
@@ -659,7 +659,7 @@ async function copyText(text: string): Promise<boolean> {
       </section>
 
       <!-- WebAuthn -->
-      <section class="rounded-xl bg-card p-6 shadow-sm">
+      <section class="surface-card p-6">
         <div class="mb-3">
           <h2 class="flex items-center gap-2 text-sm font-semibold tracking-tight">
             <Fingerprint class="h-4 w-4 text-muted-foreground" />

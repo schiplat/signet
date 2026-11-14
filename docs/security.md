@@ -108,7 +108,7 @@
 | 统一登出 | OIDC `end_session`（`/oauth/end_session`），`post_logout_redirect_uri` 走客户端白名单 |
 | 冻结联动 | 用户被冻结/删除时自动清除其会话 |
 
-会话 Cookie：HttpOnly、SameSite=Lax；Secure 在 issuer 为 `https://` 时**自动强制**（`SIGNET_COOKIE_SECURE` 仅用于覆盖 http 场景）。
+会话 Cookie：HttpOnly、SameSite=Lax；Secure 在**生效 issuer**（含 Dashboard 中修改后的值）为 `https://` 时自动强制，http→https 的 Web 端修改即时生效（`SIGNET_COOKIE_SECURE` 仅用于强制 http 场景，此时 Dashboard 会拒绝保存 http issuer）。
 
 ### 3.1 第三方登录走同一套本地闸门 ✅
 

@@ -4,14 +4,15 @@ import ActivityView from "@/views/ActivityView.vue";
 import AuditLogsView from "@/views/AuditLogsView.vue";
 import ClientsView from "@/views/ClientsView.vue";
 import ConsentView from "@/views/ConsentView.vue";
+import DirectorySyncView from "@/views/DirectorySyncView.vue";
 import DirectoryView from "@/views/DirectoryView.vue";
 import IntegrationsView from "@/views/IntegrationsView.vue";
 import LoginView from "@/views/LoginView.vue";
+import MyAppsView from "@/views/MyAppsView.vue";
 import OverviewView from "@/views/OverviewView.vue";
 import ResetPasswordView from "@/views/ResetPasswordView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import SetupView from "@/views/SetupView.vue";
-import UsersView from "@/views/UsersView.vue";
 import { useAuthStore } from "@/stores/auth";
 
 export const router = createRouter({
@@ -60,6 +61,14 @@ export const router = createRouter({
           meta: { title: "Activity" },
         },
         {
+          // No staff meta: self-service application registration is available
+          // to every signed-in user, like GitHub's developer settings.
+          path: "my-apps",
+          name: "my-apps",
+          component: MyAppsView,
+          meta: { title: "My apps" },
+        },
+        {
           path: "overview",
           name: "overview",
           component: OverviewView,
@@ -67,9 +76,17 @@ export const router = createRouter({
         },
         {
           path: "users",
-          name: "users",
-          component: UsersView,
-          meta: { title: "Users", staff: true },
+          redirect: "/directory",
+        },
+        {
+          path: "groups",
+          redirect: "/directory",
+        },
+        {
+          path: "directory",
+          name: "directory",
+          component: DirectoryView,
+          meta: { title: "Directory", staff: true },
         },
         {
           path: "clients",
@@ -96,9 +113,9 @@ export const router = createRouter({
           meta: { title: "Integrations", admin: true },
         },
         {
-          path: "directory",
-          name: "directory",
-          component: DirectoryView,
+          path: "directory-sync",
+          name: "directory-sync",
+          component: DirectorySyncView,
           meta: { title: "Directory sync", admin: true },
         },
       ],

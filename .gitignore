@@ -3,6 +3,12 @@
 /dashboard/data
 /crates/signet/data
 .env
+.env.*
+!.env.example
+# Local agent/editor state and half-finished migrations parked outside the
+# migrations directory must never be committed.
+.zcode/
+*.sql.pending
 *.pem
 *.key
 .pnpm-store/

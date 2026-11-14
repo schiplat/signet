@@ -130,6 +130,7 @@ ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE; 
 ALTER TABLE users ADD COLUMN scim_managed       BOOLEAN NOT NULL DEFAULT FALSE;
 -- 目录来源的组，与本地手工组分离（见 §6.5）
 ALTER TABLE users ADD COLUMN directory_groups TEXT[] NOT NULL DEFAULT '{}';
+-- 迁移 043 起两列均为 UUID[]：存组 id，读取经 signet_group_names() 还原名字
 ```
 
 有效状态是三位**求或**，并由数据库约束锁死：
@@ -333,10 +334,10 @@ WHERE id IN (SELECT user_id FROM directory_entries
 - `users.directory_groups` = 目录组（同步全量替换）
 - OIDC `groups` claim = 两者的**并集**（去重 + 稳定排序，保证 claim 可重复）
 
-同步时对该源贡献的组做全量替换：
+同步时对该源贡献的组做全量替换（迁移 043 起按 id 存，未知名字以 `source='directory'` 建组）：
 
 ```sql
-UPDATE users SET directory_groups = $2 WHERE id = $1
+UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id = $1
 ```
 
 > 该方案需改动 OIDC claim 组装处与后台用户列表展示，代价可控，且为多源/本地共存留出空间。
@@ -345,9 +346,10 @@ v1 组能力边界：
 
 - 仅同步**直接成员**，不做嵌套组展开；
 - LDAP 侧按 `member`（OpenLDAP 组对象）或 `memberOf`（AD 反查）解析，具体取法在源配置里选择；
-- SCIM 侧沿用 `scim_groups` + `users.groups` 现有模型，需迁移到 `directory_groups`。
+- SCIM 的组在 `scim_groups` 中标记 `source='scim'`，`/scim/v2/Groups` 只看见自己的组；目录组与本地组不会出现在 IdP 的列表里。
+- 目录组会出现在 Dashboard → **Groups** 的树里（带 Directory 徽章），管理员可以移动到部门下；名称、成员与存在性仍由同步源决定。
 
-**已实现（P1/P2）**：`users.directory_groups` 由同步全量替换（`update_user` 里用 `COALESCE($5::text[], directory_groups)`，因此 `sync_groups` 关闭的源不会清空已有值）；OIDC 的 `groups` claim 由 `models::effective_groups` 计算两列并集（去重 + 排序，保证同一用户每次拿到的 claim 一致）。测试 `tests/oidc_groups_claim.rs`。
+**已实现（P1/P2）**：`users.directory_groups` 由同步全量替换（`update_user` 里 `$5 IS NULL` 时保留原值，因此 `sync_groups` 关闭的源不会清空已有值；非空时经 `signet_group_ids($5,'directory')` 写 id）；同步成功且开启 `sync_groups` 时，无成员且无子节点的 `source='directory'` 组置墓碑（上游已删除的组不残留）；OIDC 的 `groups` claim 由 `models::effective_groups` 计算两列并集（去重 + 排序，保证同一用户每次拿到的 claim 一致）。测试 `tests/oidc_groups_claim.rs`。
 
 ---
 

@@ -56,6 +56,12 @@ jobs:
           pnpm typecheck
           pnpm build
 
+      # Runtime dependencies only: an advisory in a dev-only tool is noise, a
+      # remote-code advisory in a production bundle is a release blocker.
+      - name: Audit runtime dependencies
+        working-directory: dashboard
+        run: pnpm audit --prod
+
       # rust-embed compiles dashboard/dist into the binary; the Rust job
       # downloads this instead of building the frontend a second time.
       - name: Upload dashboard dist
@@ -94,3 +100,17 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
+
+  audit:
+    name: Dependency audit (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      - name: cargo audit
+        run: cargo audit

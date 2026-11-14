@@ -48,7 +48,7 @@ fn id_token(state: &signet::state::AppState, sub: &str) -> String {
         .keys
         .load()
         .encode(&json!({
-            "iss": state.config.issuer,
+            "iss": state.issuer(),
             "sub": sub,
             "aud": CLIENT_ID,
             "exp": now + 300,
@@ -77,7 +77,7 @@ async fn an_access_token_is_not_accepted_as_a_hint() {
         .keys
         .load()
         .encode(&json!({
-            "iss": state.config.issuer,
+            "iss": state.issuer(),
             "sub": sub,
             "aud": CLIENT_ID,
             "exp": now + 3600,

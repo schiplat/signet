@@ -110,7 +110,11 @@ async fn every_optional_field_survives_the_round_trip() {
 
         assert_eq!(written.username.as_deref(), Some(username.as_str()));
         assert_eq!(written.phone.as_deref(), Some(phone.as_str()));
-        assert_eq!(written.groups, groups);
+        assert_eq!(
+            written.groups, groups,
+            "written={:?} expected={:?}",
+            written.groups, groups
+        );
         assert_eq!(written.external_id.as_deref(), Some("upstream-42"));
         assert!(written.must_change_password);
         assert_eq!(written.role, "admin");

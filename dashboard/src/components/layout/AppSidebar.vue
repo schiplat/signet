@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AppWindow, History, LayoutDashboard, PanelLeft, Plug, ScrollText, Settings, UserRound, Waypoints } from "@lucide/vue";
+import { AppWindow, Blocks, BookUser, History, LayoutDashboard, PanelLeft, Plug, ScrollText, Settings, UserRound, Waypoints } from "@lucide/vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { cn } from "@/lib/utils";
@@ -13,6 +13,7 @@ const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
 const appVersion = __APP_VERSION__;
+
 
 type NavLink = {
   kind: "link";
@@ -45,10 +46,10 @@ const allEntries: NavEntry[] = [
   { kind: "section", label: "Access", staffOnly: true },
   {
     kind: "link",
-    name: "users",
-    label: "Users",
-    icon: UserRound,
-    to: "/users",
+    name: "directory",
+    label: "Directory",
+    icon: BookUser,
+    to: "/directory",
     staffOnly: true,
   },
   { kind: "section", label: "Applications", staffOnly: true },
@@ -70,6 +71,13 @@ const allEntries: NavEntry[] = [
     staffOnly: true,
   },
   { kind: "section", label: "System" },
+  {
+    kind: "link",
+    name: "my-apps",
+    label: "My apps",
+    icon: Blocks,
+    to: "/my-apps",
+  },
   {
     kind: "link",
     name: "activity",
@@ -98,7 +106,7 @@ const allEntries: NavEntry[] = [
     name: "directory",
     label: "Directory sync",
     icon: Waypoints,
-    to: "/directory",
+    to: "/directory-sync",
     adminOnly: true,
   },
 ];
@@ -222,13 +230,15 @@ function onLogoClick(e: MouseEvent) {
       </template>
     </nav>
 
-    <div v-if="!ui.isCollapsed" class="space-y-0.5 px-4 pb-4">
-      <p class="px-1 text-xs leading-relaxed text-muted-foreground/80">
-        © 2026 Signetproject
-      </p>
-      <p class="px-1 font-mono text-xs text-muted-foreground/60" :title="`v${appVersion}`">
-        v{{ appVersion }}
-      </p>
+    <div v-if="!ui.isCollapsed" class="px-4 pb-4">
+      <div class="border-t border-sidebar-border/80 pt-3">
+        <p
+          class="px-1 text-left text-[11px] tabular-nums text-muted-foreground"
+          :title="`${branding.name} Signet v${appVersion}`"
+        >
+          {{ branding.name }}<span class="px-1.5 text-muted-foreground/45">·</span>v{{ appVersion }}
+        </p>
+      </div>
     </div>
   </aside>
 </template>

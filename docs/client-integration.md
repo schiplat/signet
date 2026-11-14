@@ -63,6 +63,8 @@ Discovery 返回（节选）：
 
 除管理后台外，业务系统也可通过**一次性初始访问 token** 自助登记客户端，见 [integrations.md](./integrations.md) §1。
 
+> 另有一条纯网页路径：任何登录用户可在 Dashboard → **My apps**（`/my-apps`）自助注册并管理自己的客户端（注册即得 `client_id`，secret 只展示一次），无需管理员操作，也不需要初始访问 token。注册出的客户端与动态注册同构（PKCE、authorization_code + refresh_token）。
+
 ### 2.3 推荐客户端形态
 
 **机密客户端 + 后端换票（BFF）**：

@@ -8,10 +8,12 @@ pub mod captcha;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod developer;
 pub mod directory;
 pub mod email;
 pub mod error;
 pub mod federation;
+pub mod groups;
 pub mod http;
 pub mod maintenance;
 pub mod metrics;
@@ -124,9 +126,11 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(auth::router())
         .merge(mfa::router())
         .merge(auth::passkey::router())
+        .merge(developer::router())
         .merge(federation::routes::router())
         .merge(federation::admin::router())
         .merge(admin::router())
+        .merge(groups::router())
         .merge(audit::router())
         .merge(auth::password_reset::router())
         .merge(webhooks::router())
@@ -172,6 +176,12 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
     // once here so boot-time decisions (the rate limiter's initial budget, the
     // startup summary) agree with the first request.
     let (runtime, overridden) = settings::load(&pool, &cfg).await;
+    // Effective issuer for this process: SIGNET_ISSUER when set, else the
+    // dashboard value, else the built-in default. Published so the first
+    // request already sees it (the refresher converges peers every 30s).
+    let issuer = settings::effective_issuer(&pool, &cfg)
+        .await
+        .context("load the effective issuer")?;
     let rate_limit_per_minute = runtime.rate_limit_per_minute;
 
     // Audit pruning deliberately does NOT run at boot any more: it was a
@@ -197,6 +207,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         password_history_size = runtime.password_history_size,
         audit_retention_days = runtime.audit_retention_days,
         rate_limit_per_minute = runtime.rate_limit_per_minute,
+        issuer = %issuer,
         db_overrides = ?overridden,
         "runtime settings in effect (change these in Dashboard -> Settings)"
     );
@@ -224,6 +235,7 @@ pub async fn build_state(cfg: Config) -> anyhow::Result<AppState> {
         pool,
         config: Arc::new(cfg),
         settings: Arc::new(std::sync::RwLock::new(runtime)),
+        issuer: Arc::new(std::sync::RwLock::new(issuer.clone())),
         runtime_overridden: Arc::new(std::sync::RwLock::new(overridden)),
         keys: Arc::new(arc_swap::ArcSwap::from_pointee(keys)),
         encryptor: Arc::new(encryptor),

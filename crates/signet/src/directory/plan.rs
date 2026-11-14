@@ -203,6 +203,10 @@ pub struct SyncPlan {
     /// False when the run intentionally skipped the "absent upstream" pass, so
     /// the report can say so instead of implying nothing was missing.
     pub reconciled: bool,
+    /// True when this run owned group membership (`sync_groups` enabled and the
+    /// source configured for groups). Only such a run may sweep directory-owned
+    /// groups that no longer have members.
+    pub groups_owned: bool,
 }
 
 impl SyncPlan {
@@ -788,6 +792,7 @@ pub fn plan(upstream: &[UpstreamUser], local: &LocalState, opts: PlanOptions) ->
         changes,
         scanned: upstream.len() as i64,
         reconciled: opts.reconcile,
+        groups_owned: opts.sync_groups,
     }
 }
 

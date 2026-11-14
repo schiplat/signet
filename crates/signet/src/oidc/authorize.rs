@@ -116,8 +116,8 @@ pub async fn authorize(
     // round-trip a code back to a page on this server — no configuration to
     // keep in sync, and nothing reachable that the client's real redirects
     // are not.
-    let test_redirect =
-        crate::oidc::test_callback::test_callback_url(state.config.public_base(), client_id);
+    let base = state.public_base();
+    let test_redirect = crate::oidc::test_callback::test_callback_url(&base, client_id);
     if !client.redirect_uris.iter().any(|u| u == redirect_uri) && redirect_uri != test_redirect {
         return Err(AppError::bad_request("redirect_uri not allowed"));
     }

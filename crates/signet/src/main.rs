@@ -127,10 +127,11 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None | Some(SignetCommand::Serve) => {
             let bind = cfg.http_bind;
-            let issuer = cfg.issuer.clone();
             let app = build_app(cfg).await?;
 
-            tracing::info!(%bind, %issuer, "signet listening");
+            // The effective issuer is logged with the runtime settings in
+            // `build_state`: it may come from the dashboard, not from `cfg`.
+            tracing::info!(%bind, "signet listening");
             let listener = tokio::net::TcpListener::bind(bind).await?;
             axum::serve(
                 listener,

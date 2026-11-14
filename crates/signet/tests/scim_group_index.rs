@@ -27,7 +27,7 @@ use uuid::Uuid;
 /// real question — *can* this predicate be served by an index? — and a predicate
 /// it cannot index still falls back to a scan, so the assertion below cannot
 /// pass by accident.
-async fn plan_for(pool: &PgPool, sql: &str, value: &str) -> String {
+async fn plan_for(pool: &PgPool, sql: &str, value: Uuid) -> String {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL enable_seqscan = off")
         .execute(&mut *tx)
@@ -56,12 +56,14 @@ async fn the_membership_predicate_uses_the_gin_index() {
     // and the assertion would report failure for an index that works fine in
     // production. Seeding a real selection makes the plan deterministic on any
     // database, empty or populated.
+    let group_name = format!("gin-{}", Uuid::new_v4());
     let batch: Vec<Uuid> = (0..60).map(|_| Uuid::new_v4()).collect();
     for (i, id) in batch.iter().enumerate() {
         sqlx::query(
             r#"
             INSERT INTO users (id, sub, email, display_name, password_hash, status, role, groups)
-            VALUES ($1, $2, $3, 'seed', '', 'active', 'member', ARRAY['engineering'])
+            VALUES ($1, $2, $3, 'seed', '', 'active', 'member',
+                    signet_group_ids(ARRAY[$4]))
             "#,
         )
         .bind(id)
@@ -70,6 +72,7 @@ async fn the_membership_predicate_uses_the_gin_index() {
             "seed-{i}-{}@gin.test",
             uuid::Uuid::new_v4().simple()
         ))
+        .bind(&group_name)
         .execute(&state.pool)
         .await
         .expect("seed the group members");
@@ -78,11 +81,19 @@ async fn the_membership_predicate_uses_the_gin_index() {
     for sql in [
         // group_members(): "who is in this group?" — the exact read path, sort
         // and all; the planner answers it with a bitmap scan plus a sort.
-        "EXPLAIN SELECT id, email FROM users WHERE groups @> ARRAY[$1::text] ORDER BY email",
+        "EXPLAIN SELECT id, email FROM users WHERE groups @> ARRAY[$1::uuid] ORDER BY email",
         // array_remove(): "everyone in this group loses membership"
-        "EXPLAIN UPDATE users SET groups = array_remove(groups, $1) WHERE groups @> ARRAY[$1::text]",
+        "EXPLAIN UPDATE users SET groups = array_remove(groups, $1::uuid) \
+         WHERE groups @> ARRAY[$1::uuid]",
     ] {
-        let plan = plan_for(&state.pool, sql, "engineering").await;
+        let group_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM scim_groups WHERE display_name = $1 AND deleted_at IS NULL",
+        )
+        .bind(&group_name)
+        .fetch_one(&state.pool)
+        .await
+        .expect("the seeded group exists");
+        let plan = plan_for(&state.pool, sql, group_id).await;
         assert!(
             plan.contains("users_groups_gin"),
             "the planner did not use the GIN index for:\n  {sql}\nplan:\n{plan}"
@@ -94,4 +105,9 @@ async fn the_membership_predicate_uses_the_gin_index() {
         .execute(&state.pool)
         .await
         .expect("remove the seeded members");
+    sqlx::query("DELETE FROM scim_groups WHERE display_name = $1")
+        .bind(&group_name)
+        .execute(&state.pool)
+        .await
+        .expect("remove the seeded group");
 }

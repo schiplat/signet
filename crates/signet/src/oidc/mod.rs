@@ -116,7 +116,8 @@ pub(crate) fn decode_access_token(
 ) -> Result<IntrospectionClaims, jsonwebtoken::errors::Error> {
     use jsonwebtoken::{Algorithm, Validation};
     let mut validation = Validation::new(Algorithm::RS256);
-    validation.set_issuer(std::slice::from_ref(&state.config.issuer));
+    let issuer = state.issuer();
+    validation.set_issuer(std::slice::from_ref(&issuer));
     validation.validate_exp = false;
     validation.validate_aud = false;
     let data = state
@@ -154,7 +155,7 @@ pub async fn fire_backchannel_logout(state: &AppState, user_id: Uuid) {
     fire_backchannel_logout_core(
         &state.pool,
         &state.keys.load(),
-        state.config.issuer.as_str(),
+        &state.issuer(),
         state.config.outbound_allow_private,
         user_id,
     )

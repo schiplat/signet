@@ -80,7 +80,8 @@ pub async fn load_linked_users(
             bool,
         ),
     >(
-        "SELECT id, email, username, display_name, status, directory_groups, directory_disabled \
+        "SELECT id, email, username, display_name, status, \
+                signet_group_names(directory_groups) AS directory_groups, directory_disabled \
          FROM users WHERE id = ANY($1)",
     )
     .bind(&ids)

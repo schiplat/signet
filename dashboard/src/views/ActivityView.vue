@@ -182,15 +182,12 @@ onMounted(load);
 
       <div
         v-if="loading"
-        class="overflow-hidden rounded-xl border border-border/50 bg-card py-12 text-center text-sm text-muted-foreground shadow-sm"
+        class="surface-card overflow-hidden py-12 text-center text-sm text-muted-foreground"
       >
         Loading…
       </div>
 
-      <section
-        v-else
-        class="overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm"
-      >
+      <section v-else class="surface-card overflow-hidden">
         <ul v-if="items.length" class="divide-y divide-border/50">
           <li
             v-for="it in items"
