@@ -23,7 +23,7 @@ Related: [design overview](./design.md) · [MFA](./mfa.md) · [Dashboard API](./
 | Environment | Example issuer |
 |------|-------------|
 | Local development | `http://localhost:8443` (default; the public value can be set under Dashboard → Settings → Server identity, and `SIGNET_ISSUER` is only an optional override) |
-| Production (future) | `https://sso.example.com` |
+| Production example | `https://sso.example.com` |
 
 Client configuration should depend only on the **issuer** and discover the
 endpoints, never on hard-coded host assumptions beyond the relative paths.
@@ -102,8 +102,8 @@ initial access token**; see [integrations.md](./integrations.md) §1.
 - The business backend exchanges the code with the secret, validates the
   `id_token`, and issues **its own session**
 
-Pure-SPA public clients are not a first-phase focus; the token endpoint still
-requires a `client_secret`.
+Pure-SPA public clients are not supported: the token endpoint requires a
+`client_secret`.
 
 ---
 
@@ -532,7 +532,7 @@ introspection.
 ## 11. Not provided today (clients must not depend on it)
 
 - Token exchange for public clients without a `client_secret`
-- WeCom / DingTalk and other external IdP federation (Phase 3)
+- WeCom / DingTalk connectors
 
 ## 12. Related endpoints
 

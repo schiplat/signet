@@ -20,7 +20,7 @@
 4. LDAP 目录用户可直接用其目录密码登录（**bind 直通**）；
 5. 支持上游**主动推送**（push）模式的接入。
 
-### 1.2 非目标（v1 明确不做）
+### 1.2 非目标（明确不做）
 
 | 不做 | 原因 |
 |---|---|
@@ -60,7 +60,7 @@
 
 ## 4. 数据模型
 
-### 4.1 新增表（迁移 `024_directory_sync.sql`）
+### 4.1 新增表
 
 ```sql
 -- 数据源配置
@@ -117,21 +117,21 @@ CREATE TABLE directory_entries (
 CREATE INDEX directory_entries_user_idx ON directory_entries (user_id);
 ```
 
-> `users.external_id`（迁移 `012`）是**全局唯一**且面向 SCIM 的，**不能**当作多源外部 ID 使用；因此必须新建 `directory_entries`。
-> 同一外部身份只允许链接一个本地用户；同一本地用户可被多个源链接（多源场景，见 §17）。
+> `users.external_id` 是**全局唯一**且面向 SCIM 的，**不能**当作多源外部 ID 使用；因此必须新建 `directory_entries`。
+> 同一外部身份只允许链接一个本地用户；同一本地用户可被多个源链接（多源场景）。
 
 ### 4.2 `users` 表变更
 
 ```sql
 -- 三个"停用意图"位：每个权威各持一位，互不覆盖（见下方）
 ALTER TABLE users ADD COLUMN local_disabled     BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
-ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
--- SCIM 客户端托管该账号的属性（迁移 027）
+ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;
+-- SCIM 客户端托管该账号的属性
 ALTER TABLE users ADD COLUMN scim_managed       BOOLEAN NOT NULL DEFAULT FALSE;
 -- 目录来源的组，与本地手工组分离（见 §6.5）
 ALTER TABLE users ADD COLUMN directory_groups TEXT[] NOT NULL DEFAULT '{}';
--- 迁移 043 起两列均为 UUID[]：存组 id，读取经 signet_group_names() 还原名字
+-- 两列均为 UUID[]：存组 id，读取经 signet_group_names() 还原名字
 ```
 
 有效状态是三位**求或**，并由数据库约束锁死：
@@ -141,7 +141,7 @@ status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
               THEN 'disabled' ELSE 'active' END      -- 约束 users_status_matches_flags
 ```
 
-**为什么是一位不够**（原设计的 `local_disabled` 单列就是缺这一点）：`status` 只有 active/disabled 两态，而停用可以有**多个互不相同的来源**。若各家都往 `status` 上写，同一列就同时承担"谁停用的"和"是否停用"两个语义，于是必然互相覆盖：
+**为什么是一位不够**（单一 `local_disabled` 列不够）：`status` 只有 active/disabled 两态，而停用可以有**多个互不相同的来源**。若各家都往 `status` 上写，同一列就同时承担"谁停用的"和"是否停用"两个语义，于是必然互相覆盖：
 
 | 场景 | 单列写法下的结果 |
 |---|---|
@@ -198,12 +198,12 @@ status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
 | `password_hash` | 本地 | ❌ | ✅（目录用户恒为空） |
 | `mfa_required` / `totp_enabled` / `totp_secret` | 本地 | ❌ | ✅ |
 | `role` | **本地** | ❌ | ✅ |
-| `phone` | 本地 | ❌（v1） | ✅ |
+| `phone` | 本地 | ❌ | ✅ |
 | `must_change_password` | 本地 | ❌（目录用户恒 `false`） | ✅ |
 
 **判定"谁托管"**：`authority::managing_authority(pool, user_id) -> Option<Authority>`，`Authority` 是 `Directory(code)` 或 `Scim`。目录取**优先级最高**的源 code（`ORDER BY priority ASC, code ASC`，`code` 用于在同优先级下给出确定结果），目录优先于 SCIM。
 
-**为什么是一项查询而不是两个函数**：文档原先拟定的 `is_managed(pool, user_id) -> bool` 与 `managing_source(..) -> Option<String>` 是同一查询的两种投影，而每个强制点都需要那个 code 来构造错误信息与审计明细（"managed by directory source corp" 与 "managed by SCIM" 是不同的话）；再有一个布尔投影只会多一个会漂移的真相来源。
+**为什么是一项查询而不是两个函数**：`is_managed(pool, user_id) -> bool` 与 `managing_source(..) -> Option<String>` 会是同一查询的两种投影，而每个强制点都需要那个 code 来构造错误信息与审计明细（"managed by directory source corp" 与 "managed by SCIM" 是不同的话）；再有一个布尔投影只会多一个会漂移的真相来源。
 
 > `Authority` 是枚举而非 `Option<String>`，因为 SCIM 没有 code —— 目录源的 code 是运维自选的，而 `"scim"` 甚至是一个合法的 **kind** 值，字符串在真正要用它拒写的地方恰好是有歧义的。
 
@@ -211,17 +211,15 @@ status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
 
 `Authority::managed_fields()` 有一个刻意的差异：目录拥有 `directory_groups`，**SCIM 不拥有**。SCIM 的组仍写 `users.groups` 这个本地列，若在此声明所有权，本地改组就会撞上一个 SCIM 会覆盖的值。把 SCIM 组迁到 `directory_groups` 是独立工作（§6.5、§14）。
 
-**已实现（P0）**：
-
 | 入口 | 行为 |
 |---|---|
 | `update_user` | 仅当 `email`/`username`/`display_name` 的**归一化后新值**与现值不同才拒绝；仅改 `role`/`groups`/`phone`/`mfa_required`/`status` 等本地字段照常放行 |
 | `delete_user` | 一律拒绝，提示改用 disable（与 D3 一致：上游删人只 disable，本地也不应硬删） |
 | `disable_user` / `enable_user` / `batch_disable_users` | **放行**，并写入/清除 `users.local_disabled`（见下） |
 
-> **对文档措辞的一处修正**：§5 原文把 `disable_user` 也列入"必须校验并拒绝"的入口。但同一张 D5 表格写明 `status` 是"目录 + 本地 override，本地可改（仅通过 `local_disabled`）"——若拒绝 disable，文档承诺的本地覆盖机制就无法使用。因此实现为**放行并正确落到 `local_disabled`**，而不是拒绝。`set_status` 现在强制要求调用方传入 `local_disabled`，任何绕过该意图的本地禁用都会在编译期被拦住。
+> `disable_user` **放行**并写入 `local_disabled`，因为 D5 表格写明 `status` 是目录值加本地 override；若拒绝 disable，这个 override 就永远用不上。`set_status` 强制调用方传入 `local_disabled`，任何绕过该意图的本地禁用都会在编译期被拦住。
 
-> 拒绝写入会记一条审计事件 `directory.managed_write_blocked`（`detail = { source, field }`）。同步引擎自身的 `directory.sync.*` / `directory.user.*` 事件属于 P1，因为现在还没有同步可审计。
+> 拒绝写入会记一条审计事件 `directory.managed_write_blocked`（`detail = { source, field }`）。
 
 ---
 
@@ -241,7 +239,7 @@ status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
 
 **为什么是数组而不是一个 `reason`**：账号可以同时被两个权威按着，而管理员的 Unfreeze 只能释放**本地**那一位。单值字段必须挑一个赢家，于是就会把另一个仍在按着的权威藏起来 —— 而那恰恰是"为什么点了没反应"的答案。
 
-**为什么 `can_enable` 由服务端算**：这是一条**策略**，不是渲染选择。原先的按钮对任何 disabled 账号都出现，点下去返回 `200`、清掉本地意图、账号**依然冻结** —— 按钮报告成功而什么都没发生。策略放在服务端，避免视图里的副本与写入路径实际执行的规则漂移。
+**为什么 `can_enable` 由服务端算**：这是一条**策略**，不是渲染选择。按钮对任何 disabled 账号都出现，点下去返回 `200`、清掉本地意图、账号**依然冻结** —— 按钮报告成功而什么都没发生。策略放在服务端，避免视图里的副本与写入路径实际执行的规则漂移。
 
 Dashboard 侧（`UsersView.vue`）：状态列按 `disabled_by` 逐项显示"谁按着"；不能生效时不再显示 Unfreeze，改显示 `Held upstream` 并说明需要哪个权威放手；编辑对话框在改 `status` 时提示"选 active 只清掉本地冻结，账号仍会保持冻结"。
 
@@ -323,9 +321,9 @@ WHERE id IN (SELECT user_id FROM directory_entries
 >
 > 之所以是 skip 而不是 conflict：conflict 的定义是"撞上一个**没人托管**的本地账号"，那才是需要人工裁决的接管风险。两源同时列出一个人是多源部署的正常状态，把它算成冲突会让每个 run 都停在 `partial`，运营商很快就会学会忽略这个状态。归属源的属性优先，正是 `priority` 的语义。
 >
-> 代价是低优先级源贡献的组会被丢弃。v1 接受这个代价（Q5 仍未定），归属源变更时下一次运行会重新规划。
+> 代价是低优先级源贡献的组会被丢弃。接受这个代价；归属源变更时下一次运行会重新规划。
 
-> **安全考量**：v1 **不做**按 email 自动 claim 现有账号。否则一个恶意/误配的目录条目（例如填了 `admin@corp.com`）就能接管本地管理员账号。宁可让冲突浮出来，也不静默接管。若将来要支持 claim，须同时满足：源配置显式开启、目标用户 `role='member'`、且目标用户无本地密码。
+> **安全考量**：Signet **不做**按 email 自动 claim 现有账号。否则一个恶意/误配的目录条目（例如填了 `admin@corp.com`）就能接管本地管理员账号。宁可让冲突浮出来，也不静默接管。若将来要支持 claim，须同时满足：源配置显式开启、目标用户 `role='member'`、且目标用户无本地密码。
 
 ### 6.5 组映射
 
@@ -335,7 +333,7 @@ WHERE id IN (SELECT user_id FROM directory_entries
 - `users.directory_groups` = 目录组（同步全量替换）
 - OIDC `groups` claim = 两者的**并集**（去重 + 稳定排序，保证 claim 可重复）
 
-同步时对该源贡献的组做全量替换（迁移 043 起按 id 存，未知名字以 `source='directory'` 建组）：
+同步时对该源贡献的组做全量替换（按 id 存储，未知名字以 `source='directory'` 建组）：
 
 ```sql
 UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id = $1
@@ -343,14 +341,14 @@ UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id =
 
 > 该方案需改动 OIDC claim 组装处与后台用户列表展示，代价可控，且为多源/本地共存留出空间。
 
-v1 组能力边界：
+组能力边界：
 
 - 仅同步**直接成员**，不做嵌套组展开；
 - LDAP 侧按 `member`（OpenLDAP 组对象）或 `memberOf`（AD 反查）解析，具体取法在源配置里选择；
 - SCIM 的组在 `scim_groups` 中标记 `source='scim'`，`/scim/v2/Groups` 只看见自己的组；目录组与本地组不会出现在 IdP 的列表里。
 - 目录组会出现在 Dashboard → **Groups** 的树里（带 Directory 徽章），管理员可以移动到部门下；名称、成员与存在性仍由同步源决定。
 
-**已实现（P1/P2）**：`users.directory_groups` 由同步全量替换（`update_user` 里 `$5 IS NULL` 时保留原值，因此 `sync_groups` 关闭的源不会清空已有值；非空时经 `signet_group_ids($5,'directory')` 写 id）；同步成功且开启 `sync_groups` 时，无成员且无子节点的 `source='directory'` 组置墓碑（上游已删除的组不残留）；OIDC 的 `groups` claim 由 `models::effective_groups` 计算两列并集（去重 + 排序，保证同一用户每次拿到的 claim 一致）。测试 `tests/oidc_groups_claim.rs`。
+同步会全量替换 `users.directory_groups`（`update_user` 里 `$5 IS NULL` 时保留原值，因此 `sync_groups` 关闭的源不会清空已有值；非空时经 `signet_group_ids($5,'directory')` 写 id）；同步成功且开启 `sync_groups` 时，无成员且无子节点的 `source='directory'` 组置墓碑（上游已删除的组不残留）；OIDC 的 `groups` claim 由 `models::effective_groups` 计算两列并集（去重 + 排序，保证同一用户每次拿到的 claim 一致）。测试 `tests/oidc_groups_claim.rs`。
 
 ---
 
@@ -428,7 +426,7 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ri
 
 判据很简单：**「这个人不被我们管理了」用作用域；「这个人不许进来」用白名单**。反过来用的后果不对称——把「不许进来」写进作用域会停用一批还在职的人；把「不再管理」写进白名单则会让已经离职的人继续留在 enabled 状态（只是登录被拒）。
 
-域名匹配规则（刻意做得窄）：比较**整个标签边界**，`corp.example` 匹配 `corp.example` 与 `mail.corp.example`，但**不匹配** `evilcorp.example`；大小写不敏感；**没有通配符、没有正则** —— 一个能表达任意条件的模式语言同时也是预览无法校验、一次 typo 就静默缩小或清空作用域的东西。部门值按精确值比较（去空白、忽略大小写），没有前缀匹配。后者是一个已知缺口，记录在 §17 的 Q7：AD 常把部门写成 `Engineering / Platform` 这样的层级路径，此时必须把 `department_attribute` / `department_path` 指到恰好那一层，配成上层名字不会匹配——**且因为作用域即所有权，配错的结果是禁用（`out_of_scope`），不是少同步几条**。因此改动部门筛选前后都应先看 `--dry-run` 的 `disabled` 计数。
+域名匹配规则（刻意做得窄）：比较**整个标签边界**，`corp.example` 匹配 `corp.example` 与 `mail.corp.example`，但**不匹配** `evilcorp.example`；大小写不敏感；**没有通配符、没有正则** —— 一个能表达任意条件的模式语言同时也是预览无法校验、一次 typo 就静默缩小或清空作用域的东西。部门值按精确值比较（去空白、忽略大小写），没有前缀匹配。后者是一个已知缺口，记录在 §15 的 Q3：AD 常把部门写成 `Engineering / Platform` 这样的层级路径，此时必须把 `department_attribute` / `department_path` 指到恰好那一层，配成上层名字不会匹配——**且因为作用域即所有权，配错的结果是禁用（`out_of_scope`），不是少同步几条**。因此改动部门筛选前后都应先看 `--dry-run` 的 `disabled` 计数。
 
 ### 7.2.2 全局登录白名单（admission）：会 skip，不会 disable
 
@@ -457,7 +455,7 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ri
 | AD | `whenChanged` | 秒级精度，同秒内多次修改会漏 |
 | OpenLDAP | `modifyTimestamp` | 秒级精度，需向前回溯若干分钟（kludge） |
 
-**结论**：增量只作为降低开销的优化，**必须**保留周期性全量对账兜底（尤其是删除检测）。建议默认按「每小时增量 + 每日全量」；v1 可先只做全量，跑通后再加增量。
+**结论**：增量只作为降低开销的优化，**必须**保留周期性全量对账兜底（尤其是删除检测）。建议默认按「每小时增量 + 每日全量」；当前只做全量，后续可加增量。
 
 ---
 
@@ -482,9 +480,9 @@ if !verify_password(&body.password, &user.password_hash)? { ... }
 4. 通过后继续 begin_login_mfa_flow（现状不变，MFA 流程无需改动）
 ```
 
-这同时修掉了 §15 的空密码缺陷：仅有非托管用户才会走到 argon2 分支，且空 hash 应返回 `401` 而非 `500`。
+只有非托管用户才会走到 argon2 分支；空 hash 返回 `401`，绝不返回 `500`。
 
-**已实现（P2）**：
+登录路径的选择如下：
 
 | 组件 | 位置 | 行为 |
 |---|---|---|
@@ -517,9 +515,9 @@ if !verify_password(&body.password, &user.password_hash)? { ... }
 
 超时建议：连接 5s、操作 10s（可配）；**必须**设超时，否则 LDAP 挂起会拖垮登录线程池。
 
-### 8.4 锁定策略（需确认，见 §17）
+### 8.4 锁定策略（需确认）
 
-本地 `failed_login_attempts` 与 AD 自身锁定策略会**叠加**，可能把用户锁死且互相掩盖原因。建议 v1：
+本地 `failed_login_attempts` 与 AD 自身锁定策略会**叠加**，可能把用户锁死且互相掩盖原因。建议策略：
 
 - LDAP 认证**失败不计入**本地锁定（交由目录侧的锁定策略）；
 - 但**仍记录**审计 `auth.login.failed` 与 Prometheus 指标，保留暴力破解可见性。
@@ -542,7 +540,7 @@ signet sync sources [--json]
 signet serve                                                             # 等同无子命令
 ```
 
-`run` 的 connector 由数据源的 `kind` 决定（`ldap` / `http_json`），同一命令驱动两类源。子命令名随 P4 从 `ldap` 改为 `run`，`ldap` 以 `#[command(visible_alias = "ldap")]` 保留为别名，既有脚本无需修改。
+`run` 的 connector 由数据源的 `kind` 决定（`ldap` / `http_json`），同一命令驱动两类源。`run` 与 `ldap` 互为别名，既有脚本无需修改。
 
 `--limit` 语义不只是"少跑几条"：**它同时跳过"上游缺失即 disable"的对账**——只看到一个片段的快照，无法区分"已删除"与"排在 limit 之后"。因此有限跑动的报告会打上 `reconciled: false` 并显式提示，绝不会因为截断而误停用用户。
 
@@ -594,7 +592,7 @@ id                                     started (UTC)        status    created up
 - 成功 `0`；任何错误 `1`（`main` 返回 `anyhow::Result`），错误摘要同时以 `Error: …` 打到输出，便于 CI 判定。
 - 源不存在 / 配置解析失败：`load_source` 在 `open_run` **之前**执行，因此 `Error: directory source not found: <code>` 之类只终止进程，**不落 run 记录、也不写审计**（`source::get_by_code` → `SourceConfig::parse`）。
 - 连接失败等规划期错误：发生在 `open_run` **之后**，会把该 run 以 `failed` + `error` 收尾，并写一条 `directory.sync.failed` 审计（dry run 的 `run_id` 为 `null`）。留下失败记录是有意为之——否则进程被杀会永久占住"运行中"。
-- **并发保护**：迁移 `025` 的单运行唯一索引保证一个源同一时刻只有一条 `running`。与 dashboard 手动触发或调度器抢跑时，后来者会拿到 `another sync run for this source is already in progress`（HTTP 侧为 409），而不是两次同步交错。运行中的 run 每 60 秒写心跳；只有心跳超过 `STALE_RUN_MINUTES`（120 分钟）未更新的 `running` 才会被标记为 `abandoned by a previous process` 再开新 run——长任务不会因为跑得久而误判，进程被杀也不会永久卡住源。运行历史默认保留 90 天。
+- **并发保护**：单运行部分唯一索引保证一个源同一时刻只有一条 `running`。与 dashboard 手动触发或调度器抢跑时，后来者会拿到 `another sync run for this source is already in progress`（HTTP 侧为 409），而不是两次同步交错。运行中的 run 每 60 秒写心跳；只有心跳超过 `STALE_RUN_MINUTES`（120 分钟）未更新的 `running` 才会被标记为 `abandoned by a previous process` 再开新 run——长任务不会因为跑得久而误判，进程被杀也不会永久卡住源。运行历史默认保留 90 天。
 
 ### 9.6 运行前提（重要）
 
@@ -633,7 +631,7 @@ RUST_LOG=off signet sync sources --json | jq -r '.[].code'
 - 在 `build_app` 中 `tokio::spawn` 一个调度循环，`tokio::time::interval` 每分钟 tick；
 - 每次 tick 寻找 `enabled = TRUE AND interval_minutes IS NOT NULL` 且到期的源；
 - **多副本安全**：执行前用 `pg_try_advisory_lock` 抢源级锁（key 由 `source_id` 派生），抢不到就跳过。否则每个副本都会跑一遍同步；
-- v1 用 `interval_minutes`（整数）而非 cron 表达式，避免引入 cron 解析依赖；后续需要再升级；
+- 调度器用 `interval_minutes`（整数）而非 cron 表达式，避免引入 cron 解析依赖；后续需要再升级；
 - 运行历史写 `directory_sync_runs`，并提供查询 API：
 
 ```text
@@ -648,13 +646,13 @@ GET  /api/v1/admin/directory/sources/{code}/runs/{id}       # 单次详情
 
 权限：全部 `require_admin_role`（凭据属敏感配置）。
 
-**已实现（P3）**：`directory::scheduler`（tick 60s / `MissedTickBehavior::Delay` / 跳过第一个立即 tick）+ `model::due_sources`。「到期」的判定全部落在这一条 SQL 里：`enabled`、`interval_minutes IS NOT NULL`、无**存活的** running run、距最近一次 `started_at` 已满 interval。
+调度器由 `directory::scheduler`（tick 60s / `MissedTickBehavior::Delay` / 跳过第一个立即 tick）+ `model::due_sources`。「到期」的判定全部落在这一条 SQL 里：`enabled`、`interval_minutes IS NOT NULL`、无**存活的** running run、距最近一次 `started_at` 已满 interval。
 
-> **对 §10 的一处偏离：未使用 `pg_try_advisory_lock`。** 原因是会话级 advisory lock 属于**获取它的那个连接**，而本仓库的连接来自池、按查询借还——"加锁 → spawn 任务 → 解锁"会跨连接，锁根本锁不住，而一把锁不住的锁比没有锁更危险，因为读代码的人会以为有保护。
+> **未使用 `pg_try_advisory_lock`。** 原因是会话级 advisory lock 属于**获取它的那个连接**，而本仓库的连接来自池、按查询借还——"加锁 → spawn 任务 → 解锁"会跨连接，锁根本锁不住，而一把锁不住的锁比没有锁更危险，因为读代码的人会以为有保护。
 >
-> 真正提供互斥的是迁移 `025` 的部分唯一索引（`directory_sync_runs (source_id) WHERE status = 'running'`）：`begin_run` 在**所有副本、所有触发方式**（schedule/manual/cli）下都只能插入一行、且插入发生在连接目录**之前**。输掉竞争的副本拿到 `Conflict`，不写任何东西。数据库约束不会被忘记。
+> 真正提供互斥的是部分唯一索引（`directory_sync_runs (source_id) WHERE status = 'running'`）：`begin_run` 在**所有副本、所有触发方式**（schedule/manual/cli）下都只能插入一行、且插入发生在连接目录**之前**。输掉竞争的副本拿到 `Conflict`，不写任何东西。数据库约束不会被忘记。
 >
-> **另一个偏离（且是修 bug）**：`due_sources` 把"存活"定义为 `started_at` 在 `STALE_RUN_MINUTES` 之内。若把任何 `running` 都当作阻塞，一次崩溃留下的 run 会让该源**永远不再被调度**——恢复逻辑 `fail_stale_runs` 只在 `open_run` 里执行，而 `open_run` 只在有东西调用它时才到达。两个常量因此共享 `engine::STALE_RUN_MINUTES`：一旦漂移，要么永久卡死，要么和正在跑的同步撞车。`tests/directory_scheduler.rs` 用 `a_crashed_run_is_recovered_instead_of_wedging_the_source_forever` 钉住这一点。
+> **存活的 running 不能阻塞调度**：`due_sources` 把"存活"定义为 `started_at` 在 `STALE_RUN_MINUTES` 之内。若把任何 `running` 都当作阻塞，一次崩溃留下的 run 会让该源**永远不再被调度**——恢复逻辑 `fail_stale_runs` 只在 `open_run` 里执行，而 `open_run` 只在有东西调用它时才到达。两个常量因此共享 `engine::STALE_RUN_MINUTES`：一旦漂移，要么永久卡死，要么和正在跑的同步撞车。`tests/directory_scheduler.rs` 用 `a_crashed_run_is_recovered_instead_of_wedging_the_source_forever` 钉住这一点。
 
 ---
 
@@ -709,17 +707,17 @@ SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不�
 |---|---|
 | LDAP TLS | LDAPS + 强制证书校验（D4）；代码层不提供跳过校验的开关 |
 | 凭据存储 | 服务账号密码/Bearer token 一律经 `Encryptor`（AES-256-GCM）落库到 `credential_enc`；**不得**明文 |
-| 出站 SSRF | 新建统一出站模块：仅允许 `http(s)`、禁止跟随重定向、连接/整体超时、响应体大小上限、**阻断私网/回环/链路本地地址（含 DNS 解析后二次校验，防 rebinding）**。LDAP 本身不走 HTTP，但 HTTP JSON 源（P4）必须有，故在 P0 一并建立；同时把 `webhooks.rs:80` 与 federation 的 `issuer_url` 校验切到该校验 |
+| 出站 SSRF | 新建统一出站模块：仅允许 `http(s)`、禁止跟随重定向、连接/整体超时、响应体大小上限、**阻断私网/回环/链路本地地址（含 DNS 解析后二次校验，防 rebinding）**。LDAP 本身不走 HTTP，但 HTTP JSON 源必须有，故一并建立；同时把 `webhooks.rs:80` 与 federation 的 `issuer_url` 校验切到该校验 |
 | 目录账号权限 | 只读，最小授权（仅需读取用户与组子树） |
 | 提权防护 | 目录数据**永不**写 `users.role`；组只写 `directory_groups` |
 | 只读强制 | `admin` 接口按 §5 拒绝修改托管字段，返回 `403` 与明确原因 |
-| 冲突不接管 | 按 email 自动 claim 现有账号（尤其 admin/manager）在 v1 被明确禁止 |
+| 冲突不接管 | 按 email 自动 claim 现有账号（尤其 admin/manager）被明确禁止 |
 | 密码 | 不落库、不落日志、不缓存；bind 直通仅用原始提交密码 |
 | 顺带修复 | `webhooks.secret` 目前**明文**存储，而 SSO client secret / TOTP secret 均已加密 —— 应统一到 `Encryptor` |
 
 ---
 
-## 13. 通用 HTTP JSON 源（P4）
+## 13. 通用 HTTP JSON 源
 
 配置（`kind = 'http_json'`，`config` 全部为显式点号路径，`deny_unknown_fields`）：
 
@@ -745,9 +743,9 @@ SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不�
 - **字段映射**：`a.b[0].c` 形式的点号路径（支持 `["带.点的键"]` 与可选 `$.` 根标记）。路径语法错误（空段、未闭合括号/引号）不允许被当作"取不到值"——否则写错的映射会静默变成"目录为空"，而空目录会把该源管理的用户全部 disable（D3）；
 - **必须报错的失败**：`users_path` 不存在或不是数组 → 报错并带上路径名与命中值的 JSON 类型，**不返回空列表**；上游非 2xx → 只报状态码与去掉 query 的 URL，不回显 response body（可能是 HTML 错误页）；
 - **分页**：`none` / `page`（`?page=N&page_size=M`，起始页与参数名可配）/ `cursor`（从 `next_path` 取下一个游标，取不到即结束）。三者都由 `max_pages` 硬性封顶（配置上限 1000）：一个"永远还有下一页"的上游会让同步在持有服务账号令牌时无限循环；
-- **出站校验**：每页请求都重新走 `outbound::ensure_allowed`（DNS rebinding 意味着保存时的检查在抓取时已失效），不跟随重定向，响应体大小上限与连接/整体超时直接复用 P0 的 `outbound` 模块。保存时另做一次（`source::ensure_destination_allowed`），与 webhooks 同层：字面内网地址只有在 `SIGNET_OUTBOUND_ALLOW_PRIVATE` 打开时才允许保存；
-- **复用 P1 的映射与对账层**：connector 只负责"取数据"，产出 `Vec<UpstreamUser>` 后进入同一个 planner / apply / 运行历史 / 审计链路；`engine::fetch_and_plan` 是唯一按 kind 分派的位置；
-- **明确不做（v1）**：`method` 只支持 `GET`（POST body 没有配置面，故报错而非静默降级），不做通配符/过滤式的通用 JSONPath，不解析"组对象数组"（`{id,name}` 这类无法猜字段，宁可报"无组"也不臆造组名）；
+- **出站校验**：每页请求都重新走 `outbound::ensure_allowed`（DNS rebinding 意味着保存时的检查在抓取时已失效），不跟随重定向，响应体大小上限与连接/整体超时直接复用 `outbound` 模块。保存时另做一次（`source::ensure_destination_allowed`），与 webhooks 同层：字面内网地址只有在 `SIGNET_OUTBOUND_ALLOW_PRIVATE` 打开时才允许保存；
+- **复用同一套映射与对账层**：connector 只负责"取数据"，产出 `Vec<UpstreamUser>` 后进入同一个 planner / apply / 运行历史 / 审计链路；`engine::fetch_and_plan` 是唯一按 kind 分派的位置；
+- **明确不支持**：`method` 只支持 `GET`（POST body 没有配置面，故报错而非静默降级），不做通配符/过滤式的通用 JSONPath，不解析"组对象数组"（`{id,name}` 这类无法猜字段，宁可报"无组"也不臆造组名）；
 - **作用域**：`email_domains` / `department_path` + `department_values` 与 LDAP 侧语义完全一致（§7.2.1），包括"掉出作用域即 disable"和 `out_of_scope` 原因。区别只在取值来源：部门是一个 JSON 路径而不是目录属性。URL 里自带 query 的上游筛选（`?dept=eng`）属于上游自己的过滤，Signet 看不见也无法校验，因此**不替代**这里的谓词；
 - **增量**：仍未实现，退化为全量对账（与 LDAP 一致，见 §7.4）。
 
@@ -759,7 +757,7 @@ Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致�
 
 ### 13.1.1 为什么不是六个输入框
 
-原先的映射是一组孤立的文本框（`data.users` / `id` / `mail` / `entryUUID`…），它把三件事同时推给运维：要凭记忆知道上游长什么样、要能背出路径语法、写错了要等到**下一次同步**才知道。第四件事更危险：规范化过程（邮箱小写、显示名回落邮箱前缀、组排序去重）在表单里完全不可见，提交完并不知道库里会变成什么。
+把映射做成一组孤立的文本框（`data.users` / `id` / `mail` / `entryUUID`…），它把三件事同时推给运维：要凭记忆知道上游长什么样、要能背出路径语法、写错了要等到**下一次同步**才知道。第四件事更危险：规范化过程（邮箱小写、显示名回落邮箱前缀、组排序去重）在表单里完全不可见，提交完并不知道库里会变成什么。
 
 所以共用形态是：**一张共享的映射表 + 按 kind 换的"样例面板"**。两种 pull kind 回答的是同一组问题，只是答案的语法不同：
 
@@ -776,7 +774,7 @@ Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致�
 
 ### 13.1.2 样例：贴一次，然后点选
 
-不在第一批做"从上游拉取"，因此两个 kind 都用**粘贴**获得样例，各自贴合其数据形状：
+当前不提供"从上游拉取"，因此两个 kind 都用**粘贴**获得样例，各自贴合其数据形状：
 
 - **JSON 是嵌套的 → 两棵树**。第一棵"列表在哪"（只有数组节点可点，数组以外的节点置灰并说明原因）；选定后第二棵"单条记录长什么样"，**以 entry 为根重新挂载**，因此它给出的路径自动是 entry 相对的（`id`，而不是 `data.users[0].id`——后者只对第一页第一条成立，换页即失效）。
 - **LDIF 是扁平的 → 属性清单**。`ldapsearch -LLL` 的输出就是 LDIF，正好是 LDAP 侧最常配错的东西（`uid` vs `sAMAccountName`、`entryUUID` vs `objectGUID`）的权威来源。解析在**后端**（`directory::ldif`），前端只渲染返回的 `targets`，避免第二份 LDIF 实现。
@@ -800,7 +798,7 @@ Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致�
 - **按行报错而不是一句"配置无效"**：`ok/resolved/total` 让 UI 把结论挂在出错的那一行上。`scope` 行对 LDAP 检查两件事：样例 DN 是否落在 `base_dn` 之下（`user_filter` 由服务器执行，本地无法判定，响应里明说），以及 §7.2.1 的作用域谓词是否**至少放行一条** —— 谓词是本地求值的，所以这一条能判定，而"匹配 0 条"直接判 `ok: false`（原因写在 `error` 里，并且指出它在真实运行里会禁用该源已管理的所有人）。未配置作用域时该行维持原语义（`resolved` = 落在 `base_dn` 之下的条目数），因此老配置的回显不变；
 - **不做的事也要说清**：未提供样例时 `fields` 为空 + 一条 warning，**不假装已校验**；没有组条目时明说组列未验证；`group_base_dn` 已配但 `sync_groups` 关闭时明确警告"组不会写入"；
 - **样例体积上限 1 MiB**（路由额外放宽 body limit 到 4 MiB，避免被框架的 413 抢先）；
-- **校验全量、回显分页**：`fields` 的 `resolved/total` 与 `targets` 的出现次数一律对**全部**样例条目计算（`total == entry_count`），只有 `rows` 按 `offset` 分页返回，每页 `page_size = 25`。二者刻意不共用同一个数：早期版本把校验也截断在前 50 条，于是同一块面板上同时出现 "120 entries" 和 "10/50" 两个分母，而那个小的分母把稀缺属性说得比实际更普遍（8% 显示成 20%）——这正是该计数要防的误判。分析是一次内存遍历，`MAX_SAMPLE_BYTES` 已封顶，因此"算全量"的代价可以忽略；
+- **校验全量、回显分页**：`fields` 的 `resolved/total` 与 `targets` 的出现次数一律对**全部**样例条目计算（`total == entry_count`），只有 `rows` 按 `offset` 分页返回，每页 `page_size = 25`。二者刻意不共用同一个数：被截断的分母会把稀缺属性说得比实际更普遍（8% 显示成 20%）——这正是该计数要防的误判。分析是一次内存遍历，`MAX_SAMPLE_BYTES` 已封顶，因此"算全量"的代价可以忽略；
 - `offset` 超出范围时**回落到最后一页**而不是返回空表（两次防抖之间样例可能变短，空表会被读成"这个源没有用户"）。`page_size` 恒为页宽（容量），**不要用 `rows.len()` 步进**：条目可能因缺少 external id 而不产生行，末页也会短于页宽，用行数步进会与前后的窗口重叠；
 - `deny_unknown_fields`：拼错的请求字段（例如 `sample_json`）会 400，而不是静默变成"没样例、校验通过"；
 - **不写审计**：它不写库、不读库、不持有凭据，且在编辑映射时会被反复调用；真正需要审计的是配置的保存（`directory.source.*`）。样例同样**不持久化**。
@@ -821,27 +819,23 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 
 ---
 
-## 14. SCIM inbound push（P5 概要）
+## 14. SCIM inbound push
 
-现有 `/scim/v2` 是 SCIM **服务端**，路线正确，但需加固才能真正承接 Okta / Entra 的推送：
+Signet 实现 SCIM 2.0 服务端，Okta / Entra 可凭 bearer token 通过 `/scim/v2/*`
+完成用户与组的创建、更新与删除（见 [integrations.md](./integrations.md)）。
 
-| 问题 | 位置 | 修法 |
-|---|---|---|
-| `role = 'user'` 违反 CHECK（只允许 admin/manager/member），**建用户必然 500** | `scim.rs` create_user | 改为 `'member'` |
-| `PATCH` 请求体的操作列表名是 `operations`，而 RFC 7644 与各 IdP 发的是 `Operations`；serde 大小写敏感 + `#[serde(default)]` ⇒ 列表为空、**整个请求体被丢弃**，却回 200 与未改动的资源 | `scim.rs` `PatchUserBody` / `PatchGroupBody` | 接受两种拼写 |
-| 操作未读 `op`/`path`，一律按写入处理 ⇒ 组路由上 `remove` **反而把成员加上**；`{"op":"remove","path":"active"}` 无 `value` ⇒ 静默无效；Entra 的 `{"op":"Replace","path":"active","value":false}`（标量）⇒ 被接受并忽略 | `scim.rs` `patch_user` / `patch_group` | 按 RFC 7644 §3.5.2 解析 `op`/`path`，支持 `active`/`displayName`/`members` |
-| `PATCH /Groups` 只能加不能删 | `scim.rs` `patch_group` | 支持 add/remove/replace |
-| `delete_group` 绑定了未使用的 `$1` | `scim.rs` `delete_group` | 修正绑定 |
-| DELETE 返回 200 + Error schema | `scim.rs` `delete_user` / `delete_group` | 改为 `204` |
-| 审计缺失（无 `scim.group.*`） | — | 补齐 |
-
-尚未实现：`PATCH /Users` 写 `userName` / `emails`（需先定义唯一冲突
-对推送客户端的语义）、SCIM `filter` 支持、把 SCIM 组存储迁到
-`directory_groups`。权威清单见[文档目录](./README.md#尚未实现)。
-
-> **`Operations` 那一项值得单独说明**：它让上面所有 PATCH 缺陷都变得不可观测——真实客户端的请求体在反序列化阶段就变成了空列表，路由于是"成功"地什么都没做。先前的缺陷分析（"完全忽略 op/path 语义"）是在只有小写拼写的请求体下才成立；对上真实 IdP，症状是"PATCH 一律返回 200 且无任何变化"。回归测试因此走**请求体**这一层（`user_attrs_from_body` / `group_member_changes_from_body`），而不是直接调用解释器——否则这个 bug 依然测不到。
-
-推送写入路径应复用同步的映射与冲突逻辑，并写 `directory_sync_runs`（`trigger = 'push'`）以获得统一的运行历史与审计。
+- **用户**：`POST` 创建；`PUT`/`PATCH` 更新 `active` 与 `displayName`；PATCH
+  请求体同时接受 `Operations`（RFC 7644）与 `operations`；定位支持 UUID、
+  `externalId` 或 email。
+- **组**：`POST` 创建；`PATCH` 增删成员（含 Okta 的
+  `members[value eq "<id>"]` 过滤形式）；`DELETE` 置墓碑（§14.1）。
+- **删除只停用、不删数据**（D3）：见 §14.1。
+- **审计粒度为一请求一条**，不是每个受影响行一条——IdP 替换一个 500 人的组是
+  一个动作；没有实际变化的幂等推送不记账，事件集见 §11.1。
+- **尚未实现**：`PATCH /Users` 写 `userName` / `emails`（需先定义唯一冲突对
+  推送客户端的语义）、SCIM `filter`、以及把 SCIM 组存入 `directory_groups`
+  （目前仍写本地 `users.groups` 列）。权威清单见
+  [文档目录](./README.md#尚未实现)。
 
 ### 14.1 上游的删除只停用，不删数据（D3 的落地）
 
@@ -850,12 +844,12 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 | 入口 | 行为 | 为什么这样 |
 |---|---|---|
 | `DELETE /scim/v2/Users/{id}` | 置 `scim_disabled = TRUE`（`status` 由 §4.2 派生），并置 `scim_managed = TRUE`，**不删行** | `directory_entries.user_id` 与 IdP 的 `externalId` 都指向这个 id。删行意味着下一次 push 会为同一个人**新开一个账号**，旧账号的会话、审计与组历史全部失去归属；而一次误删是不可恢复的 |
-| `DELETE /scim/v2/Groups/{id}` | 置 `deleted_at = NOW()`，把成员快照写进 `members_at_delete`（迁移 `028`），并把组名从所有用户的 `groups` 中移除 | 两个方向必须同时成立：成员关系**必须停止授权**（`groups` 是 claim 的来源），又**必须留下可恢复的记录**。只删行会把"这个组存在过、当时有谁"一起销毁 |
+| `DELETE /scim/v2/Groups/{id}` | 置 `deleted_at = NOW()`，把成员快照写进 `members_at_delete`，并把组名从所有用户的 `groups` 中移除 | 两个方向必须同时成立：成员关系**必须停止授权**（`groups` 是 claim 的来源），又**必须留下可恢复的记录**。只删行会把"这个组存在过、当时有谁"一起销毁 |
 | 管理员删除托管账号 | `403`，提示改用 disable | 托管账号的删除权在上游（§5） |
 
 **同名组重建**：`scim_groups.display_name` 的唯一约束改为**只覆盖未删除行**的部分索引（`scim_groups_live_display_name_key`），否则墓碑会永久占住那个名字，IdP 想重建同名组会被挡死。
 
-### 14.2 混合部署：SCIM 与目录同步不再互相覆盖
+### 14.2 混合部署：SCIM 与目录同步互不覆盖
 
 同一账号既被目录 link 又被 SCIM 推时（§4.2 的三个意图位就是为此）：
 
@@ -865,55 +859,10 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 
 ---
 
-## 15. P0 缺陷修复清单（所有阶段的前置）
-
-这些是当前代码里**已经坏掉**、且正好落在本设计要复用的链路上的缺陷：
-
-| # | 位置 | 问题 | 修法 |
-|---|---|---|---|
-| 1 | `scim.rs:228` | 插入 `role = 'user'`，违反 `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` 必然 500 | 改为 `'member'` |
-| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'`，违反 `CHECK (purpose IN ('login','enroll'))` → 强制改密流程坏 | 扩展 CHECK 或改用既有值 |
-| 3 | `auth/routes.rs:90` | `password_hash = ''` 的用户（SSO JIT / SCIM 创建）会使 `PasswordHash::new("")` 报错，被 `?` 转成 **500** 而非 401 | 按 §8.1 分派；非托管用户的空 hash 返回 401 |
-| 4 | `scim.rs:684` | `delete_group` 的 UPDATE 只引用 `$2`，却先绑定了 `group.id` | 修正参数绑定 |
-| 5 | `webhooks.rs:80` | 出站 URL 只校验 `http(s)://` 前缀，无 SSRF 防护 | 接入 §12 统一出站校验 |
-| 6 | `webhooks.rs:87` | `webhooks.secret` 明文存储，与其它密钥处理不一致 | 经 `Encryptor` 加解密 |
-| 7 | `federation/provider.rs` | 出站 HTTP 无 timeout（仅 webhook 有 10s） | 统一到出站模块 |
-
-> **第 6 项的落点**：`audit::record(pool, event)` 已改为 `audit::record(state, event)`，`webhooks::dispatch` / `deliver_one` 同样接收 `&AppState`，因此投递路径能拿到 `Encryptor` 解密 `secret_enc`。`login_alert::track_login` 一并改签名。存量明文通过启动时的 `bootstrap::encrypt_webhook_secrets` 搬迁，且该步骤**故意设为致命错误**：静默失败会让 `secret_enc` 为空，投递直接降级为不签名。
-
-> **出站校验的兼容性提示**：`outbound` 默认拒绝解析到私网/回环/链路本地地址的目标，因此**指向内网地址的既有 webhook 会开始投递失败**（会记录一条 `success = false` 的投递记录）。若内网 webhook 接收方确实需要保留，设 `SIGNET_OUTBOUND_ALLOW_PRIVATE=true`（部署级开关，默认关闭；开启时启动会打一条 WARN，且该开关只放宽**地址**策略，仍拒绝非 http(s) 协议与内嵌凭据）。另：所有出站请求都禁用了重定向，若某 provider 的 endpoint 依赖重定向会受影响。`issuer_url` 与 OIDC discovery 走的是严格模式（仅字面地址检查、不解析 DNS），内网 IdP 用主机名即可正常工作。
-
-
----
-
-## 16. 分期与验收
-
-| 阶段 | 内容 | 验收标准 |
-|---|---|---|
-| **P0 地基** | §15 全部缺陷修复；`is_managed`/只读语义；§4 三张表 + `users` 变更；审计事件；统一出站模块；凭据加密 | 现有测试通过；SCIM 建用户不再 500；强制改密可用；空密码用户返回 401；管理员改目录用户被拒 |
-| **P1 LDAP 同步引擎** | 连接/LDAPS；全量分页拉取；指纹比对；创建/更新；缺失即 disable；组写入 `directory_groups`；CLI（含 `--dry-run`、`--json`）；手动触发 API；运行历史 | `--dry-run` 输出的差异与真实执行一致；对目标目录跑通全量；上游删人后用户变 disabled 且审计留痕；重复运行第二遍 `updated = 0` |
-| **P2 LDAP bind 直通** | 按 §8 分派登录；LDAPS bind；fail closed；指标 | 目录用户能用目录密码登录并正常走 MFA；改密后新密码生效；LDAP 停机时返回 503 且明确不回退 |
-| **P3 定时调度** | §10 调度循环 + advisory lock；运行历史 UI 入口 | 到点自动运行；双副本同时启动只跑一次；失败有审计与指标 |
-| **P4 HTTP JSON 源** | §13 | 完成一次全量同步；SSRF 用例（内网地址、重定向、超大响应）全部被拒 |
-| **P4.5 共用映射 UI** | §13.1 | 贴一次样例即可点选映射；预览与真实写入（规范化后）一致；样例不落库不写日志 |
-| **P4.7 源作用域：邮箱域 / 部门** | §7.2.1 | 只同步指定域/部门；配置写错（匹配 0 条）时预览直接判失败而不是静默清空；运行历史能区分「离职」与「调岗」 |
-| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 |
-
-尚未实现：从上游拉取样例（P4.6）。映射预览依赖手工粘贴样例，因此
-LDAP 组列仍为最佳推定。
-
-> **P1 与 P2 必须紧邻交付**：只做同步不做 bind 直通，目录用户同步进来却登不进去，功能等于没交付。
-
----
-
-## 17. 未决事项
+## 15. 未决事项
 
 | # | 待定 | 影响 |
 |---|---|---|
 | Q1 | 首个联调目标是 **AD** 还是 **OpenLDAP**？ | 决定 `external_id` 字段、成员解析方式、增量字段。建议**先锁死一个**，不要同时兼容 |
 | Q2 | 用户量级与期望同步频率？ | 决定 `page_size`、批事务大小、是否需要增量（全量对账在 10 万级下的窗口） |
-| Q3 | LDAP 认证失败是否累加本地锁定计数？（§8.4 建议**不累加**） | 双重锁定风险 |
-| Q4 | 组是否采用分列方案 `directory_groups`？（§6.5 推荐） | 影响 OIDC claim 组装与后台展示 |
-| Q5 | 是否需要多源同时托管一个用户？ | 影响冲突仲裁（`priority`）与 `directory_entries` 是否允许多行同用户 |
-| Q6 | 是否需要在 `README.md` / `README.zh-CN.md` 的文档索引中登记本文？ | 文档可达性 |
-| Q7 | `department_values` 是否需要**层级/前缀**语义（如"Engineering 下所有子部门都算"）？ | 当前只做精确值比较（§7.2.1），AD 里若把部门写成 `Engineering / Platform` 这类路径，则必须把 `department_attribute` / `department_path` 指到**恰好那一层**，否则配了也不匹配。加前缀语义等于放宽作用域判定，会改变"掉出作用域即禁用"的边界，需要连带决定：是否要在预览的 `scope` 行区分"前缀命中"与"精确命中"，以及前缀是否只按 `/` 分隔符切。**暂不实现**，先只记录 |
+| Q3 | `department_values` 是否需要**层级/前缀**语义（如"Engineering 下所有子部门都算"）？ | 当前只做精确值比较（§7.2.1），AD 里若把部门写成 `Engineering / Platform` 这类路径，则必须把 `department_attribute` / `department_path` 指到**恰好那一层**，否则配了也不匹配。加前缀语义等于放宽作用域判定，会改变"掉出作用域即禁用"的边界，需要连带决定：是否要在预览的 `scope` 行区分"前缀命中"与"精确命中"，以及前缀是否只按 `/` 分隔符切。**暂不实现**，先只记录 |

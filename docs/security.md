@@ -91,7 +91,7 @@ application layer** rather than stored in plaintext:
 > **unverified contact information** only. Full binding requires an SMS OTP
 > before the number can be used for password recovery, account recovery or
 > SMS sign-in; that needs an SMS gateway (e.g. Alibaba Cloud SMS) plus sending
-> rate limits and replay protection. See [design.md](./design.md) Phase 4.
+> rate limits and replay protection. See the documentation index.
 
 ### 2.4 Login auditing
 - Both successful and failed sign-ins are audited with the client IP and
@@ -301,9 +301,8 @@ encryption keys); the `build/` vs `deploy/` split is in
 
 ---
 
-## 8. Planned security enhancements
+## 8. Not implemented
 
-| Priority | Feature | Notes |
-|--------|------|------|
-| P0 | SMS-verified phone binding | SMS gateway; `phone` is currently unverified (§2.3) — the only high-priority item not yet implemented |
-| P2 | Alerting integration | Feed the Prometheus metrics into Alertmanager |
+SMS-verified phone binding and the Alertmanager integration are not implemented;
+the [documentation index](./README.md#not-implemented-yet) keeps the canonical
+list. `phone` is currently unverified contact information (§2.3).

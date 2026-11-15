@@ -6,7 +6,7 @@
 |---|---|
 | 项目名 | **Signet**（印鉴） |
 | 定位 | 组织内统一身份认证服务（OIDC IdP） |
-| 生产入口（未来） | `https://sso.example.com` |
+| 生产入口示例 | `https://sso.example.com` |
 | 开发 Issuer | `http://localhost:8443`（默认值；Dashboard → Settings → Server identity 保存的值优先，`SIGNET_ISSUER` 仅作初始值/回退） |
 | 协议 | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
 | 首个客户端 | Cella（内网部署、可出网） |
@@ -23,10 +23,10 @@
 - 提供可撤销的登录会话与（可选）统一登出
 - 给出稳定的身份主键（`sub`）与基础用户信息，供业务侧做授权
 
-### 1.2 非目标（首期不做）
+### 1.2 非目标
 
 - 不替代各业务系统的**细粒度业务权限**（数据集 ACL、操作审计策略等仍在业务侧）
-- 不做企业微信/钉钉全量同步（可作为后续 IdP 连接器）
+- 不做企业微信/钉钉连接器与 SAML；所有客户端统一使用 OIDC
 - 不做通用 API 网关、计费、应用商店
 - 不与阿里云 OSS（对象存储）混用命名或配置前缀
 
@@ -99,7 +99,7 @@ Discovery（计划支持）：
 GET https://sso.example.com/.well-known/openid-configuration
 ```
 
-### 3.3 核心端点（首期）
+### 3.3 核心端点
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
@@ -134,7 +134,7 @@ User            用户（登录主体）
 ClientApp       接入应用（如 cella）
 AuthorizationCode / RefreshToken / Session
 （可选）Group / Membership   组与成员，用于 claims 映射
-（可选）Org                  多租户预留，首期可单租户
+（可选）Org                  多租户预留，当前单租户
 ```
 
 ### 4.2 User（最小字段）
@@ -179,7 +179,7 @@ AuthorizationCode / RefreshToken / Session
 - `email`（若有）  
 - `name` 或 `preferred_username`  
 
-**可选（首期可空实现）：**
+**可选：**
 
 - `groups` / `roles` — 仅作业务侧初始角色映射，不代替业务 ACL  
 - `phone_number` — 联系电话（需请求 `phone` scope）
@@ -217,7 +217,7 @@ AuthorizationCode / RefreshToken / Session
 2. （可选）重定向 Signet `end_session_endpoint`，并带 `post_logout_redirect_uri`  
 3. Signet 清除自身 SSO 会话，使其他已接子系统下次也需重新登录  
 
-首期可只做第 1 步；第 2–3 步作为统一登出增强。
+只清本地业务会话即可满足多数场景；第 2–3 步用于跨系统统一登出。
 
 ### 5.3 账号生命周期与角色（已定）
 
@@ -296,7 +296,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 - 审计：登录、管理操作、MFA/Settings 变更；Overview 展示 24h/7d/30d 登录统计；支持 CSV 导出与保留策略；记录客户端 IP 与浏览器/OS（由 `User-Agent` 解析）  
 - 可观测：`/metrics` 暴露登录/token/MFA 计数与 HTTP 指标（Prometheus 文本格式）；请求日志带 `x-request-id` 关联链路  
 
-> 以上安全机制的实现现状（已实现/规划中）与密钥、配置项汇总见 **[security.md](./security.md)**。
+> 密钥与配置项汇总见 **[security.md](./security.md)**。
 
 
 
@@ -319,94 +319,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 
 ---
 
-## 9. 分期路线图
-
-### Phase 0 — 契约与骨架
-
-- 本设计定稿  
-- 仓库 `signetproject`、域名证书、基础部署清单  
-
-### Phase 1 — 最小可用 IdP（给业务系统用）
-
-- User + ClientApp CRUD（可先配置文件 / 简单管理）  
-- authorize / token / jwks / userinfo  
-- 登录页 + PKCE  
-- Discovery 文档  
-- 注册客户端  
-
-### Phase 2 — 会话与运维
-
-- refresh 旋转、revoke  
-- 统一登出  
-- 管理后台（用户禁用、应用管理、审计查询）  
-- 监控与告警  
-
-### Phase 3 — 扩展
-
-- groups/roles claims  
-- 外部 IdP 联邦（企业微信等）  
-- 多租户 / 多环境隔离  
-
-### Phase 4 — 安全加固
-
-按优先级排序：
-
-| 优先级 | 功能 | 说明 |
-|--------|------|------|
-| P0 | 密码重置/找回 | `/api/v1/password-reset/*`；30 分钟单次 token；SMTP 真实投递（未配置时 503） |
-| P0 | **手机号短信验证绑定** | 需短信网关；当前 `phone` 仅作联系信息落库，未验证 |
-| P0 | RFC 7009 吊销端点 | 独立 `/oauth/revoke` |
-| P0 | WebAuthn/Passkey + 恢复码 | 注册/登录/管理；挑战存内存 |
-| P1 | 新设备/IP 登录告警 | `login_devices` + `auth.new_device` 审计/告警邮件 |
-| P1 | API 全局速率限制 | 按 IP 滑动窗口限流，超限 429 |
-
-### Phase 5 — 集成与运维
-
-| 优先级 | 功能 | 说明 |
-|--------|------|------|
-| P1 | OAuth 客户端动态注册 | RFC 7591 `/oauth/register` + 一次性注册 token |
-| P2 | SCIM v2 用户/组同步 | `/scim/v2/Users`、`/scim/v2/Groups` |
-| P2 | Webhooks 事件推送 | 审计事件异步推送 + HMAC 签名 |
-
-### Phase 6 — 监控与可观测
-
-| 优先级 | 功能 | 说明 |
-|--------|------|------|
-| P1 | HTTP 指标 | 请求计数（按状态类）/ 在途 / 延迟直方图导出到 `/metrics` |
-| P1 | 健康检查增强 | `/health` 探测 Postgres，失败 503 |
-| P2 | 告警对接 | 基于 Prometheus 指标接入 Alertmanager |
-| P2 | 链路追踪 / 请求 ID | `x-request-id` 生成/透传/回显 + tracing span 关联 |
-
-尚未实现：**手机号短信验证绑定** 与 **Alertmanager 告警对接**。上述各阶段
-其余功能均已发布；未实现项的权威清单见文档目录页。
-
-### 连接器与 SAML（同行对比后核实：维持不做，附触发条件）
-
-同行对比（Keycloak/Authentik/Zitadel）后重审了两项差距，结论是**维持原范围决策**：
-
-**钉钉 / 企业微信连接器 —— 不做，按需启动。**
-- 设计非目标里本就写明（§1.2）："不做企业微信/钉钉全量同步（可作为后续 IdP 连接器）"，联邦放 Phase 3。
-- 本组织的身份源是**飞书**（登录连接器、webhook 告警格式、e2e 均为飞书），仓库中无任何钉钉/企微消费方。
-- 触发条件：出现第一个需要钉钉或企微登录/同步的具体系统，再按需实现（模式与飞书连接器同构，每个 S-M）。
-
-**SAML —— 不做，含技术依据。**
-- 仓库与全部客户端均为 OIDC，无任何 SAML SP 消费方；
-- Rust 生态没有成熟的 SAML 工具包（对比 Python 的 python3-saml / Java 的 OpenSAML）：要么依赖不成熟的 crate，要么手写 XML 签名与 canonicalization——后者正是历史上 XML signature wrapping 攻击的高发面，安全评审成本使工作量从 L 变 XL；
-- **过渡方案已存在**：Signet 的通用 OIDC 上游连接器可以前置一个具备 SAML 能力的 IdP（如 Keycloak/ADFS），把"某个上游只会 SAML"的问题转化为标准联邦对接，不需要 Signet 自己实现 SAML。
-- 触发条件：出现**无法改用 OIDC** 的下游 SP 且业务必须接入时，单独立项（含专门的 XMLDsig 安全评审）。
-
-### 组身份与组织树
-
-- `users.groups` / `users.directory_groups` 改存 `UUID[]`（迁移 `043`），读取经 `signet_group_names()` 还原名字，写入经 `signet_group_ids(names, src)`；未知名字按 `src` 建行
-- `scim_groups` 增加 `parent_id` / `kind`（department|group）/ `source`（local|scim|directory），成为唯一组实体与组织树
-- OIDC `groups` claim 仍输出名字，**仅直接成员**，不继承祖先
-- 目录同步写 `directory_groups` 的 id（`src='directory'`），同步成功且开启 `sync_groups` 时清理"无成员且无子节点"的目录组（墓碑）
-- SCIM `/Groups` 只看见 `source='scim'` 的组；删除时子节点上移、成员释放
-- Dashboard 新增 **Groups** 页面（树 + 成员）；staff 管理，删除仅 admin；非 local 节点只允许移动
-
----
-
-## 10. 配置与密钥命名
+## 9. 配置与密钥命名
 
 避免再使用 `OSS_*` 前缀。建议：
 
@@ -422,7 +335,7 @@ SIGNET_JWT_PRIVATE_KEY=   # 或 KMS 引用
 
 ---
 
-## 11. 术语对照
+## 10. 术语对照
 
 | 旧口头说法 | 现标准称呼 |
 |------------|------------|
@@ -431,24 +344,3 @@ SIGNET_JWT_PRIVATE_KEY=   # 或 KMS 引用
 | 阿里云 OSS | 对象存储（与本项目无关） |
 
 ---
-
-## 12. 开放问题
-
-1. 各业务系统的正式域名与 `redirect_uri` 最终值（在 Signet 后台 / 动态注册中登记）  
-2. Cookie 会话还是业务侧 JWT 会话（各业务自行决定，Signet 只发 OIDC token）  
-3. 生产环境是否单独 issuer / 密钥 / 库（与开发隔离）  
-
-已确认：用户来源为首期本地账号 + 管理员开户；机密客户端 + PKCE；开发不使用生产域名。
-
----
-
-## 修订记录
-
-| 日期 | 说明 |
-|------|------|
-| 2026-08-13 | 初稿：Signet 定位、OIDC+PKCE、公网/内网拓扑、与 Cella 边界与分期 |
-| 2026-08-13 | 账号模型：管理员开户 + bootstrap admin；开发 issuer 与 `dashboard/` 前端约定 |
-| 2026-08-13 | 落地：登录防爆破、密码策略、会话管理、groups claims、OIDC Consent、审计导出/保留、Prometheus metrics |
-| 2026-08-13 | 路线图新增 Phase 4/5：密码重置、refresh 轮换/吊销、WebAuthn、登录告警、限流、客户端管理+动态注册、SCIM、Webhooks |
-| 2026-08-13 | 实施 Phase 4/5/6（除短信验证、告警对接、链路追踪）：吊销、密码重置、Passkey、登录告警、限流、动态注册、SCIM、Webhooks、HTTP 指标与健康检查 |
-| 2026-08-13 | 补齐：MFA 用户自主禁用（非强制时）、Users 表 MFA 状态列、consent 可选 scope 授权、`phone` scope / `phone_number` claim、`x-request-id` 链路追踪 |

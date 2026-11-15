@@ -147,7 +147,7 @@ docker compose -f deploy/docker-compose.yml exec -T signet \
 ```
 
 - Concurrent runs with the scheduler or a manual trigger are serialised by
-  migration `025`'s single-run unique index; the later caller gets
+  the single-run partial unique index; the later caller gets
   `another sync run for this source is already in progress`.
 - Full commands, output, exit codes and `--dry-run` semantics: see
   [directory-sync.md §9](./directory-sync.md#9-command-line).

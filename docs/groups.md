@@ -27,7 +27,7 @@ replaces `directory_groups` cannot clobber a group an administrator assigned by
 hand.
 
 Reads resolve ids back to names through `signet_group_names(uuid[])`
-(migration `043`), so renames no longer rewrite every member row. Writes go
+, so renames do not rewrite every member row. Writes go
 through `signet_group_ids(text[])`, which creates a row for a name it has not
 seen. Applications never observe ids: the claim, the SCIM projections and the
 dashboard all see names.
@@ -54,8 +54,8 @@ of a user: group nodes only, no departments, and no ancestors.
 - A user in `eng` gets `["eng"]`, even if `eng` sits under a department `rnd`.
 - A user in both `eng` and `oncall` gets both names.
 - Tombstoned groups are not published — membership that outlives what the IdP
-  deleted stops being visible the moment the group is deleted (migration `028`
-  semantics, preserved by `signet_group_names`).
+  deleted stops being visible the moment the group is deleted (preserved by
+  `signet_group_names`).
 - Order follows the stored membership array, not alphabetical order: the
   directory-sync fingerprint compares the claim, and a reordering on every read
   would make an unchanged user look changed forever.
@@ -93,7 +93,7 @@ itself. A rejected move returns `400` and leaves the tree untouched.
 ## 6. Relationship with SCIM and directory sync
 
 - **SCIM** (`/scim/v2/Groups`) creates and owns `source = 'scim'` nodes. A SCIM
-  delete tombstones the row (migration `028`) rather than dropping it, so the
+  delete tombstones the row rather than dropping it, so the
   membership it removed stays explainable in the audit trail.
 - **Directory sync** creates and owns `source = 'directory'` nodes and sweeps
   its own empty, child-less groups after a successful run.

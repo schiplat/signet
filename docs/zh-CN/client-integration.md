@@ -17,7 +17,7 @@
 | 环境 | Issuer 示例 |
 |------|-------------|
 | 本地开发 | `http://localhost:8443`（默认值；公开值可在 Dashboard → Settings → Server identity 修改，`SIGNET_ISSUER` 仅为可选覆盖） |
-| 生产（未来） | `https://sso.example.com` |
+| 生产示例 | `https://sso.example.com` |
 
 客户端配置应只依赖 **Issuer**，通过 Discovery 发现端点，勿写死相对路径以外的主机假设。
 
@@ -74,7 +74,7 @@ Discovery 返回（节选）：
 - 浏览器只拿 `code`，不持有 `client_secret` / 长期 refresh
 - 业务服务端用 secret 调 `/oauth/token`，校验 `id_token` 后签发**本系统会话**
 
-纯 SPA 公共客户端暂非首期重点；当前 token 端点仍要求 `client_secret`。
+纯 SPA 公共客户端不受支持：token 端点仍要求 `client_secret`。
 
 ---
 
@@ -437,7 +437,7 @@ RP 验签（签名与 `iss`）、核对 `aud` 是自己、按 `sub` 清本地会
 ## 11. 当前未提供（客户端勿依赖）
 
 - 无 `client_secret` 的公共客户端换票  
-- 企业微信 / 钉钉等外部 IdP 联邦（Phase 3）
+- 企业微信 / 钉钉连接器
 
 ## 12. 相关接口
 
