@@ -13,6 +13,8 @@ import OverviewView from "@/views/OverviewView.vue";
 import ResetPasswordView from "@/views/ResetPasswordView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import SetupView from "@/views/SetupView.vue";
+import SignupConfirmView from "@/views/SignupConfirmView.vue";
+import SignupView from "@/views/SignupView.vue";
 import { useAuthStore } from "@/stores/auth";
 import { useBrandingStore } from "@/stores/branding";
 
@@ -36,6 +38,18 @@ export const router = createRouter({
       name: "reset-password",
       component: ResetPasswordView,
       meta: { public: true },
+    },
+    {
+      path: "/signup",
+      name: "signup",
+      component: SignupView,
+      meta: { public: true, title: "Sign up" },
+    },
+    {
+      path: "/signup/confirm",
+      name: "signup-confirm",
+      component: SignupConfirmView,
+      meta: { public: true, title: "Confirm sign-up" },
     },
     {
       path: "/consent",

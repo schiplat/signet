@@ -7,6 +7,7 @@ import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import { useQrDataUrl } from "@/composables/useQrDataUrl";
 import {
   fetchEnabledSsoProviders,
+  fetchSignupStatus,
   loginChangePassword,
   mfaEnrollConfirm,
   mfaEnrollStart,
@@ -40,7 +41,10 @@ const newPassword = ref("");
 const confirmPassword = ref("");
 const showNewPassword = ref(false);
 const error = ref("");
+const notice = ref("");
 const loading = ref(false);
+/** Only show "Create account" when the server says sign-up is actually available. */
+const signupEnabled = ref(false);
 
 const mfaCode = ref("");
 const mfaMethod = ref<"totp" | "recovery">("totp");
@@ -284,6 +288,16 @@ onMounted(async () => {
   } catch {
     /* provider buttons are optional; ignore load failures */
   }
+  try {
+    signupEnabled.value = (await fetchSignupStatus()).enabled;
+  } catch {
+    /* sign-up is optional; the form stays hidden if the status is unknown */
+  }
+  // Confirmation redirects here instead of opening a session: the person still
+  // has to sign in with the password they chose.
+  if (route.query.signup === "verified") {
+    notice.value = "Your email is verified. Sign in with the password you chose.";
+  }
   const err = typeof route.query.sso_error === "string" ? route.query.sso_error : "";
   if (err) {
     error.value = SSO_ERROR_MESSAGES[err] ?? "Third-party sign-in failed.";
@@ -373,6 +387,12 @@ function ssoStartUrl(code: string): string {
           </div>
         </div>
         <div v-if="error" class="field-error">{{ error }}</div>
+        <p
+          v-if="notice"
+          class="rounded-lg border border-emerald-600/20 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+        >
+          {{ notice }}
+        </p>
         <!-- The challenge renders here only when the instance configured a
              provider; useCaptcha leaves the div empty otherwise. -->
         <div v-show="captcha.enabled.value" ref="captchaHost" class="flex justify-center" />
@@ -388,9 +408,16 @@ function ssoStartUrl(code: string): string {
         >
           Sign in with a passkey
         </UiButton>
-        <div class="text-center">
+        <div class="flex items-center justify-center gap-4">
           <RouterLink to="/reset-password" class="text-xs text-muted-foreground hover:text-foreground">
             Forgot password?
+          </RouterLink>
+          <RouterLink
+            v-if="signupEnabled"
+            to="/signup"
+            class="text-xs text-muted-foreground hover:text-foreground"
+          >
+            Create account
           </RouterLink>
         </div>
 

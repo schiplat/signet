@@ -112,6 +112,47 @@ export async function fetchCaptchaChallenge() {
   return parseJson<CaptchaChallenge>(res);
 }
 
+/**
+ * What the public sign-up page may show. `enabled` is the server's effective
+ * answer: the operator's switch can be on while a prerequisite (SMTP or
+ * CAPTCHA) was removed, and the form must stay hidden in that state.
+ */
+export type SignupStatus = {
+  enabled: boolean;
+  captcha_enabled?: boolean;
+  min_password_length?: number;
+  /** Empty means every domain is admitted. Subdomains match too. */
+  allowed_email_domains?: string[];
+};
+
+export async function fetchSignupStatus() {
+  const res = await fetch("/api/v1/signup/status");
+  return parseJson<SignupStatus>(res);
+}
+
+export async function signup(body: {
+  email: string;
+  password: string;
+  display_name?: string;
+  captcha_token?: string;
+}) {
+  const res = await fetch("/api/v1/signup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return parseJson<{ status: "ok" }>(res);
+}
+
+export async function confirmSignup(token: string) {
+  const res = await fetch("/api/v1/signup/confirm", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  return parseJson<{ status: "ok" }>(res);
+}
+
 export async function loginChangePassword(newPassword: string) {
   const res = await fetch("/api/v1/login/password-change", {
     method: "POST",
@@ -704,6 +745,36 @@ export async function updateSsoSettings(body: { jit_provision: boolean }) {
     body: JSON.stringify(body),
   });
   return parseJson<{ jit_provision: boolean }>(res);
+}
+
+/** Public self-registration (Settings → Public sign-up). */
+export type SignupSettings = {
+  enabled: boolean;
+  smtp_configured: boolean;
+  captcha_configured: boolean;
+  /** Blocking checks: when false, the switch cannot be saved as enabled. */
+  ready: boolean;
+  /** One sentence per blocking problem, shown verbatim by Settings. */
+  problems: string[];
+  /** Operational advice; does not block enabling (e.g. localhost links). */
+  warnings: string[];
+};
+
+export async function fetchSignupSettings() {
+  const res = await fetch("/api/v1/admin/settings/signup", {
+    credentials: "include",
+  });
+  return parseJson<SignupSettings>(res);
+}
+
+export async function updateSignupSettings(enabled: boolean) {
+  const res = await fetch("/api/v1/admin/settings/signup", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ enabled }),
+  });
+  return parseJson<SignupSettings>(res);
 }
 
 export async function resetUserMfa(id: string) {
