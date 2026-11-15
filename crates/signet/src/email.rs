@@ -111,6 +111,26 @@ pub async fn configured(state: &AppState) -> bool {
     resolve(state).await.is_some()
 }
 
+/// Configuration-level readiness check, with no network I/O.
+///
+/// `configured` only asks whether a host exists. Public signup needs a relay
+/// that can actually build a message: a zero port or a `From` that is not a
+/// mailbox would otherwise be discovered only when the first verification mail
+/// fails in the outbox, after the feature was switched on. The admin SMTP form
+/// validates `From`, but the environment path does not.
+pub async fn configuration_problem(state: &AppState) -> Option<String> {
+    let Some(smtp) = resolve(state).await else {
+        return Some("No SMTP relay is configured.".to_string());
+    };
+    if smtp.port == 0 {
+        return Some("The relay port must be between 1 and 65535.".to_string());
+    }
+    if smtp.from.parse::<Mailbox>().is_err() {
+        return Some("The From address is not a valid mailbox.".to_string());
+    }
+    None
+}
+
 /// Sends one plain-text message.
 ///
 /// `log_body` is the dev opt-in that also writes the body to the log stream

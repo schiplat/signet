@@ -140,6 +140,44 @@ application layer** rather than stored in plaintext:
 - The first-run `/setup` is exempt (otherwise a new deployment could not create
   its first administrator).
 
+### 2.9 Public self-registration
+- **Off by default.** The switch lives at `app_settings.auth.public_signup` and
+  has no environment fallback, so a deployment cannot be opened up by an
+  environment variable an administrator believes is inert. Enabling requires an
+  SMTP relay (the link is the proof of address ownership) **and** a CAPTCHA
+  provider (the endpoint is unauthenticated). The save path runs a preflight
+  against the live configuration — host, a non-zero port and a From that
+  parses as a mailbox for the relay; provider, site key and secret for CAPTCHA
+  — and refuses with **every** blocking problem listed. The dashboard shows the
+  same checklist, plus advisory warnings for an empty domain allowlist and
+  localhost/http links. Both prerequisites are re-checked on every request; if
+  either is later removed or becomes unusable, sign-up answers 503 and the
+  public status reports `enabled: false`. Removing the relay/CAPTCHA does not
+  create accounts without the protection the setting was enabled under.
+- **No account before verification.** A request writes `signup_requests` only;
+  `users` stays untouched. The verification token is random, stored as a SHA-256
+  digest, single-use (the row is deleted on confirmation) and expires after 30
+  minutes. A repeated request rotates the token, so an older link stops working.
+  Confirmation creates a `member` with no groups, `email_verified=TRUE` and
+  `provisioned_via='signup'`; it never starts a session (no login-CSRF via the
+  email link). The link puts the token in the URL fragment (`#token=…`), which
+  browsers do not send to the server, so it stays out of access and proxy logs;
+  the confirmation page POSTs it only after an explicit click.
+- **Anti-enumeration.** `POST /signup` returns the same `{ "status": "ok" }` for
+  a new address, an address with a pending request and an address with an
+  existing account. The password is hashed before the existence lookup so timing
+  does not answer the question either. An existing account gets a notice email
+  (only its owner can read it) instead of a link; repeats are suppressed for a
+  minute.
+- **Abuse controls.** Per-address 3 requests/hour, per-IP 5/hour and 20/day,
+  counted in `signup_attempts` (shared by replicas); CAPTCHA before any
+  address-dependent work; the password policy from §2.2; the email-domain
+  allowlist from §2.8 applied both when the request is made and when it is
+  confirmed. Audit events: `auth.signup_requested`, `auth.signup_confirmed`,
+  `auth.signup_blocked` (rate limit), `user.provision_blocked` (domain) and
+  `settings.signup_update`. Neither the password nor the link token is ever
+  written to an audit row or a log line.
+
 ---
 
 ## 3. Session management

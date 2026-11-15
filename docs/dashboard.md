@@ -36,6 +36,24 @@ Route guards: `meta.staff` / `meta.admin`.
 - Paged, with IP / browser / OS and time; the empty state explains why
 - Positioned as the personal view, as opposed to Overview's operational one
 
+### Sign-up (public, `/signup`)
+
+Reachable without a session, but only when **Settings → Public sign-up** is on
+and both the SMTP relay and CAPTCHA are configured. Otherwise the page says
+sign-up is unavailable and links back to sign-in; the sign-in page also hides
+its **Create account** link in that state.
+
+- The form collects an optional display name, email, password + confirmation and
+  the CAPTCHA challenge. Submission never reveals whether the address is new:
+  the page always switches to "check your email".
+- The emailed link opens `/signup/confirm#token=…` (fragment, so the token is
+  never sent to the server or written to an access log), which shows an
+  **Activate account** button rather than creating the account on page load
+  (mail scanners prefetch links). Activation lands back on
+  `/login?signup=verified`; the user still signs in with the password they chose.
+- The account is a plain `member` with no groups; an expired or already-used
+  link offers **Start over**, a registered address links back to sign-in.
+
 ### My apps (all roles, `/my-apps`)
 
 GitHub "Developer settings"-style self-service: **any signed-in user** can register
@@ -108,7 +126,7 @@ their own page at `/directory-sync`.
 
 ### Settings (admin only)
 
-A left sub-nav groups nine sections (General / Access / Operations / Developer)
+A left sub-nav groups ten sections (General / Access / Operations / Developer)
 and shows one at a time (below `lg` it becomes a horizontally scrolling tab strip).
 The active section is kept in `?section=`, so a reload or a shared link lands on the
 same pane:
@@ -128,6 +146,15 @@ same pane:
 - **Security**: the global **Require MFA for all users**
 - **Email domains**: the sign-in / provisioning domain allowlist (warns when saving
   would lock the acting administrator out)
+- **Public sign-up**: off by default. A single **Preflight** list shows every
+  check — **Email relay** (host, port, parseable From), **CAPTCHA** (provider,
+  site key, secret), plus advisory rows for an empty domain allowlist and
+  localhost/http verification links — each marked **Ready**, **Action needed**
+  or **Advisory**, with one link to the section that fixes it. The switch
+  cannot be saved as enabled while a blocking check fails. **Re-check**
+  re-reads the live configuration without changing the toggle. Enabling only adds the **Create account**
+  link and form; it never changes the domain allowlist or the role new accounts
+  receive
 - **SSO / federation**: **JIT provision on SSO** (whether a first third-party sign-in
   with a verified email and no local account creates one)
 - **CAPTCHA**: Turnstile / hCaptcha on sign-in and password reset
@@ -200,6 +227,9 @@ same pane:
    already-bound identities can still sign in).
 8. Forgot password: the sign-in page link → `/reset-password`, a two-step reset
    (request → confirm)
+9. **Create account**: shown next to **Forgot password?** only when an
+   administrator enabled public sign-up and its SMTP/CAPTCHA prerequisites are
+   in place; → `/signup` (see §2). Activation returns to sign-in with a notice
 
 ---
 

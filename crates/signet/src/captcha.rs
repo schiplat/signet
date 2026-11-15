@@ -175,16 +175,29 @@ async fn verify(
 /// "complete the challenge", and distinguishing them would tell an attacker
 /// which part of their request to fix.
 pub async fn require(state: &AppState, token: Option<&str>, ip: Option<&str>) -> AppResult<()> {
-    let Some(gate) = resolve(state).await else {
-        return Ok(());
-    };
+    match resolve(state).await {
+        Some(gate) => verify_with_gate(&gate, token, ip).await,
+        None => Ok(()),
+    }
+}
+
+/// [`require`] against a gate the caller already resolved.
+///
+/// Public signup must know whether a gate exists at all (it treats a configured
+/// signup page without one as unavailable), so it resolves once and verifies
+/// with that same value instead of reading the settings twice.
+pub async fn verify_with_gate(
+    gate: &Enabled,
+    token: Option<&str>,
+    ip: Option<&str>,
+) -> AppResult<()> {
     let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) else {
         return Err(AppError::bad_request(
             "complete the CAPTCHA challenge to continue",
         ));
     };
     let client = reqwest::Client::new();
-    verify(&client, &gate, token, ip)
+    verify(&client, gate, token, ip)
         .await
         .map_err(|_| AppError::bad_request("CAPTCHA verification failed; try again"))
 }

@@ -86,6 +86,7 @@ curl -sS -b /tmp/signet.cookies -X DELETE "$ISSUER/api/v1/admin/tokens/<id>"
 `GET /api/v1/branding`、`GET /api/v1/branding/logo`、`GET
 /api/v1/setup/status`、`POST /api/v1/setup`（仅首次创建管理员）、`POST
 /api/v1/login`、`GET /api/v1/captcha`、`POST /api/v1/password-reset/*`、
+`GET /api/v1/signup/status`、`POST /api/v1/signup`、`POST /api/v1/signup/confirm`、
 `GET /health`，以及 discovery 文档和浏览器驱动的 OIDC 端点
 （`/oauth/authorize`、`/oauth/consent`、`/oauth/end_session`）。`/oauth/token`、
 `/oauth/revoke`、`/oauth/introspect` 需要客户端认证。
@@ -367,6 +368,27 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 |-----------|------|
 | `POST /api/v1/me/email/change-request` | session；body `{ new_email }`。校验邮箱格式、与当前不同、域名白名单、未被占用；生成 30 分钟单次 token 投递到**新地址**（走 outbox 队列）。当前邮箱 `email_verified=false` 时返回 403 |
 | `GET /api/v1/me/email/confirm?token=` | 无需登录（链接即凭证）；单次消费。成功 → `302 /settings?email_changed=1`，过期 → `302 /settings?email_error=expired`，已被占用 → `302 /settings?email_error=taken`。成功时置 `email_verified=TRUE`，吊销全部会话与 refresh token，并触发 back-channel logout |
+
+### 公开注册（默认关闭）
+
+默认关闭，需管理员在 **Settings → Public sign-up** 开启。开启前必须已配置
+SMTP 中继与 CAPTCHA，否则 PATCH 返回 409；请求路径每次都会复查，任一前置项
+后续被移除时返回 503。提交注册**不会创建用户**：只写入待确认记录（含 Argon2
+密码哈希），并向邮箱发送 30 分钟有效的单次验证链接。确认后才创建普通
+`member`（无分组）、标记邮箱已验证，且**不会自动登录**。
+
+| 方法/路径 | 认证 | 说明 |
+|-----------|------|------|
+| `GET /api/v1/signup/status` | 公开 | 未开启或前置项缺失时 `{ "enabled": false }`；可用时另含 `captcha_enabled`、`min_password_length`、`allowed_email_domains`（空数组 = 不限制） |
+| `POST /api/v1/signup` | 公开 | body `{ email, password, display_name?, captcha_token? }`。对可准入地址统一返回 `{ "status": "ok" }`（新地址 / 已有待确认 / 已有账号），不提供枚举信号。CAPTCHA 失败、密码策略不符或域名不允许 → 400；超出单地址/单 IP 限额 → 429；开关关闭 → 404；前置项缺失 → 503 |
+| `POST /api/v1/signup/confirm` | 公开 | body `{ token }`（Dashboard 的 `/signup/confirm` 页面在用户点击按钮后才提交，邮件扫描器不会提前消费链接）。成功 `200 {"status":"ok"}`；无效/过期/已用 → 410；地址已被注册 → 409 |
+| `GET/PATCH /api/v1/admin/settings/signup` | admin | `{ enabled, smtp_configured, captcha_configured, ready, problems, warnings }`；PATCH body `{ enabled }`。开启时会基于当前配置重新做前置检查，`ready=false` 时返回 409 并列出**全部**阻塞问题：中继检查 host / port / From 是否可解析为邮箱，CAPTCHA 检查 provider / site key / secret。`warnings`（如域名为空、链接指向 localhost/http）只是提醒，不阻塞。审计 `settings.signup_update` |
+
+验证邮件链接是 `/signup/confirm#token=…`：token 位于 URL fragment，不会进入服务端访问日志或代理日志，页面也只在用户点击 **Activate account** 后才 POST 提交。投递与防滥用：同一地址 60 秒内重复提交只返回成功、不再发信且不轮换 token；
+单地址 3 次/小时，单 IP 5 次/小时、20 次/天。已有账号收到“账号已存在”提示
+邮件而不是验证链接。域名白名单（§14）在申请与确认两个时点都会校验。审计动作：
+`auth.signup_requested`、`auth.signup_confirmed`、`auth.signup_blocked`
+（限流）、`user.provision_blocked`（域名拒绝）。
 
 ## 8. Passkeys（WebAuthn）
 

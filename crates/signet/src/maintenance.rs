@@ -94,6 +94,10 @@ const RETENTION_TABLES: &[(&str, &str, i32)] = &[
     // Sync history is diagnostic, not an audit record (the audit log carries
     // the durable account). A five-minute schedule writes ~105k rows a year.
     ("directory_sync_runs", "started_at", 90),
+    // Signup throttle counters only need to cover the longest budget window
+    // (one day). Keeping them longer would turn a spam defence into a log of
+    // attempted addresses.
+    ("signup_attempts", "created_at", 1),
 ];
 
 /// `(table, expiry column)` pairs swept every tick.
@@ -108,4 +112,7 @@ const EXPIRING_TABLES: &[(&str, &str)] = &[
     ("password_reset_tokens", "expires_at"),
     ("registration_access_tokens", "expires_at"),
     ("identity_link_challenges", "expires_at"),
+    // Unconfirmed sign-ups: the address is never in `users`, so dropping the
+    // pending row is all that is needed to forget the attempt.
+    ("signup_requests", "expires_at"),
 ];

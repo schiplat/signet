@@ -96,8 +96,10 @@ expiry, and creates and revokes through the same endpoints as the examples.
 No credential: `GET /api/v1/branding`, `GET /api/v1/branding/logo`,
 `GET /api/v1/setup/status`, `POST /api/v1/setup` (first admin only),
 `POST /api/v1/login`, `GET /api/v1/captcha`, `POST /api/v1/password-reset/*`,
-`GET /health`, and the discovery document plus the browser-driven OIDC endpoints
-(`/oauth/authorize`, `/oauth/consent`, `/oauth/end_session`). `/oauth/token`,
+`GET /api/v1/signup/status`, `POST /api/v1/signup`, `POST
+/api/v1/signup/confirm`, `GET /health`, and the discovery document plus the
+browser-driven OIDC endpoints (`/oauth/authorize`, `/oauth/consent`,
+`/oauth/end_session`). `/oauth/token`,
 `/oauth/revoke` and `/oauth/introspect` require client authentication instead.
 
 ### Other surfaces
@@ -483,6 +485,35 @@ fall back to introspection or a short access-token TTL.
 |-----------|------|
 | `POST /api/v1/me/email/change-request` | session; body `{ new_email }`. Validates the format, that it differs from the current one, the domain allowlist and that it is unused; mints a 30-minute single-use token delivered to the **new address** (through the outbox). When the current email has `email_verified=false` it returns 403 |
 | `GET /api/v1/me/email/confirm?token=` | No sign-in needed (the link is the credential); single-use. Success → `302 /settings?email_changed=1`, expired → `302 /settings?email_error=expired`, taken → `302 /settings?email_error=taken`. On success it sets `email_verified=TRUE`, revokes every session and refresh token, and triggers back-channel logout |
+
+### Public sign-up (off by default)
+
+Disabled until an administrator turns on **Settings → Public sign-up**. Enabling
+is refused with 409 unless an SMTP relay and a CAPTCHA provider are both
+configured; the request path re-checks both and answers 503 if either was
+removed later. A sign-up request creates **no user**: it stores a pending row
+with the Argon2 password hash and emails a 30-minute, single-use verification
+link. Confirmation creates a plain `member` with no groups, marks the address
+verified and does **not** start a session.
+
+| Method/path | Auth | Notes |
+|-----------|------|------|
+| `GET /api/v1/signup/status` | public | `{ "enabled": false }` unless the switch and both prerequisites are ready; otherwise also `captcha_enabled`, `min_password_length`, `allowed_email_domains` (empty = unrestricted) |
+| `POST /api/v1/signup` | public | body `{ email, password, display_name?, captcha_token? }`. Always answers `{ "status": "ok" }` for an admissible address, whether it is new, already registered or has a pending request, so it is not an enumeration oracle. 400 for a failed CAPTCHA / password policy / excluded domain; 429 when the per-address or per-IP budget is spent; 404 when the switch is off; 503 when a prerequisite disappeared |
+| `POST /api/v1/signup/confirm` | public | body `{ token }` (the dashboard's `/signup/confirm` page posts it after an explicit click, so mail scanners cannot spend the link). 200 + `{ "status": "ok" }`; 410 when invalid/expired/used; 409 when the address was registered meanwhile |
+| `GET/PATCH /api/v1/admin/settings/signup` | admin | `{ enabled, smtp_configured, captcha_configured, ready, problems, warnings }`; PATCH body `{ enabled }`. Enabling re-runs the preflight against the live configuration and answers 409 with **every** blocking problem when `ready` is false. The relay check covers host, port and a parseable From mailbox; the CAPTCHA check covers provider, site key and secret. `warnings` (e.g. an empty domain allowlist, localhost/http links) are advisory and do not block. Audited as `settings.signup_update` |
+
+The verification email links to `/signup/confirm#token=…`: the token is in the
+URL fragment, so no server access log or proxy sees it, and the page POSTs it
+only after the recipient clicks **Activate account**. Delivery and abuse
+controls: one verification mail per address per minute
+(further requests are acknowledged without rotating the token), 3 requests per
+address per hour, 5 per IP per hour and 20 per IP per day. An address that
+already has an account receives a notice email instead of a verification link.
+The domain allowlist (§14) is applied at request and confirmation time. Audit
+actions: `auth.signup_requested`, `auth.signup_confirmed`,
+`auth.signup_blocked` (rate limit), plus `user.provision_blocked` for a domain
+refusal.
 
 ## 8. Passkeys (WebAuthn)
 
