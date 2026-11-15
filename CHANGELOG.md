@@ -38,6 +38,13 @@ issuer made genuinely dashboard-first.
   `deploy/env.tpl` still ships `SIGNET_ISSUER` as the production default, but
   it no longer locks the dashboard field.
 
+### Documentation
+
+- `docs/` now holds the English documents (the source of truth) and
+  `docs/zh-CN/` the Chinese translations; every page links to its counterpart.
+  README download commands use `/releases/latest` so they no longer point at a
+  tag that may not exist yet.
+
 ### Breaking
 
 - `GET /api/v1/admin/settings/server` no longer returns `env_locked`, and

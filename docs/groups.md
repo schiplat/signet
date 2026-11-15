@@ -1,77 +1,102 @@
-# 组与部门（Groups / Departments）
+# Groups and departments
 
-Signet 的组与部门是**同一棵树**：每个节点有 `kind`（`group` | `department`），可以有父节点和任意子节点。组成员关系决定 OIDC `groups` claim 的内容；部门本身也是节点，只是用于组织归类。
+> English · [简体中文](./zh-CN/groups.md)
 
-## 1. 数据模型
+Groups and departments are one organisational tree: a **group** is a functional
+unit (engineering, ops), a **department** is a place in the company hierarchy.
+Both are nodes of the same table and behave identically except for the label.
+Nodes may nest, and the tree is what the OIDC `groups` claim reads.
 
-组的唯一实体表是 `scim_groups`（迁移 `043_group_tree.sql` 扩展）：
+## 1. Data model
 
-| 列 | 说明 |
-|----|------|
-| `id` | 组/部门标识；`users.groups` / `users.directory_groups` 存的就是它 |
-| `display_name` | 展示名；live 行唯一（部分唯一索引），墓碑可与同名新行共存 |
-| `parent_id` | 父节点；`ON DELETE RESTRICT`，由应用层改挂，不做级联删除 |
-| `kind` | `group` \| `department` |
-| `source` | `local`（Admin/导入）\| `scim`（IdP）\| `directory`（目录同步） |
-| `source_id` | `source='directory'` 时记录创建它的目录来源；同步后的清理只针对本来源，避免误删其他来源尚未填充的组 |
-| `external_id` | SCIM 上游标识（仅 SCIM 使用） |
-| `deleted_at` / `members_at_delete` | 墓碑与删除时的成员快照 |
+`scim_groups` is the one place a group exists:
 
-成员关系仍以数组形式存在用户行上：
+| Column | Notes |
+|---|---|
+| `id` | UUID primary key. `users.groups` / `users.directory_groups/pub` store this, never a name |
+| `display_name` | Unique among live rows; the name every surface shows |
+| `kind` | `department` or `group` |
+| `parent_id` | Parent node; `NULL` at the root. Cycles are rejected on move |
+| `source` | `local`, `scim` or `directory` — who owns the node |
+| `deleted_at` | Tombstone; the row stops being visible and stops resolving names |
 
-- `users.groups UUID[]`：本地/SCIM/手工分配
-- `users.directory_groups UUID[]`：目录同步独占，与本地组分开，避免同步覆盖手工分配
+Membership is a `users` column, not a join table: `users.groups` holds
+locally-managed membership, and `users.directory_groups` holds membership
+written by directory sync. Both store ids. The two are kept apart so a sync that
+replaces `directory_groups` cannot clobber a group an administrator assigned by
+hand.
 
-读取时统一经 `signet_group_names(UUID[])` 还原成名字，因此 OIDC claim、SCIM 响应、Dashboard 与 CSV 导出的对外形态不变；写入经 `signet_group_ids(TEXT[], src)`，未知名字按 `src` 自动建行。
+Reads resolve ids back to names through `signet_group_names(uuid[])`
+(migration `043`), so renames no longer rewrite every member row. Writes go
+through `signet_group_ids(text[])`, which creates a row for a name it has not
+seen. Applications never observe ids: the claim, the SCIM projections and the
+dashboard all see names.
 
-## 2. 来源与可编辑性
+## 2. Source and editability
 
-| 操作 | `local` | `scim` | `directory` |
-|------|:---:|:---:|:---:|
-| 查看 / 移动节点 | ✅ | ✅ | ✅ |
-| 修改名称 | ✅ | ❌ 409 | ❌ 409 |
-| 修改 kind | ✅ | ✅ | ✅ |
-| 增删成员 | ✅ | ❌（SCIM PATCH） | ❌（目录同步） |
-| 删除 | ✅（admin） | ❌（SCIM DELETE） | ❌（同步清理） |
+| `source` | Name | Membership | Existence |
+|---|---|---|---|
+| `local` | dashboard | dashboard | dashboard |
+| `scim` | SCIM client | SCIM client | SCIM client |
+| `directory` | directory sync | directory sync | directory sync |
 
-SCIM 的 `/scim/v2/Groups` 只看见 `source='scim'` 的组；目录组与本地组不会出现在 IdP 的列表里。
+Only a `local` node is editable end to end. A `scim` or `directory` node appears
+in the tree and can be moved under another parent, but its name and membership
+stay owned by its source — an edit here would be silently undone by the next
+sync, so the API refuses it instead. Deleting such a node is likewise refused;
+it disappears when the source stops listing it.
 
-目录组在同步成功且该来源开启 `sync_groups` 时会被清理：`source='directory'`、没有任何成员、没有子节点的 live 节点置墓碑（上游已删除的组不会残留）。有子节点的目录节点会保留。
+## 3. OIDC claim semantics
 
-## 3. OIDC claim 语义
+The `groups` claim in `id_token` / UserInfo publishes the **direct** group names
+of a user: group nodes only, no departments, and no ancestors.
 
-- `groups` scope 下，`id_token` 与 `userinfo` 输出组名列表；
-- 列表来自 `users.groups ∪ users.directory_groups`，排序去重；
-- **仅直接成员**：加入子组不会自动获得父部门/父组名。客户端若需要祖先，应按树结构自行展开；
-- 删除组后成员立即失去该名字（墓碑不参与解析）。
+- A user in `eng` gets `["eng"]`, even if `eng` sits under a department `rnd`.
+- A user in both `eng` and `oncall` gets both names.
+- Tombstoned groups are not published — membership that outlives what the IdP
+  deleted stops being visible the moment the group is deleted (migration `028`
+  semantics, preserved by `signet_group_names`).
+- Order follows the stored membership array, not alphabetical order: the
+  directory-sync fingerprint compares the claim, and a reordering on every read
+  would make an unchanged user look changed forever.
 
-## 4. 权限
+## 4. Permissions
 
-| 操作 | 角色 |
-|------|------|
-| 查看树、创建/改名/移动、增删成员 | admin、manager（staff） |
-| 删除组/部门 | **仅 admin** |
+| Action | admin | manager | member |
+|---|---|---|---|
+| View the tree | yes | yes | no |
+| Create a `department` / `group` | yes | yes | no |
+| Rename / move / set members | yes | yes | no |
+| Delete | yes | no | no |
 
-所有写操作写入审计：`group.create` / `group.update` / `group.delete` / `group.member_add` / `group.member_remove`。
+Deleting a department is refused while it still has children: children would
+otherwise be orphaned, so they are moved (or removed) first. Deleting a group
+releases its members' membership; the user rows survive.
 
 ## 5. HTTP API
 
-挂在 `/api/v1/admin/groups`：
+All paths live under `/api/v1` and are staff-only.
 
-| 方法 | 路径 | 权限 | 说明 |
-|------|------|------|------|
-| `GET` | `/admin/groups` | staff | 扁平节点列表：`id, display_name, parent_id, kind, source, member_count, created_at` |
-| `POST` | `/admin/groups` | staff | `{name, kind?, parent_id?}`；重名 409 |
-| `PUT` | `/admin/groups/{id}` | staff | `{name?, kind?, parent_id?, clear_parent?}`；移动用递归检查拒环；`parent_id` 省略=保持，`clear_parent=true`=移到根 |
-| `DELETE` | `/admin/groups/{id}` | admin | 仅 `local`；子节点上移到被删节点的父级，成员释放，行置墓碑 |
-| `GET` | `/admin/groups/{id}/members?q=&limit=&offset=` | staff | 直接成员分页（email/display_name 搜索） |
-| `POST` | `/admin/groups/{id}/members` | staff | `{user_ids:[uuid]}` 加入；非 `local` 409 |
-| `DELETE` | `/admin/groups/{id}/members/{user_id}` | staff | 移除；非 `local` 409 |
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/admin/groups` | The whole tree, flat, ordered by depth then name |
+| `POST` | `/admin/groups` | `{display_name, kind?, parent_id?}` |
+| `PATCH` | `/admin/groups/{id}` | Rename and/or move (`parent_id: null` promotes to root) |
+| `DELETE` | `/admin/groups/{id}` | admin only; refused while the node has children |
+| `GET` | `/admin/groups/{id}/members` | Page through members |
+| `PUT` | `/admin/groups/{id}/members/{user_id}` | Add one member (idempotent) |
+| `DELETE` | `/admin/groups/{id}/members/{user_id}` | Remove one member |
 
-Dashboard 页面：**Directory**（`/directory`，staff 可见）：左侧组织树，右侧是当前节点的完整用户表（可直接移除成员、添加成员）；Users 页的自由文本 Groups 字段仍保留，按名字写入并在不存在时创建 `local` 组。
+Moves are validated against cycles: a node may not become a descendant of
+itself. A rejected move returns `400` and leaves the tree untouched.
 
-## 6. 与 SCIM / 目录同步的关系
+## 6. Relationship with SCIM and directory sync
 
-- SCIM 创建组时写 `source='scim'`、`kind='group'`、`parent_id=NULL`；成员 PATCH 按组 id 操作；删除时子节点上移、成员释放、写墓碑。
-- 目录同步把 `directory_groups` 写成 id（`signet_group_ids(names,'directory')`）；指纹仍按名字计算，重命名会触发一次无害的更新。
-- 管理员可以把目录组移动到部门下（组织视图），但改不了它的名字/成员/存在性。
+- **SCIM** (`/scim/v2/Groups`) creates and owns `source = 'scim'` nodes. A SCIM
+  delete tombstones the row (migration `028`) rather than dropping it, so the
+  membership it removed stays explainable in the audit trail.
+- **Directory sync** creates and owns `source = 'directory'` nodes and sweeps
+  its own empty, child-less groups after a successful run.
+- Neither source touches a `local` node, and a `local` node never blocks a
+  sync: the tree is a display and membership surface, not an authorisation
+  boundary.

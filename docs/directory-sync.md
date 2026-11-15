@@ -1,85 +1,92 @@
-# Signet 目录同步（Directory Sync）设计
+# Signet directory sync design
 
-| 项 | 内容 |
+> English · [简体中文](./zh-CN/directory-sync.md)
+
+| Item | Detail |
 |---|---|
-| 状态 | **P0 + P1 + P2 + P3 + P4 已实现**（地基 + LDAP 拉取引擎 + bind 直通登录 + 定时调度 + 通用 HTTP JSON 源 + 两种 pull kind 共用的映射 UI，见 §13.1）；P5 SCIM push 待做 |
-| 定位 | 把外部目录作为**只读数据源**同步进 Signet 本地用户库；LDAP 用户可直接用目录密码登录 |
-| 首选落地 | LDAP（pull） |
-| 相关文档 | [设计总览](./design.md) · [安全设计](./security.md) · [集成对接](./integrations.md) · [Dashboard API](./api-v1.md) · [MFA](./mfa.md) |
+| Status | **P0 + P1 + P2 + P3 + P4 implemented** (foundation + LDAP pull engine + bind-through sign-in + scheduler + generic HTTP JSON source + the mapping UI shared by both pull kinds, see §13.1); P5 SCIM push pending |
+| Role | Sync an external directory into the local Signet user store as a **read-only data source**; LDAP users may sign in with their directory password |
+| First target | LDAP (pull) |
+| Related | [Design overview](./design.md) · [Security design](./security.md) · [Integrations](./integrations.md) · [Dashboard API](./api-v1.md) · [MFA](./mfa.md) |
 
 ---
 
-## 1. 目标与非目标
+## 1. Goals and non-goals
 
-### 1.1 目标
+### 1.1 Goals
 
-1. 将外部目录作为**只读数据源**，同步用户（及组）到 Signet 本地 `users` 表；
-2. 支持三类数据源：**LDAP**、**SCIM**、**通用 HTTP JSON**；
-3. 支持两种触发方式：**命令行/API 手动触发** 与 **后台定时同步**，且均可管理、可审计、可观测；
-4. LDAP 目录用户可直接用其目录密码登录（**bind 直通**）；
-5. 支持上游**主动推送**（push）模式的接入。
+1. Treat an external directory as a **read-only data source** and sync users (and
+   groups) into the local `users` table;
+2. Support three source kinds: **LDAP**, **SCIM** and **generic HTTP JSON**;
+3. Support two trigger modes: **CLI/API manual** and **background scheduling**,
+   both manageable, auditable and observable;
+4. Let LDAP directory users sign in with their directory password (**bind
+   through**);
+5. Support upstream **push** integrations.
 
-### 1.2 非目标（v1 明确不做）
+### 1.2 Non-goals (explicitly out of scope for v1)
 
-| 不做 | 原因 |
+| Not doing | Why |
 |---|---|
-| 回写上游（双向同步） | 单向即可满足需求；回写会引入写冲突与上游权限放大 |
-| 同步密码 hash | `users.password_hash` 只认 argon2；改多 hash 支持成本高、风险大 |
-| 把上游组映射为 Signet `role` | **提权风险**：上游一改组即可拿到 admin。`role` 恒为本地管理 |
-| 替代现有 SSO 联邦 | `upstream_providers`/`user_identities` 是**认证时**联邦，本设计是**供给时**同步，二者互补 |
-| AD Deleted Objects 删除检测 | 需额外 tombstone 权限，环境差异大 |
-| 嵌套组展开 | 需要 AD `LDAP_MATCHING_RULE_IN_CHAIN` 等特殊能力 |
+| Write-back to the upstream (bidirectional sync) | One-way meets the need; write-back introduces write conflicts and widened upstream permissions |
+| Syncing password hashes | `users.password_hash` is argon2-only; supporting multiple hashes is costly and risky |
+| Mapping upstream groups to Signet `role` | **Privilege-escalation risk**: a single upstream change would grant admin. `role` stays locally managed |
+| Replacing SSO federation | `upstream_providers`/`user_identities` federate **at authentication time**; this design syncs **at provisioning time**. They complement each other |
+| AD Deleted Objects deletion detection | Requires extra tombstone permissions and varies widely across environments |
+| Nested group expansion | Needs special capabilities such as AD's `LDAP_MATCHING_RULE_IN_CHAIN` |
 
 ---
 
-## 2. 已定决策
+## 2. Settled decisions
 
-| # | 决策 | 选择 | 影响 |
+| # | Decision | Choice | Impact |
 |---|---|---|---|
-| D1 | push 语义 | **上游 → Signet**（复用并加固现有 `/scim/v2` 服务端） | push 只存在于 SCIM 线；LDAP 纯 pull |
-| D2 | 密码策略 | **LDAP bind 直通** | 密码留在 LDAP；登录路径需分叉 |
-| D3 | 上游删人 | **默认 disable，不删除** | 保留审计 actor 归属（`audit_logs.actor_user_id` 是 `ON DELETE SET NULL`） |
-| D4 | LDAP TLS | **LDAPS(636) 必选 + 强制证书校验**，自签 CA 可导入 | 明文 bind 不可接受；TLS 配置为必填项 |
-| D5 | 目录用户编辑权 | **完全只读**：admin 不可改邮箱/姓名/组；仅可改本地 MFA、`role`、直接禁用 | 需要托管语义与属性归属矩阵 |
-| D6 | LDAP 不可用时 | **fail closed** | 登录失败，无本地密码兜底 |
+| D1 | Push semantics | **Upstream → Signet** (reuse and harden the existing `/scim/v2` server) | Push exists only on the SCIM line; LDAP is pull-only |
+| D2 | Password policy | **LDAP bind-through** | Passwords stay in LDAP; the sign-in path must branch |
+| D3 | Upstream deletes a user | **Disable by default, never delete** | Preserves audit actor attribution (`audit_logs.actor_user_id` is `ON DELETE SET NULL`) |
+| D4 | LDAP TLS | **LDAPS (636) mandatory + certificate verification enforced**; a self-signed CA can be imported | Plaintext bind is unacceptable; TLS configuration is required |
+| D5 | Edit rights on directory users | **Fully read-only**: admins cannot change email/name/groups; only local MFA, `role` and a direct disable | Needs managed semantics and an attribute-ownership matrix |
+| D6 | LDAP unavailable | **Fail closed** | Sign-in fails; no local-password fallback |
 
 ---
 
-## 3. 数据源与接入模式
+## 3. Sources and integration modes
 
-| 数据源 | 模式 | 方向 | 触发 | 说明 |
+| Source | Mode | Direction | Trigger | Notes |
 |---|---|---|---|---|
-| **LDAP** | pull | Signet → 目录 | CLI / 定时 | LDAPS + 服务账号搜索；bind 直通用于登录 |
-| **通用 HTTP JSON** | pull | Signet → 上游 | CLI / 定时 | 最灵活，需 SSRF 防护 |
-| **SCIM** | push | 上游 → Signet | 上游驱动 | 即现有 `/scim/v2`，需加固（见 §14） |
+| **LDAP** | pull | Signet → directory | CLI / schedule | LDAPS + service-account search; bind-through for sign-in |
+| **Generic HTTP JSON** | pull | Signet → upstream | CLI / schedule | Most flexible; needs SSRF protection |
+| **SCIM** | push | Upstream → Signet | Upstream-driven | The existing `/scim/v2`, needs hardening (§14) |
 
-> ⚠️ **LDAP 没有 push 语义**。文档与需求描述必须写成「三类数据源 × 两种接入模式（pull / push）」，避免产生"LDAP 也应支持推送"的误解。
+> ⚠️ **LDAP has no push semantics.** Documentation and requirements must say
+> "three source kinds × two integration modes (pull / push)" to avoid the
+> impression that LDAP should also support push.
 
 ---
 
-## 4. 数据模型
+## 4. Data model
 
-### 4.1 新增表（迁移 `024_directory_sync.sql`）
+### 4.1 New tables (migration `024_directory_sync.sql`)
 
 ```sql
--- 数据源配置
+-- Source configuration
 CREATE TABLE directory_sources (
     id UUID PRIMARY KEY,
-    code TEXT NOT NULL UNIQUE,          -- CLI / URL 标识，如 "corp-ldap"
+    code TEXT NOT NULL UNIQUE,          -- CLI / URL identifier, e.g. "corp-ldap"
     name TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('ldap', 'scim', 'http_json')),
     enabled BOOLEAN NOT NULL DEFAULT FALSE,
-    priority INT NOT NULL DEFAULT 100,  -- 多源属性冲突时的优先级（小者优先）
-    config JSONB NOT NULL DEFAULT '{}', -- kind 特有配置（明文，不含密钥）
-    credential_enc TEXT,                -- 服务账号密码 / Bearer token，AES-256-GCM
-    ca_cert_pem TEXT,                   -- LDAPS 自签 CA（公钥，无需加密）
+    priority INT NOT NULL DEFAULT 100,  -- conflict priority across sources (lower wins)
+    config JSONB NOT NULL DEFAULT '{}', -- kind-specific configuration (plaintext, no secrets)
+    credential_enc TEXT,                -- service-account password / bearer token, AES-256-GCM
+    ca_cert_pem TEXT,                   -- LDAPS self-signed CA (public key, no encryption)
     sync_groups BOOLEAN NOT NULL DEFAULT TRUE,
-    interval_minutes INT,               -- NULL = 仅手动触发
+    interval_minutes INT,               -- NULL = manual trigger only
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- 每次同步运行（运行历史，供 UI/审计查询）
+-- One row per sync run (history for the UI/audit)
 CREATE TABLE directory_sync_runs (
     id UUID PRIMARY KEY,
     source_id UUID NOT NULL REFERENCES directory_sources(id) ON DELETE CASCADE,
@@ -95,20 +102,20 @@ CREATE TABLE directory_sync_runs (
     conflict_count INT NOT NULL DEFAULT 0,
     error_count INT NOT NULL DEFAULT 0,
     error TEXT,
-    actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,  -- 手动触发者
-    stats JSONB NOT NULL DEFAULT '{}'   -- 组同步计数等扩展指标
+    actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,  -- manual trigger actor
+    stats JSONB NOT NULL DEFAULT '{}'   -- extended metrics such as group counts
 );
 CREATE INDEX directory_sync_runs_source_started_idx
     ON directory_sync_runs (source_id, started_at DESC);
 
--- 外部条目 ↔ 本地用户 的链接
+-- External entry ↔ local user links
 CREATE TABLE directory_entries (
     id UUID PRIMARY KEY,
     source_id UUID NOT NULL REFERENCES directory_sources(id) ON DELETE CASCADE,
-    external_id TEXT NOT NULL,          -- LDAP: entryUUID/objectGUID；SCIM: id
-    external_dn TEXT,                   -- LDAP bind 直通所需
+    external_id TEXT NOT NULL,          -- LDAP: entryUUID/objectGUID; SCIM: id
+    external_dn TEXT,                   -- needed for LDAP bind-through
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    source_hash TEXT,                   -- 托管字段指纹，避免无谓 UPDATE
+    source_hash TEXT,                   -- managed-field fingerprint, avoids needless UPDATEs
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     last_synced_at TIMESTAMPTZ,
     UNIQUE (source_id, external_id)
@@ -116,261 +123,384 @@ CREATE TABLE directory_entries (
 CREATE INDEX directory_entries_user_idx ON directory_entries (user_id);
 ```
 
-> `users.external_id`（迁移 `012`）是**全局唯一**且面向 SCIM 的，**不能**当作多源外部 ID 使用；因此必须新建 `directory_entries`。
-> 同一外部身份只允许链接一个本地用户；同一本地用户可被多个源链接（多源场景，见 §17）。
+> `users.external_id` (migration `012`) is **globally unique** and SCIM-facing; it
+> **cannot** serve as a per-source external id. Hence `directory_entries`.
+> One external identity may link to exactly one local user; one local user may be
+> linked by several sources (multi-source, see §17).
 
-### 4.2 `users` 表变更
+### 4.2 `users` changes
 
 ```sql
--- 三个"停用意图"位：每个权威各持一位，互不覆盖（见下方）
+-- Three "disable intent" bits: each authority owns one, none overwrites another
 ALTER TABLE users ADD COLUMN local_disabled     BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
-ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;  -- 迁移 026
--- SCIM 客户端托管该账号的属性（迁移 027）
+ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;  -- migration 026
+ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;  -- migration 026
+-- The SCIM client manages this account's attributes (migration 027)
 ALTER TABLE users ADD COLUMN scim_managed       BOOLEAN NOT NULL DEFAULT FALSE;
--- 目录来源的组，与本地手工组分离（见 §6.5）
+-- Directory-sourced groups, kept apart from local manual groups (§6.5)
 ALTER TABLE users ADD COLUMN directory_groups TEXT[] NOT NULL DEFAULT '{}';
--- 迁移 043 起两列均为 UUID[]：存组 id，读取经 signet_group_names() 还原名字
+-- Since migration 043 both columns are UUID[]: ids, resolved through signet_group_names()
 ```
 
-有效状态是三位**求或**，并由数据库约束锁死：
+The effective status is the **OR** of the three bits, locked down by a database
+constraint:
 
 ```sql
 status = CASE WHEN local_disabled OR directory_disabled OR scim_disabled
-              THEN 'disabled' ELSE 'active' END      -- 约束 users_status_matches_flags
+              THEN 'disabled' ELSE 'active' END      -- constraint users_status_matches_flags
 ```
 
-**为什么是一位不够**（原设计的 `local_disabled` 单列就是缺这一点）：`status` 只有 active/disabled 两态，而停用可以有**多个互不相同的来源**。若各家都往 `status` 上写，同一列就同时承担"谁停用的"和"是否停用"两个语义，于是必然互相覆盖：
+**Why one bit is not enough** (the original single `local_disabled` column
+lacked this): `status` has only active/disabled, while disablement can come from
+**several distinct sources**. If every party writes `status`, the same column
+carries both "who disabled it" and "is it disabled", so they inevitably overwrite
+each other:
 
-| 场景 | 单列写法下的结果 |
+| Scenario | Result with a single column |
 |---|---|
-| SCIM 停用 → 下一次目录同步看到用户在目录里 | 同步把 `status` 写回 `active`，**把 SCIM 的停用抹掉** |
-| 目录停用（用户消失）→ SCIM 推一次 `active: true` | SCIM 把 `status` 写回 `active`，**把目录的停用抹掉** |
-| 本地管理员 enable 一个被上游停用的账号 | 管理员以为放开了，下一轮同步又停用回去 |
+| SCIM disables → a later directory sync sees the user in the directory | The sync writes `status = active`, **erasing SCIM's disable** |
+| Directory disables (user disappeared) → SCIM pushes `active: true` | SCIM writes `status = active`, **erasing the directory disable** |
+| A local admin enables an upstream-disabled account | The admin thinks it worked; the next sync disables it again |
 
-三位的语义是「**各记各的意图，`status` 是这些意图的结论**」：
+The three bits mean "each records its own intent; `status` is their
+conclusion":
 
-- 上游停用 ⇒ 本地停用；本地想启用也无效 —— 这正是"最严格策略"，且现在由**数据库约束**保证，任何写入路径都无法绕过；
-- 每个权威只能释放**自己**那一位（同步只清 `directory_disabled`，SCIM 只清 `scim_disabled`，管理员只清 `local_disabled`）；
-- 因此不再存在"谁的写入会覆盖谁"的问题：覆盖在数据模型层面不可表达。
+- An upstream disable ⇒ locally disabled; enabling locally has no effect — the
+  strictest policy, now guaranteed by a **database constraint** that no write path
+  can bypass;
+- Each authority can release only **its own** bit (sync clears only
+  `directory_disabled`, SCIM only `scim_disabled`, an admin only
+  `local_disabled`);
+- "Whose write overwrites whose" becomes inexpressible at the data-model level.
 
-`directory_disabled` / `scim_disabled` 的清零规则见 §6.3；**权威失效时其意图必须被释放**（否则账号被永远锁死，且没有任何入口能救）见 §4.3。
+Clearing rules for `directory_disabled` / `scim_disabled` are in §6.3; **when an
+authority dies its intent must be released** (otherwise the account is locked
+forever with no way out) — see §4.3.
 
-> 同步改造清单：`models.rs` 的 `USER_COLS`、`User` 结构体、`admin` 用户列表/详情返回、以及所有 `SELECT {USER_COLS}` 调用点。**已按此清单落地** —— `status` 已无任何写入方直接声明，全部改由三位派生（`status_from_flags` / 约束）。
+> Sync checklist: `USER_COLS` in `models.rs`, the `User` struct, the admin
+> list/detail responses, and every `SELECT {USER_COLS}` call site. **Implemented
+> accordingly** — no writer declares `status` directly any more; everything
+> derives it from the bits (`status_from_flags` / the constraint).
 
-### 4.3 权威的存活与其意图的释放
+### 4.3 Authority liveness and release of its intent
 
-意图只在**它的持有者还在位**时成立。每个权威各有一个"存活"判据，任一失效都必须调用 `authority::release_dead_authority_claims`：
+An intent holds only while its owner is alive. Each authority has a liveness
+test, and any failure must call `authority::release_dead_authority_claims`:
 
-| 意图 / 归属 | 存活判据 | 释放时机 |
+| Intent / ownership | Liveness test | Released when |
 |---|---|---|
-| `directory_disabled` | 存在**启用中**的源 link 到该用户 | 停用源、删除源 |
-| `scim_disabled` / `scim_managed` | SCIM 配置里有 token（轮换算存活，**吊销才算失效**） | `DELETE /admin/scim/token` |
+| `directory_disabled` | An **enabled** source links this user | The source is disabled or deleted |
+| `scim_disabled` / `scim_managed` | The SCIM config has a token (rotation keeps it alive; **only revocation kills it**) | `DELETE /admin/scim/token` |
 
-两条判据都是「按存活扫」而不是「按持有者扫」，这一点是刻意的：link 可以被手工删除（`DELETE /directory/sources/{code}` 正是这么提示的），那时按持有者扫就找不到该释放谁，账号被永久锁死。按存活扫使系统自愈。
+Both tests scan **by liveness**, not by owner, deliberately: a link can be deleted
+by hand (`DELETE /directory/sources/{code}` says so), and scanning by owner would
+then find nobody to release, locking the account permanently. Scanning by
+liveness makes the system self-heal.
 
-> 一个真实的锁死 bug 就出在这里：SCIM token 吊销后没人释放 `scim_disabled`，而被 SCIM 停用的账号又无法被管理员启用（约束不允许），于是**没有任何入口**能恢复。test `tests/disable_flags.rs` 现在钉住轮换/吊销两种语义的差别。
+> A real lock-up bug lived here: after the SCIM token was revoked nothing released
+> `scim_disabled`, and an SCIM-disabled account could not be enabled by an admin
+> (the constraint forbids it), so **no path** recovered it. `tests/disable_flags.rs`
+> now pins the difference between rotation and revocation.
 
-### 4.4 上游托管标记：来源与归属分开
+### 4.4 Upstream-managed markers: origin and ownership are separate
 
-| 列 | 回答的问题 | 何时写 |
+| Column | Question it answers | When written |
 |---|---|---|
-| `provisioned_via` | 这个账号**最初**是怎么来的（`sso_jit` / `scim` / …） | 仅创建时。接管一个既有本地账号**不**改写它 |
-| `directory_entries`（link 存在） | 目录是否托管它的属性 | 同步时 |
-| `scim_managed` | SCIM 客户端是否托管它的属性 | 任何 SCIM 写入（`create` / `put` / `patch`） |
+| `provisioned_via` | How this account **first** came to exist (`sso_jit` / `scim` / …) | Creation only. Taking over an existing local account does **not** rewrite it |
+| `directory_entries` (a link exists) | Whether the directory owns its attributes | During sync |
+| `scim_managed` | Whether the SCIM client owns its attributes | Any SCIM write (`create` / `put` / `patch`) |
 
-`provisioned_via` 与 `scim_managed` 必须分开：一个 IdP 接管一个既有本地账号时，它**不是**这个账号的创建者，把它写成 `created by scim` 会让运维读错这个字段。两者都由 `authority::managing_authority` 汇成"谁拥有这个账号"，供 §5 的拒写与拒删使用（目录优先于 SCIM：link 带优先级，目录是属性的事实来源）。
+`provisioned_via` and `scim_managed` must stay separate: when an IdP takes over an
+existing local account it **is not** that account's creator, and writing
+`created by scim` would mislead operators. Both feed
+`authority::managing_authority`, which answers "who owns this account" for the
+write/delete refusals in §5 (directory outranks SCIM: links carry a priority, and
+the directory is the source of truth for attributes).
 
 ---
 
-## 5. 属性归属与只读语义（D5）
+## 5. Attribute ownership and read-only semantics (D5)
 
-| 字段 | 归属 | 目录可否写 | 本地可否改 |
+| Field | Owner | Directory may write | Local may change |
 |---|---|---|---|
-| `email` | 目录 | ✅ | ❌ |
-| `username` | 目录 | ✅ | ❌ |
-| `display_name` | 目录 | ✅ | ❌ |
-| `groups`（本地组） | 本地 | ❌ | ✅ |
-| `directory_groups` | 目录 | ✅ | ❌ |
-| `status` | 目录 + 本地 override | ✅（上游值） | ✅（仅通过 `local_disabled`） |
-| `external_id` | 目录 | ✅ | ❌ |
-| `password_hash` | 本地 | ❌ | ✅（目录用户恒为空） |
-| `mfa_required` / `totp_enabled` / `totp_secret` | 本地 | ❌ | ✅ |
-| `role` | **本地** | ❌ | ✅ |
-| `phone` | 本地 | ❌（v1） | ✅ |
-| `must_change_password` | 本地 | ❌（目录用户恒 `false`） | ✅ |
+| `email` | Directory | ✅ | ❌ |
+| `username` | Directory | ✅ | ❌ |
+| `display_name` | Directory | ✅ | ❌ |
+| `groups` (local groups) | Local | ❌ | ✅ |
+| `directory_groups` | Directory | ✅ | ❌ |
+| `status` | Directory + local override | ✅ (upstream value) | ✅ (only through `local_disabled`) |
+| `external_id` | Directory | ✅ | ❌ |
+| `password_hash` | Local | ❌ | ✅ (always empty for directory users) |
+| `mfa_required` / `totp_enabled` / `totp_secret` | Local | ❌ | ✅ |
+| `role` | **Local** | ❌ | ✅ |
+| `phone` | Local | ❌ (v1) | ✅ |
+| `must_change_password` | Local | ❌ (always `false` for directory users) | ✅ |
 
-**判定"谁托管"**：`authority::managing_authority(pool, user_id) -> Option<Authority>`，`Authority` 是 `Directory(code)` 或 `Scim`。目录取**优先级最高**的源 code（`ORDER BY priority ASC, code ASC`，`code` 用于在同优先级下给出确定结果），目录优先于 SCIM。
+**Determining "who manages"**: `authority::managing_authority(pool, user_id) -> Option<Authority>`,
+where `Authority` is `Directory(code)` or `Scim`. The directory takes the
+**highest-priority** source code (`ORDER BY priority ASC, code ASC`; `code` gives a
+deterministic result at equal priority), and directory outranks SCIM.
 
-**为什么是一项查询而不是两个函数**：文档原先拟定的 `is_managed(pool, user_id) -> bool` 与 `managing_source(..) -> Option<String>` 是同一查询的两种投影，而每个强制点都需要那个 code 来构造错误信息与审计明细（"managed by directory source corp" 与 "managed by SCIM" 是不同的话）；再有一个布尔投影只会多一个会漂移的真相来源。
+**Why one query rather than two functions**: the originally planned
+`is_managed(pool, user_id) -> bool` and `managing_source(..) -> Option<String>`
+are two projections of the same query, and every enforcement point needs the code
+to build its error and audit detail ("managed by directory source corp" and
+"managed by SCIM" are different sentences); a boolean projection would only add a
+second truth source that drifts.
 
-> `Authority` 是枚举而非 `Option<String>`，因为 SCIM 没有 code —— 目录源的 code 是运维自选的，而 `"scim"` 甚至是一个合法的 **kind** 值，字符串在真正要用它拒写的地方恰好是有歧义的。
+> `Authority` is an enum rather than `Option<String>` because SCIM has no code —
+> directory codes are operator-chosen, and `"scim"` is even a legal **kind**
+> value, so a string is genuinely ambiguous exactly where it would be used to
+> refuse a write.
 
-被拒时返回 `403`；文案与**所有权字段清单**都是 `Authority` 上的纯函数/常量（`write_error(field)` / `delete_error()` / `managed_fields()`，见 §5.1），测试 `tests/directory_policy.rs` 把它们与上表钉在一起。
+A refusal returns `403`; both the message and the **owned-field list** are pure
+functions/constants on `Authority` (`write_error(field)` / `delete_error()` /
+`managed_fields()`, see §5.1). `tests/directory_policy.rs` pins them to the table
+above.
 
-`Authority::managed_fields()` 有一个刻意的差异：目录拥有 `directory_groups`，**SCIM 不拥有**。SCIM 的组仍写 `users.groups` 这个本地列，若在此声明所有权，本地改组就会撞上一个 SCIM 会覆盖的值。把 SCIM 组迁到 `directory_groups` 是独立工作（§6.5、§14）。
+`Authority::managed_fields()` has one deliberate difference: the directory owns
+`directory_groups`, **SCIM does not**. SCIM groups still write the local
+`users.groups` column; claiming ownership here would make local group edits
+collide with a value SCIM overwrites. Moving SCIM groups to `directory_groups` is
+separate work (§6.5, §14).
 
-**已实现（P0）**：
+**Implemented (P0)**:
 
-| 入口 | 行为 |
+| Entry point | Behaviour |
 |---|---|
-| `update_user` | 仅当 `email`/`username`/`display_name` 的**归一化后新值**与现值不同才拒绝；仅改 `role`/`groups`/`phone`/`mfa_required`/`status` 等本地字段照常放行 |
-| `delete_user` | 一律拒绝，提示改用 disable（与 D3 一致：上游删人只 disable，本地也不应硬删） |
-| `disable_user` / `enable_user` / `batch_disable_users` | **放行**，并写入/清除 `users.local_disabled`（见下） |
+| `update_user` | Refuses only when the **normalised new value** of `email`/`username`/`display_name` differs from the current one; changes to local fields (`role`/`groups`/`phone`/`mfa_required`/`status`, …) pass through |
+| `delete_user` | Always refused, suggesting disable instead (consistent with D3: upstream deletion only disables, and local should not hard-delete either) |
+| `disable_user` / `enable_user` / `batch_disable_users` | **Allowed**, writing/clearing `users.local_disabled` (below) |
 
-> **对文档措辞的一处修正**：§5 原文把 `disable_user` 也列入"必须校验并拒绝"的入口。但同一张 D5 表格写明 `status` 是"目录 + 本地 override，本地可改（仅通过 `local_disabled`）"——若拒绝 disable，文档承诺的本地覆盖机制就无法使用。因此实现为**放行并正确落到 `local_disabled`**，而不是拒绝。`set_status` 现在强制要求调用方传入 `local_disabled`，任何绕过该意图的本地禁用都会在编译期被拦住。
+> **One correction to the wording above**: §5 originally listed `disable_user`
+> among the entries that must refuse. But the same D5 table says `status` is
+> "directory + local override, locally changeable (only through
+> `local_disabled`)" — refusing disable would make the promised local override
+> unusable. The implementation therefore **allows it and writes
+> `local_disabled`**. `set_status` now requires the caller to pass
+> `local_disabled`, so any local disable that bypasses that intent is caught at
+> compile time.
 
-> 拒绝写入会记一条审计事件 `directory.managed_write_blocked`（`detail = { source, field }`）。同步引擎自身的 `directory.sync.*` / `directory.user.*` 事件属于 P1，因为现在还没有同步可审计。
+> A refused write audits `directory.managed_write_blocked` (`detail = { source,
+> field }`). The sync engine's own `directory.sync.*` / `directory.user.*` events
+> belong to P1, since there was no sync to audit yet.
+
+### 5.1 Testability of the refusal policy
+
+`Authority::write_error` / `delete_error` / `managed_fields` are pure
+functions/constants (`crates/signet/src/authority.rs`), so the ownership table can
+be pinned by ordinary unit tests without a database. `tests/directory_policy.rs`
+covers: managed fields refused, local fields allowed, and unknown fields
+**allowed by default** (a caller's typo must not lock an admin out of unrelated
+attributes).
+
+### 5.2 How the dashboard presents "why disabled" and "can it be enabled"
+
+`PublicUser` exposes three fields so the dashboard need not infer disable
+semantics:
+
+| Field | Meaning |
+|---|---|
+| `disabled_by: string[]` | The authorities currently holding the account: `local` / `directory` / `scim` (several may coexist) |
+| `can_enable: bool` | Whether an admin's Unfreeze would **actually** work (computed server-side, below) |
+| `local_disabled: bool` | The local bit itself (the edit dialog needs it separately) |
+
+**Why an array rather than a single `reason`**: an account may be held by two
+authorities at once, and an admin's Unfreeze can release only the **local** bit. A
+single value would have to pick a winner and hide the other authority still
+holding the account — which is exactly the answer to "why did nothing happen".
+
+**Why `can_enable` is server-computed**: it is **policy**, not a rendering
+choice. The old button appeared for every disabled account, returned `200`,
+cleared the local intent, and left the account **still frozen** — reporting
+success while nothing happened. Policy belongs on the server so the view's copy
+cannot drift from what the write path actually enforces.
+
+Dashboard (`UsersView.vue`): the status column lists `disabled_by` entries; when
+Unfreeze cannot take effect it is replaced by `Held upstream` explaining which
+authority must let go; the edit dialog warns that choosing active clears only the
+local freeze, and the account stays frozen.
 
 ---
 
-### 5.1 拒写策略的可测试性
+## 6. Sync algorithm
 
-`Authority::write_error` / `delete_error` / `managed_fields` 都是纯函数/常量（`crates/signet/src/authority.rs`），因此上面那张归属表可以用普通单元测试锁定，不需要数据库。`tests/directory_policy.rs` 覆盖：托管字段被拒、本地字段放行、未知字段**默认放行**（调用方写错字段名时不应把管理员锁在无关属性之外）。
-
-### 5.2 后台如何呈现"停用原因"与"能否启用"
-
-`PublicUser` 暴露三个字段，让 Dashboard 不必自己推断停用语义：
-
-| 字段 | 含义 |
-|---|---|
-| `disabled_by: string[]` | 当前按着这个账号的权威：`local` / `directory` / `scim`（可同时存在多个） |
-| `can_enable: bool` | 管理员点 Unfreeze 是否**真的生效**（服务端计算，见下） |
-| `local_disabled: bool` | 本地那一位本身（编辑对话框需要单独知道它） |
-
-**为什么是数组而不是一个 `reason`**：账号可以同时被两个权威按着，而管理员的 Unfreeze 只能释放**本地**那一位。单值字段必须挑一个赢家，于是就会把另一个仍在按着的权威藏起来 —— 而那恰恰是"为什么点了没反应"的答案。
-
-**为什么 `can_enable` 由服务端算**：这是一条**策略**，不是渲染选择。原先的按钮对任何 disabled 账号都出现，点下去返回 `200`、清掉本地意图、账号**依然冻结** —— 按钮报告成功而什么都没发生。策略放在服务端，避免视图里的副本与写入路径实际执行的规则漂移。
-
-Dashboard 侧（`UsersView.vue`）：状态列按 `disabled_by` 逐项显示"谁按着"；不能生效时不再显示 Unfreeze，改显示 `Held upstream` 并说明需要哪个权威放手；编辑对话框在改 `status` 时提示"选 active 只清掉本地冻结，账号仍会保持冻结"。
-
----
-
-## 6. 同步算法
-
-### 6.1 主流程（全量对账）
+### 6.1 Main flow (full reconciliation)
 
 ```text
-1. 创建 run（status=running，记录 trigger 与 actor）
-2. 分页拉取上游全量条目
-3. 逐条处理（见 6.2）
-4. 对账收尾（见 6.3）
-5. 组同步（见 6.5，若 enabled）
-6. 关闭 run，写统计；失败则 status=failed + error
+1. Create a run (status=running, recording trigger and actor)
+2. Page through the upstream's full entries
+3. Process each entry (6.2)
+4. Reconciliation tail (6.3)
+5. Group sync (6.5, when enabled)
+6. Close the run with counts; on failure status=failed + error
 ```
 
-分页与批量：
+Paging and batching:
 
-- LDAP：RFC 2696 Simple Paged Results，页大小可配（默认 500）；AD 需同时请求分页控件 OID `1.2.840.113556.1.4.319`。
-- 建议每 N 条（默认 200）提交一次事务，避免长事务与内存膨胀。
+- LDAP: RFC 2696 Simple Paged Results, configurable page size (default 500); AD
+  also needs the paging control OID `1.2.840.113556.1.4.319`.
+- Commit a transaction every N entries (default 200) to avoid long transactions
+  and memory growth.
 
-### 6.2 单条处理
+### 6.2 Per-entry processing
 
 ```text
-按 (source_id, external_id) 查 directory_entries
-├─ 命中 link
-│   ├─ 计算托管字段指纹，与 source_hash 相同 → 仅更新 last_seen_at（计 skipped）
-│   └─ 不同 → UPDATE 托管字段 + source_hash + last_seen_at（计 updated）
-└─ 未命中 link
-    ├─ 按 email / username 匹配本地用户
-    │   ├─ 命中 → 冲突：skip + 计 conflict + 审计 directory.conflict（见 6.4）
-    │   └─ 未命中 → INSERT 新用户（role='member'、password_hash=''、
-    │                  provisioned_via=<kind>、local_disabled=FALSE）
-    │               + 写 link（计 created）
-    └─ 写 link
+Look up directory_entries by (source_id, external_id)
+├─ link found
+│   ├─ managed-field fingerprint equals source_hash → update last_seen_at only (skipped)
+│   └─ differs → UPDATE managed fields + source_hash + last_seen_at (updated)
+└─ no link
+    ├─ match a local user by email / username
+    │   ├─ match → conflict: skip + count conflict + audit directory.conflict (6.4)
+    │   └─ no match → INSERT a new user (role='member', password_hash='',
+    │                  provisioned_via=<kind>, local_disabled=FALSE)
+    │               + write the link (created)
+    └─ write the link
 ```
 
-新用户字段：`sub` 使用生成的 UUIDv4；`display_name` 缺失时回退为 email 本地部分（与 `federation/link.rs:203` 的 JIT 逻辑一致）。
+New-user fields: `sub` is a generated UUIDv4; a missing `display_name` falls back
+to the email's local part (the same rule as the JIT path in
+`federation/link.rs:203`).
 
-### 6.3 对账收尾（缺失即 disable）
+### 6.3 Reconciliation tail (missing means disable)
 
-```text
+```sql
 UPDATE users SET directory_disabled = TRUE,
                  status = CASE WHEN local_disabled OR scim_disabled
-                               THEN 'disabled' ELSE 'disabled' END   -- 见 §4.2
+                               THEN 'disabled' ELSE 'disabled' END   -- see §4.2
 WHERE id IN (SELECT user_id FROM directory_entries
-             WHERE source_id = $1 AND last_seen_at < <本次 run 开始时间>)
+             WHERE source_id = $1 AND last_seen_at < <this run's start>)
 ```
 
-（`status` 由三位求或得出，写的是**自己那一位**；同步永不触碰 `local_disabled` / `scim_disabled`。）
+(`status` derives from the three bits; the sync writes **its own bit** and never
+touches `local_disabled` / `scim_disabled`.)
 
-- **不删除**用户、不删除 link、不清除 `local_disabled`；
-- 审计 `directory.user.disabled`，`detail.reason` 有两个取值：
+- It does **not** delete users, delete links or clear `local_disabled`;
+- It audits `directory.user.disabled`; `detail.reason` has two values:
 
-| reason | 何时 |
+| reason | When |
 |---|---|
-| `absent_upstream` | 目录不再列出这个条目 |
-| `out_of_scope` | 目录仍然列出，但不再属于本源的**作用域**（§7.2.1：调岗、域变更） |
+| `absent_upstream` | The directory no longer lists this entry |
+| `out_of_scope` | The directory still lists it, but it no longer belongs to this source's **scope** (§7.2.1: transfer, domain change) |
 
-`apply_disables` 逐条带出 planner 给出的原因，而不是硬编码其中一个 —— 一个凌晨三点读到「账号被禁用」的运维必须能分辨「离职」和「调岗」；
-- 另有两点与作用域相关的边界：作用域只可能禁用**本源自已 link 的用户**（缺席对账遍历的是 link，没 link 的人动不到）；`--limit` 试跑不做对账，因此作用域在试跑里**不会**禁用任何人；
-- 上游重新出现时，同步**清掉自己那一位** `directory_disabled`（其余权威的位仍生效，见 §4.2），并记一条 `directory.user.enabled` —— 但**仅当账号真的活过来**：若本地或 SCIM 仍然按着，运维看到的状态没有变化，记一条"已启用"只会让人去找一个仍然登录不了的账号；
-- 上面这条"复现即释放"是必需的：计划器在为"属性没变、但 `directory_disabled` 仍为真"的用户产出 `Unchanged` 之外必须产出 `Update`，否则复现的人永远停留在 disabled；
-- link 保留使"消失—复现"不会误建重复账号。
+`apply_disables` carries the planner's reason per entry instead of hard-coding
+one — an operator reading "account disabled" at 3 a.m. must be able to tell
+"left the company" from "changed department";
+- Two scope-related boundaries: scope can disable only users **linked by this
+  source** (the absence sweep walks links, so unlinked users are untouched), and
+  a `--limit` trial skips reconciliation, so scope **never** disables anyone in a
+  trial;
+- When an entry reappears, the sync **clears its own** `directory_disabled` (other
+  authorities' bits still apply, §4.2) and audits `directory.user.enabled` —
+  but **only when the account actually becomes active**: if local or SCIM still
+  holds it, nothing visible changed, and an "enabled" event would send operators
+  looking for an account that still cannot sign in;
+- The "reappearance releases" rule is required: for a user whose attributes are
+  unchanged but whose `directory_disabled` is still true, the planner must emit
+  `Update` in addition to `Unchanged`, or the returning user stays disabled
+  forever;
+- Keeping the link makes "disappear then reappear" avoid duplicate accounts.
 
-### 6.4 冲突处理
+### 6.4 Conflict handling
 
-| 冲突 | 处理 |
+| Conflict | Handling |
 |---|---|
-| 上游 email/username 撞已有本地用户，且该用户无 link | **skip + 报冲突**，不自动接管。审计 `directory.conflict`，由管理员显式确认后手动建立链接 |
-| 上游 email/username 撞的用户**已被另一个源 link** | **skip，不计冲突**。按 `priority` 判定归属（§4.1），高优先级源继续拥有该用户的属性；`reason` 里点名是哪个源（见下方说明） |
-| 上游同一 email 出现多条 | 取第一条，其余 skip + 告警 |
-| 上游 email 变更后撞另一用户 | UPDATE 失败 → 该条 skip + 冲突，其余条目继续，run 置 `partial` |
-| 上游删除了某条但本地已 link | 走 6.3 disable |
+| The upstream email/username collides with an existing local user with no link | **Skip + report a conflict**; never take over automatically. Audit `directory.conflict`; an admin confirms explicitly and links it by hand |
+| The colliding user is **already linked by another source** | **Skip, no conflict**. Ownership follows `priority` (§4.1); the higher-priority source keeps the attributes, and `reason` names the owning source (below) |
+| The same email appears several times upstream | Take the first, skip the rest with a warning |
+| An upstream email change collides with another user | The UPDATE fails → that entry skips with a conflict, the rest continue, the run becomes `partial` |
+| An upstream entry is gone but locally linked | 6.3 disable |
 
-> **多源重叠的判定**：同一个用户在两个目录里都存在时，两个源会各自 link 到他（`external_id` 是 per-source 的）。计划阶段先看 `managing_source`——若该用户的归属源不是本次运行的源，则**既不写属性、也不在"上游消失"时 disable**，记为 skip 并把归属源写进 `reason`。
+> **Multi-source overlap**: when the same person exists in two directories, both
+> sources link to them (`external_id` is per-source). The planning phase checks
+> `managing_source` first — if the owning source is not this run's source, it
+> **neither writes attributes nor disables on "upstream disappearance"**, records
+> a skip, and puts the owning source in `reason`.
 >
-> 之所以是 skip 而不是 conflict：conflict 的定义是"撞上一个**没人托管**的本地账号"，那才是需要人工裁决的接管风险。两源同时列出一个人是多源部署的正常状态，把它算成冲突会让每个 run 都停在 `partial`，运营商很快就会学会忽略这个状态。归属源的属性优先，正是 `priority` 的语义。
+> A skip rather than a conflict: a conflict means "collided with a local account
+> that **nobody manages**", which is the takeover risk needing human judgement.
+> Two sources listing one person is normal multi-source operation; counting it as
+> a conflict would leave every run `partial`, and operators would soon learn to
+> ignore the status. The owning source's attributes win — that is what `priority`
+> means.
 >
-> 代价是低优先级源贡献的组会被丢弃。v1 接受这个代价（Q5 仍未定），归属源变更时下一次运行会重新规划。
+> The cost is that groups contributed by a lower-priority source are dropped. v1
+> accepts that (Q5 is still open); when ownership changes, the next run replans.
 
-> **安全考量**：v1 **不做**按 email 自动 claim 现有账号。否则一个恶意/误配的目录条目（例如填了 `admin@corp.com`）就能接管本地管理员账号。宁可让冲突浮出来，也不静默接管。若将来要支持 claim，须同时满足：源配置显式开启、目标用户 `role='member'`、且目标用户无本地密码。
+> **Security**: v1 **does not** auto-claim an existing account by email.
+> Otherwise a malicious or misconfigured directory entry (say
+> `admin@corp.com`) could take over a local admin account. Surfacing the conflict
+> beats silent takeover. If claiming is ever supported it must require: the source
+> explicitly opts in, the target user `role='member'`, and the target has no local
+> password.
 
-### 6.5 组映射
+### 6.5 Group mapping
 
-`users.groups` 会被 OIDC 作为 `groups` claim 发出（`oidc/token.rs`、`oidc/userinfo.rs`），因此不能直接把目录组写进 `groups`——会冲掉本地手工组。采用**分列**方案：
+`users.groups` is published as the OIDC `groups` claim (`oidc/token.rs`,
+`oidc/userinfo.rs`), so writing directory groups straight into `groups` would
+clobber local manual groups. The split-column approach:
 
-- `users.groups` = 本地组（管理员维护）
-- `users.directory_groups` = 目录组（同步全量替换）
-- OIDC `groups` claim = 两者的**并集**（去重 + 稳定排序，保证 claim 可重复）
+- `users.groups` = local groups (administrator-maintained)
+- `users.directory_groups` = directory groups (fully replaced by sync)
+- The OIDC `groups` claim = the **union** of both (deduplicated, stably sorted so
+  the claim is repeatable)
 
-同步时对该源贡献的组做全量替换（迁移 043 起按 id 存，未知名字以 `source='directory'` 建组）：
+On sync, the groups this source contributes are replaced wholesale (since
+migration 043 stored as ids; unknown names create `source='directory'` rows):
 
 ```sql
 UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id = $1
 ```
 
-> 该方案需改动 OIDC claim 组装处与后台用户列表展示，代价可控，且为多源/本地共存留出空间。
+> This needs changes in the OIDC claim assembly and the dashboard user list — a
+> manageable cost that leaves room for multi-source and local coexistence.
 
-v1 组能力边界：
+v1 group boundaries:
 
-- 仅同步**直接成员**，不做嵌套组展开；
-- LDAP 侧按 `member`（OpenLDAP 组对象）或 `memberOf`（AD 反查）解析，具体取法在源配置里选择；
-- SCIM 的组在 `scim_groups` 中标记 `source='scim'`，`/scim/v2/Groups` 只看见自己的组；目录组与本地组不会出现在 IdP 的列表里。
-- 目录组会出现在 Dashboard → **Groups** 的树里（带 Directory 徽章），管理员可以移动到部门下；名称、成员与存在性仍由同步源决定。
+- Sync **direct members only**; no nested expansion;
+- On the LDAP side, resolve via `member` (OpenLDAP group objects) or `memberOf`
+  (AD reverse lookup), selectable in the source config;
+- SCIM groups are tagged `source='scim'` in `scim_groups`, and `/scim/v2/Groups`
+  sees only its own; directory and local groups never appear in the IdP's list;
+- Directory groups appear in Dashboard → **Directory**'s tree (with a Directory
+  badge) and can be moved under a department; name, membership and existence
+  still belong to the sync source.
 
-**已实现（P1/P2）**：`users.directory_groups` 由同步全量替换（`update_user` 里 `$5 IS NULL` 时保留原值，因此 `sync_groups` 关闭的源不会清空已有值；非空时经 `signet_group_ids($5,'directory')` 写 id）；同步成功且开启 `sync_groups` 时，无成员且无子节点的 `source='directory'` 组置墓碑（上游已删除的组不残留）；OIDC 的 `groups` claim 由 `models::effective_groups` 计算两列并集（去重 + 排序，保证同一用户每次拿到的 claim 一致）。测试 `tests/oidc_groups_claim.rs`。
+**Implemented (P1/P2)**: sync fully replaces `users.directory_groups` (`update_user`
+keeps the existing value when `$5 IS NULL`, so a source with `sync_groups` off
+does not wipe it; a non-null value goes through `signet_group_ids($5,'directory')`);
+on a successful run with `sync_groups` enabled, `source='directory'` groups with
+no members and no children are tombstoned (groups deleted upstream leave nothing
+behind); the OIDC `groups` claim comes from `models::effective_groups`, the
+deduplicated, sorted union of both columns (so one user always sees the same
+claim). Tests: `tests/oidc_groups_claim.rs`.
 
 ---
 
-## 7. LDAP 接入细则
+## 7. LDAP specifics
 
-### 7.1 依赖与 TLS
+### 7.1 Dependency and TLS
 
-引入 `ldap3`，**必须**关闭默认特性（默认 `tls` 走 native-tls）：
+`ldap3` is required, and default features **must** be disabled (the default `tls`
+uses native-tls):
 
 ```toml
 ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ring"] }
 ```
 
-要点（已核对 crate 文档）：
+Points (verified against the crate docs):
 
-- `tls-rustls` 单独启用**不可用**，必须选一个 crypto provider（`tls-rustls-ring` 或 `tls-rustls-aws-lc-rs`）；
-- `tls` 与 `tls-rustls` **互斥**，同时启用会编译失败；
-- 自签 CA 通过 `RootCertStore` + `LdapConnSettings::set_config(Arc<ClientConfig>)` 注入；
-- 禁止使用 `no_tls_verify`（跳过校验）——与 D4「强制证书校验」冲突，代码层不暴露该选项。
+- `tls-rustls` alone **does not work**; a crypto provider must be selected
+  (`tls-rustls-ring` or `tls-rustls-aws-lc-rs`);
+- `tls` and `tls-rustls` are **mutually exclusive**; enabling both fails to
+  compile;
+- A self-signed CA is injected through `RootCertStore` +
+  `LdapConnSettings::set_config(Arc<ClientConfig>)`;
+- `no_tls_verify` (skip verification) is forbidden — it contradicts D4 and the
+  code exposes no such option.
 
-### 7.2 连接配置（`config JSONB`）
+### 7.2 Connection config (`config JSONB`)
 
 ```json
 {
@@ -392,181 +522,291 @@ ldap3 = { version = "0.12", default-features = false, features = ["tls-rustls-ri
 }
 ```
 
-- `credential_enc` 存服务账号密码（只读权限即可）；
-- **要求目录侧授予最小权限**：仅需读取 `base_dn` 与 `group_base_dn` 子树；
-- `user_filter` 由服务器执行，是**粗筛**：省流量，但预览无法校验它（§13.1.3）。写域名时注意 `(mail=*corp.example)` 会匹配 `bob@evilcorp.example`，要写成 `(mail=*@corp.example)`；
-- `email_domains` / `department_values` 是**细筛**，在本地对规范化后的条目求值，因此预览能报「匹配 0/N 条」。两者是叠加关系（都要通过），不是替代；
-- **过滤器必须做转义，禁止把用户输入拼进 filter（防 filter 注入）。** 谓词（`email_domains` 等）走的是本地比较，不插值进 filter，因此`ldap.rs` 里「不插值所以不必转义」的论证依然成立 —— 若要新增任何把配置值拼进 filter 的字段，必须先引入 RFC 4515 转义并补测试。
+- `credential_enc` stores the service-account password (read-only permission is
+  enough);
+- **Grant the directory the least privilege**: read access to the `base_dn` and
+  `group_base_dn` subtrees only;
+- `user_filter` runs on the server and is a **coarse filter**: it saves traffic
+  but the preview cannot validate it (§13.1.3). When writing domain patterns,
+  note that `(mail=*corp.example)` also matches `bob@evilcorp.example`; write
+  `(mail=*@corp.example)`;
+- `email_domains` / `department_values` are **fine filters**, evaluated locally on
+  normalised entries, so the preview can report "0/N matched". They are additive
+  (all must pass), not alternatives;
+- **Filters must be escaped; never interpolate user input into a filter (filter
+  injection).** The predicates (`email_domains`, …) use local comparison and are
+  never interpolated, so `ldap.rs`'s "no interpolation, no escaping needed"
+  argument holds — any new field that interpolates config values into a filter
+  must first add RFC 4515 escaping and tests.
 
-### 7.2.1 作用域（scope）是「所有权」，不是「查询条件」
+### 7.2.1 Scope is "ownership", not a "query condition"
 
-这是本节最需要记住的一点。`email_domains` 与 `department_values` 定义的是**这个源拥有谁**，而不是**这次要查谁**。直接后果（§6.3 的「缺失即 disable」）：
+This is the single most important point in this section. `email_domains` and
+`department_values` define **who this source owns**, not **who to query now**. The
+direct consequence (§6.3's "missing means disable"):
 
-- 缩窄作用域 ⇒ 掉出范围的人**被禁用**（并撤销会话），和上游删除同一条路径；
-- 因此**改作用域是一次有破坏性的操作**：保存前先用 `--dry-run` 看 `disabled` 计数，或看运行历史的 disable 列表；
-- 匹配 0 条不是「同步了 0 人」，而是**把该源已管理的所有人一次性禁用**。预览的 `scope` 行会在这种配置上直接判 `ok: false`（§13.1.3），配置保存时也会拒绝空条目、通配符、以及「有 `department_values` 却没有 `department_attribute`」这类会让筛选恒不匹配的写法；
-- **域稳定、部门易变**：域筛选下掉出范围基本只发生在离职/域名变更；部门筛选下**每次内部调动都会掉出范围**。因此禁用原因被刻意分成两个字符串：
+- Narrowing the scope ⇒ people falling outside are **disabled** (and their
+  sessions revoked), the same path as upstream deletion;
+- So **changing the scope is destructive**: run `--dry-run` first to see the
+  `disabled` count, or read the disable list in the run history;
+- "0 matched" does not mean "synced 0 people" but **disables everyone this source
+  already manages at once**. The preview's `scope` row fails such a config with
+  `ok: false` (§13.1.3), and saving rejects empty entries, wildcards, and
+  `department_values` without a `department_attribute` — configurations that
+  would match nothing;
+- **Domains are stable, departments are volatile**: dropping out under a domain
+  filter basically only happens on departure or a domain change; under a
+  department filter **every internal transfer drops out**. Disable reasons are
+  therefore deliberately split:
 
-| reason | 含义 |
+| reason | Meaning |
 |---|---|
-| `absent_upstream` | 目录不再列出这个人（离职/删除） |
-| `out_of_scope` | 目录仍然列出，但不再属于这个源的作用域（调岗、域变更） |
-| `email_domain_not_allowed` | 目录仍然列出，也在作用域内，但域名被**全局登录白名单**排除。这是 `skip`，**永远不会**出现在 disable 里（见下） |
+| `absent_upstream` | The directory no longer lists this person (departure/deletion) |
+| `out_of_scope` | The directory still lists them, but they no longer belong to this source's scope (transfer, domain change) |
+| `email_domain_not_allowed` | The directory still lists them, still in scope, but the domain is excluded by the **global sign-in allowlist**. This is a `skip` and **never** appears in disable (below) |
 
-前两者都会写进运行历史的 `changes[].reason` 与审计 detail 的 `reason` 字段，运维据此区分「离职」与「调岗」；第三个是 skip 原因，用来解释「为什么这个人没被同步」。这是本次实现里新增的两个 reason 值。
+The first two appear in the run history's `changes[].reason` and the audit
+`reason`, so operators can tell "left" from "transferred"; the third is a skip
+reason explaining "why was this person not synced".
 
-**作用域 vs 白名单：所有权 vs 准入。** 同名的 `email_domains` 有两个，混用会让一次策略变更变成一次批量停用：
+**Scope vs allowlist: ownership vs admission.** Two different `email_domains`
+exist; mixing them turns one policy change into a mass disable:
 
-| | 作用域 `ScopeFilter`（本节） | 全局登录白名单 `admission`（§7.2.2） |
+| | Scope `ScopeFilter` (this section) | Global sign-in allowlist `admission` (§7.2.2) |
 |---|---|---|
-| 回答的问题 | 这个源**拥有**谁 | 谁**可以进来** |
-| 掉出范围 | 已 link 的用户被 **disable**（`out_of_scope`） | 什么都不发生：账号保留、数据保留，只是登不进来 |
-| 覆盖面 | 只作用于**这一个源** | 登录、SSO JIT、管理端建号、SCIM 推送、同步 |
-| 配置位置 | 源配置里的 `email_domains` | Dashboard → Settings / `SIGNET_ALLOWED_EMAIL_DOMAINS` |
-| 谁会被伤到 | 缩窄即停用 | 缩窄即拒绝新登录，不停用任何人 |
+| Question | Who does this source **own** | Who may **come in** |
+| Falling outside | Linked users are **disabled** (`out_of_scope`) | Nothing happens: account and data stay, they just cannot sign in |
+| Coverage | Only **this source** | Sign-in, SSO JIT, admin provisioning, SCIM push, sync |
+| Where configured | `email_domains` in the source config | Dashboard → Settings / `SIGNET_ALLOWED_EMAIL_DOMAINS` |
+| Who gets hurt | Narrowing disables | Narrowing refuses new sign-ins, disables nobody |
 
-判据很简单：**「这个人不被我们管理了」用作用域；「这个人不许进来」用白名单**。反过来用的后果不对称——把「不许进来」写进作用域会停用一批还在职的人；把「不再管理」写进白名单则会让已经离职的人继续留在 enabled 状态（只是登录被拒）。
+The rule is simple: **"we no longer manage this person" belongs in scope; "this
+person may not come in" belongs in the allowlist**. Swapping them is
+asymmetric — "may not come in" in scope disables people still employed, while
+"no longer managed" in the allowlist leaves departed people enabled (just unable
+to sign in).
 
-域名匹配规则（刻意做得窄）：比较**整个标签边界**，`corp.example` 匹配 `corp.example` 与 `mail.corp.example`，但**不匹配** `evilcorp.example`；大小写不敏感；**没有通配符、没有正则** —— 一个能表达任意条件的模式语言同时也是预览无法校验、一次 typo 就静默缩小或清空作用域的东西。部门值按精确值比较（去空白、忽略大小写），没有前缀匹配。后者是一个已知缺口，记录在 §17 的 Q7：AD 常把部门写成 `Engineering / Platform` 这样的层级路径，此时必须把 `department_attribute` / `department_path` 指到恰好那一层，配成上层名字不会匹配——**且因为作用域即所有权，配错的结果是禁用（`out_of_scope`），不是少同步几条**。因此改动部门筛选前后都应先看 `--dry-run` 的 `disabled` 计数。
+Domain matching is deliberately narrow: it compares **whole label boundaries**,
+so `corp.example` matches `corp.example` and `mail.corp.example` but **not**
+`evilcorp.example`; case-insensitive; **no wildcards and no regex** — a pattern
+language expressive enough for anything is also something the preview cannot
+validate and a typo can silently narrow or empty the scope. Department values are
+compared exactly (trimmed, case-insensitive), with no prefix matching. That gap is
+Q7 in §17: AD often writes departments as a path like `Engineering / Platform`,
+in which case `department_attribute` / `department_path` must point at exactly
+that level — a parent name will not match, **and because scope is ownership, a
+mistake disables (`out_of_scope`) rather than merely syncing fewer rows**. Always
+check the `--dry-run` `disabled` count before and after changing a department
+filter.
 
-### 7.2.2 全局登录白名单（admission）：会 skip，不会 disable
+### 7.2.2 Global sign-in allowlist (admission): skips, never disables
 
-`docs/api-v1.md` §14 定义的全局登录白名单（邮箱域名）对同步的影响只有一条：**域名不在名单里的条目被 skip**，`changes[].reason = email_domain_not_allowed`，并且：
+The global allowlist (`docs/api-v1.md` §14) affects sync in one way: **entries
+whose domain is not listed are skipped**, `changes[].reason = email_domain_not_allowed`,
+and:
 
-- **不创建**、**不更新**（属性不写）；
-- 若这条上游条目对应一个已 link 的用户，**不禁用**——计划器在为它判定 skip 之前已经把这个 `external_id` 记进「本次见到过」的集合，因此 §6.3 的缺席对账不会把它读成「上游不再列出」。这条细节是整件事的关键：白名单说的是「不许进来」，不是「已经离开」；若它落到缺席对账里，缩窄白名单就会变成一次批量停用，与上面「准入 vs 所有权」的划分直接矛盾；
-- 已 link 且因此停在启用状态的用户，登录时会被会话签发处拦掉（`docs/api-v1.md` §14），也就是「账号还在，但进不来」；
-- 该条目**不**产出 `out_of_scope`（作用域是另一个谓词，先于白名单判定），因此运维在运行历史里能分清「掉出作用域（要停用）」与「被白名单拦下（不停用）」；
-- 顺序是有意的：邮箱可读性检查 → 作用域 → 重复检查（claim external_id）→ 白名单。把白名单挪到 claim 之前，就会静默丢掉上面第二条保证。
+- They are **not created** and **not updated** (attributes are not written);
+- If the upstream entry corresponds to an already-linked user, it is **not
+  disabled** — the planner records that `external_id` in the "seen this run" set
+  before deciding the skip, so §6.3's absence sweep does not read it as "no
+  longer listed". This detail is the crux: the allowlist says "may not come in",
+  not "has left"; if it fell into absence reconciliation, narrowing the allowlist
+  would become a mass disable, contradicting the admission-vs-ownership split;
+- A linked user left enabled for this reason is refused at session issuance on
+  sign-in (`docs/api-v1.md` §14) — "the account exists but cannot come in";
+- The entry does **not** produce `out_of_scope` (scope is a different predicate,
+  decided before the allowlist), so an operator can tell "fell out of scope (will
+  be disabled)" from "blocked by the allowlist (will not be disabled)" in the run
+  history;
+- The order is deliberate: email readability check → scope → duplicate check
+  (claim external_id) → allowlist. Moving the allowlist before the claim would
+  silently lose the second guarantee above.
 
-### 7.3 外部 ID 的选取
+### 7.3 Choosing the external id
 
-| 目录 | 稳定 ID | 备注 |
+| Directory | Stable id | Notes |
 |---|---|---|
-| OpenLDAP | `entryUUID` | 稳定 |
-| AD | `objectGUID` | 二进制，需转为 UUID 字符串 |
+| OpenLDAP | `entryUUID` | Stable |
+| AD | `objectGUID` | Binary; convert to a UUID string |
 
-不要用 DN 作为 `external_id`：DN 会因 OU 调整而变，会导致重复建号。DN 只存在 `external_dn`，供 bind 使用。
+Never use the DN as `external_id`: an OU change changes the DN and creates a
+duplicate account. The DN lives only in `external_dn`, for bind.
 
-### 7.4 增量同步（仅作优化）
+### 7.4 Incremental sync (optimisation only)
 
-| 目录 | 增量字段 | 坑 |
+| Directory | Incremental field | Pitfall |
 |---|---|---|
-| AD | `uSNChanged` | 每 DC 单调递增、非全局；换 DC 会错乱 |
-| AD | `whenChanged` | 秒级精度，同秒内多次修改会漏 |
-| OpenLDAP | `modifyTimestamp` | 秒级精度，需向前回溯若干分钟（kludge） |
+| AD | `uSNChanged` | Monotonic per DC, not global; changing DC corrupts it |
+| AD | `whenChanged` | Second precision; several changes in one second are missed |
+| OpenLDAP | `modifyTimestamp` | Second precision; needs a look-back of several minutes (kludge) |
 
-**结论**：增量只作为降低开销的优化，**必须**保留周期性全量对账兜底（尤其是删除检测）。建议默认按「每小时增量 + 每日全量」；v1 可先只做全量，跑通后再加增量。
+**Conclusion**: incremental sync is only an optimisation to reduce cost, and a
+periodic full reconciliation (especially for deletion detection) **must** remain.
+Defaults: hourly incremental + daily full; v1 may start with full only and add
+incremental after it works.
 
 ---
 
-## 8. LDAP bind 直通认证（D2）
+## 8. LDAP bind-through authentication (D2)
 
-### 8.1 登录路径分叉
+### 8.1 Sign-in path branching
 
-现状是 `auth/routes.rs:90` 无条件调用本地校验：
+Today `auth/routes.rs:90` calls local verification unconditionally:
 
 ```text
 if !verify_password(&body.password, &user.password_hash)? { ... }
 ```
 
-改为按**托管来源**分派：
+Branch by **managing source** instead:
 
 ```text
-1. 加载用户（现状不变）
-2. status 校验、锁定校验（现状不变）
-3. 查询用户是否被启用的 LDAP 源托管
-   ├─ 是 → 走 LDAP bind 校验（8.2）
-   └─ 否 → 走本地 argon2 校验（现状）
-4. 通过后继续 begin_login_mfa_flow（现状不变，MFA 流程无需改动）
+1. Load the user (unchanged)
+2. Status and lock checks (unchanged)
+3. Check whether the user is managed by an enabled LDAP source
+   ├─ yes → validate with an LDAP bind (8.2)
+   └─ no  → local argon2 verification (unchanged)
+4. On success continue to begin_login_mfa_flow (unchanged; MFA needs no changes)
 ```
 
-这同时修掉了 §15 的空密码缺陷：仅有非托管用户才会走到 argon2 分支，且空 hash 应返回 `401` 而非 `500`。
+This also fixes the empty-password defect in §15: only unmanaged users reach the
+argon2 branch, and an empty hash must return `401`, not `500`.
 
-**已实现（P2）**：
+**Implemented (P2)**:
 
-| 组件 | 位置 | 行为 |
+| Component | Location | Behaviour |
 |---|---|---|
-| 路径选择 | `directory::auth::resolve` | 单条 SQL 选出**最低 `priority` 的启用中 LDAP 源**（与 `managing_source`、同步规划器同一套归属规则）。无 link / 源被停用 / 源非 `ldap` / `external_dn` 缺失或空白 → `Local` |
-| bind 校验 | `directory::auth::verify` → `ldap::bind_as` | 用落库的 `external_dn` 一次 bind；连接 5s / 操作 10s；结束必 unbind |
-| 结果三态 | `directory::auth::Credential` | `Valid` / `Invalid { counts_toward_lockout }` / `Unavailable { source_code, detail }` |
-| 不可用 | 503 `directory unavailable` | 先写 `auth.directory_unavailable` 审计（含 source 与 error）再返回；**不**回退本地密码 |
-| 指标 | `metrics.rs` | `signet_directory_login_failures_total`、`signet_directory_unavailable_total`，与本地失败分开计数 |
+| Path selection | `directory::auth::resolve` | One SQL query picks the **lowest-`priority` enabled LDAP source** (the same ownership rule as `managing_source` and the planner). No link / source disabled / source not `ldap` / `external_dn` missing or blank → `Local` |
+| Bind verification | `directory::auth::verify` → `ldap::bind_as` | One bind with the stored `external_dn`; connect 5s / operation 10s; always unbind |
+| Three-state result | `directory::auth::Credential` | `Valid` / `Invalid { counts_toward_lockout }` / `Unavailable { source_code, detail }` |
+| Unavailable | 503 `directory unavailable` | Writes `auth.directory_unavailable` (with source and error) before returning; **no** local-password fallback |
+| Metrics | `metrics.rs` | `signet_directory_login_failures_total`, `signet_directory_unavailable_total`, counted apart from local failures |
 
-> **配置损坏的处理**：源 config 解析失败时 `resolve` 返回错误（→500）而不是静默降级到本地。目录用户没有本地密码，伪装成"密码错误"会把人送去重置一个根本不存在的密码。源 config 只在保存时校验，所以这种状态意味着库被外部改坏了。
+> **Corrupt configuration**: a source whose config fails to parse makes `resolve`
+> return an error (→500) rather than silently falling back to local. Directory
+> users have no local password, and pretending "wrong password" would send them
+> to reset a password that does not exist. Configs are validated on save, so this
+> state means the database was edited externally.
 
-> **本地密码的写入被拦在 `password::set_user_password`**：该函数现在是唯一的收口点，四个调用方（自助改密、管理员重置、邮件重置、强制改密）都在此被挡住。理由不是"目录用户本地密码无意义"，而是它**有害**——bind 直通会让它永远不被使用，而源一旦被停用/删除它就变成可用凭据。判定用 `directory::enabled_managing_source`（只看启用中的源），这是有意与 `managing_source` 不同的语义：**关闭一个源必须把账号交回本地管理**，否则下线一个目录就等于永久锁死它的用户。`/password-reset/request` 同样对托管账号跳过发信，保持恒 200 防枚举。
+> **Local password writes are blocked in `password::set_user_password`**: that
+> function is now the single choke point, so all four callers (self-service
+> change, admin reset, email reset, forced change) are stopped there. The reason
+> is not that a directory user's local password is meaningless but that it is
+> **harmful**: bind-through means it is never used, while disabling or deleting
+> the source turns it into a usable credential. The check uses
+> `directory::enabled_managing_source` (enabled sources only), deliberately a
+> different semantic from `managing_source`: **disabling a source must hand the
+> account back to local management**, otherwise retiring a directory would
+> permanently lock its users out. `/password-reset/request` likewise skips
+> sending for managed accounts while staying 200 to prevent enumeration.
 
-### 8.2 bind 校验
+### 8.2 Bind verification
 
-- **用同步时落库的 `directory_entries.external_dn`** 直接 bind，避免每次登录都"服务账号搜索 + bind"两步（降低延迟，且不需要给登录路径搜索权限）；
-- 连接串使用配置里的 `ldaps://`；LDAPS 是硬要求；
-- 密码不落库、不写日志、不缓存；
-- 成功后重置本地 `failed_login_attempts` / `locked_until`，然后进入既有 MFA 流程。
+- Bind directly with the **`directory_entries.external_dn` stored at sync time**,
+  avoiding a "service-account search + bind" pair per sign-in (lower latency, and
+  the sign-in path needs no search permission);
+- Use the configured `ldaps://` URL; LDAPS is mandatory;
+- The password is never stored, logged or cached;
+- On success reset local `failed_login_attempts` / `locked_until`, then continue
+  into the existing MFA flow.
 
-**空密码在本地就拒掉，不发起连接。** `simple_bind(dn, "")` 按 RFC 4513 §5.1.2 是 *unauthenticated bind*（请对方把自己当匿名处理），而接受这种形式的服务器（例如开着 `allow bind_anon_cred` 的 OpenLDAP）会返回 `success` —— `verify` 会把 success 读成"凭据正确"，于是**凭一个空密码拿到 DN 对应用户的会话**，DN 还是我们自己 link 表里的。空密码的请求说的是"我没有密码"，不是"我要匿名"，因此长度 0 时直接返回 `Credential::Invalid { counts_toward_lockout: true }` 与 401：这是**我们**做的判定（不是目录做的），所以按 §8.4 记本地账，与本地密码路径一致。只拦零长度——纯空白是"在试一个真实密码"，该由目录裁决。同一形态的 `LdapConnector::connect` 里服务账号 bind 的 `password.unwrap_or("")` 也改为报错而非退化成匿名搜索（`requires_credential` 早就把"LDAP 源必须配凭据"写成了规矩，理由是匿名 bind 会静默返回缩减过的视图）。
+**An empty password is refused locally without opening a connection.**
+`simple_bind(dn, "")` is an *unauthenticated bind* per RFC 4513 §5.1.2 (asking the
+server to treat it as anonymous), and servers that accept it (e.g. OpenLDAP with
+`allow bind_anon_cred`) return `success` — `verify` would read that as "valid
+credentials" and **grant a session for the DN's user on an empty password**, with
+the DN coming from our own link table. An empty password says "I have no
+password", not "I want to be anonymous", so a zero length returns
+`Credential::Invalid { counts_toward_lockout: true }` and 401: **our** decision
+(not the directory's), so §8.4 books it locally like the local password path.
+Only zero length is blocked — pure whitespace is "trying a real password" and
+belongs to the directory. The same shape in `LdapConnector::connect` for the
+service-account bind (`password.unwrap_or("")`) now errors instead of degrading
+into an anonymous search (`requires_credential` already made "LDAP sources need a
+credential" the rule, because anonymous binds silently return a reduced view).
 
-### 8.3 失败与故障语义（D6 fail closed）
+### 8.3 Failure and outage semantics (D6 fail closed)
 
-| 情况 | 行为 |
+| Case | Behaviour |
 |---|---|
-| bind 返回 invalid credentials | `401 invalid email or password`；累加审计与指标 |
-| LDAP 不可达 / 超时 | `503 {"error":"directory unavailable"}` + `tracing::error!`；**不回退**本地密码 |
-| DN 缺失（未同步到 `external_dn`） | 视为未托管 → 走本地校验；若同时无本地密码 → `401` |
+| bind returns invalid credentials | `401 invalid email or password`; audit and metric increments |
+| LDAP unreachable / timed out | `503 {"error":"directory unavailable"}` + `tracing::error!`; **no** local fallback |
+| DN missing (never synced to `external_dn`) | Treated as unmanaged → local verification; with no local password → `401` |
 
-超时建议：连接 5s、操作 10s（可配）；**必须**设超时，否则 LDAP 挂起会拖垮登录线程池。
+Timeouts: connect 5s, operation 10s (configurable); timeouts are **mandatory**, or
+a hung LDAP server exhausts the login thread pool.
 
-### 8.4 锁定策略（需确认，见 §17）
+### 8.4 Lockout policy (to confirm, §17)
 
-本地 `failed_login_attempts` 与 AD 自身锁定策略会**叠加**，可能把用户锁死且互相掩盖原因。建议 v1：
+Local `failed_login_attempts` and AD's own lockout policy **stack**, potentially
+locking a user out with the causes masking each other. v1 recommendation:
 
-- LDAP 认证**失败不计入**本地锁定（交由目录侧的锁定策略）；
-- 但**仍记录**审计 `auth.login.failed` 与 Prometheus 指标，保留暴力破解可见性。
+- LDAP authentication **failures do not count** towards local lockout (the
+  directory's own policy governs);
+- But `auth.login.failed` audits and Prometheus metrics are **still recorded**,
+  preserving brute-force visibility.
 
-**已按此实现**：`Credential::Invalid { counts_toward_lockout: false }` 表达这一决定，登录处理器据此跳过 `failed_login_attempts` 自增与本地锁定分支，审计与指标照写（指标走 `signet_directory_login_failures_total`，与本地失败分开）。判定放在返回类型里而不是调用处，是为了让"这个失败该不该记本地账"成为一个必须显式回答的问题。
+**Implemented that way**: `Credential::Invalid { counts_toward_lockout: false }`
+expresses the decision, and the handler skips the `failed_login_attempts`
+increment and the local lockout branch while still writing audits and metrics
+(`signet_directory_login_failures_total`, separate from local). The decision lives
+in the return type rather than the call site so "should this failure count
+locally?" must be answered explicitly.
 
 ---
 
-## 9. 命令行
+## 9. Command line
 
-已实现于 `directory/cli.rs`。引入 CLI 对 `main.rs` 是行为变更（此前完全不解析 argv、纯 env 配置），因此**无子命令时保持原行为**（读 env → 起服务），既有容器 command 与部署脚本不受影响。
+Implemented in `directory/cli.rs`. Adding a CLI is a behaviour change for
+`main.rs` (which previously parsed no argv and was env-only), so **no subcommand
+keeps the old behaviour** (read env → serve), leaving container commands and
+deploy scripts untouched.
 
-### 9.1 命令
+### 9.1 Commands
 
 ```bash
 signet sync run     --source <code> [--dry-run] [--json] [--limit <n>]
-signet sync ldap    --source <code> [--dry-run] [--json] [--limit <n>]   # run 的别名
-signet sync runs    --source <code> [--json] [--limit <n>]               # 默认 20 条
+signet sync ldap    --source <code> [--dry-run] [--json] [--limit <n>]   # alias of run
+signet sync runs    --source <code> [--json] [--limit <n>]               # default 20
 signet sync sources [--json]
-signet serve                                                             # 等同无子命令
+signet serve                                                             # same as no subcommand
 ```
 
-`run` 的 connector 由数据源的 `kind` 决定（`ldap` / `http_json`），同一命令驱动两类源。子命令名随 P4 从 `ldap` 改为 `run`，`ldap` 以 `#[command(visible_alias = "ldap")]` 保留为别名，既有脚本无需修改。
+`run`'s connector comes from the source's `kind` (`ldap` / `http_json`); one
+command drives both. The subcommand was renamed from `ldap` to `run` in P4, with
+`ldap` kept as `#[command(visible_alias = "ldap")]` so existing scripts work
+unchanged.
 
-`--limit` 语义不只是"少跑几条"：**它同时跳过"上游缺失即 disable"的对账**——只看到一个片段的快照，无法区分"已删除"与"排在 limit 之后"。因此有限跑动的报告会打上 `reconciled: false` 并显式提示，绝不会因为截断而误停用用户。
+`--limit` is not just "run fewer": **it also skips the "missing upstream means
+disable" reconciliation** — a truncated snapshot cannot distinguish "deleted"
+from "beyond the limit". A limited run therefore reports `reconciled: false` with
+an explicit warning, and never disables users because of truncation.
 
-### 9.2 典型用法
+### 9.2 Typical usage
 
 ```bash
-# 首次接目录：只算差异、不写库，先看会新增/更新/停用哪些人
+# First connection: compute the diff only, see who would be created/updated/disabled
 signet sync run --source corp-ldap --dry-run
 
-# 确认无误后正式跑
+# Commit the run once it looks right
 signet sync run --source corp-ldap
 
-# 只抽样验证属性映射是否正确（注意：不做缺失对账）
+# Sample-check the attribute mapping (note: no absence reconciliation)
 signet sync run --source corp-ldap --limit 50
 
-# 排障：看最近运行历史 / 列出已配置的源
+# Troubleshooting: recent run history / configured sources
 signet sync runs --source corp-ldap
 signet sync sources
 ```
 
-### 9.3 `--dry-run` 的边界
+### 9.3 `--dry-run` boundaries
 
-`--dry-run` 是 LDAP 首次上线的安全带，只计算 created/updated/disabled/conflict 的预期结果并输出差异，**不写库**。它同时**不开 run 记录**（`status` CHECK 里没有 `dry_run`，记录一次"什么都没写"的运行会让历史说谎），因此 `runs` 里看不到 dry run。
+`--dry-run` is the seatbelt for the first LDAP rollout: it computes expected
+created/updated/disabled/conflict counts and prints the diff, **writing nothing**.
+It also **opens no run record** (the `status` CHECK has no `dry_run`, and
+recording a run that wrote nothing would make the history lie), so dry runs never
+appear in `runs`.
 
-### 9.4 输出
+### 9.4 Output
 
 ```bash
 $ signet sync sources
@@ -580,147 +820,223 @@ id                                     started (UTC)        status    created up
 3f6c1e2a-…                             2026-09-20 15:40:02  succeeded       2       1        0         0
 ```
 
-`run` 的文本报告含 `source / mode / status / scanned + 各计数`，随后逐条列出 noteworthy 变更（每条附 `reason`）；超过 50 条时截断并提示改用 `--json`（`--json` 始终是完整列表）。
+`run`'s text report contains `source / mode / status / scanned + counts`, then
+the noteworthy changes with a `reason` each; beyond 50 entries it truncates and
+suggests `--json` (`--json` always returns the full list).
 
-`disable` 的 `reason` 有两个取值（§6.3）：`absent_upstream`（目录已不再列出）与 `out_of_scope`（仍在目录里，但掉出该源的作用域，即调岗/域变更）。二者是运维区分「离职」与「调岗」的唯一依据，因此以原样 token 输出，便于 `grep`/告警规则匹配。
+A `disable` `reason` has two values (§6.3): `absent_upstream` (no longer listed)
+and `out_of_scope` (still listed but outside the source's scope — transfer or
+domain change). They are the only way to tell "left" from "transferred", so they
+are printed as raw tokens for `grep`/alerting rules.
 
-`runs` 文本表只列 7 列；`--json` 返回 `RunRow` 全字段（含 `trigger`、`scanned`、`skipped_count`、`error_count`、`stats`），需要区分 `cli` / `schedule` / `manual` 触发时用 `--json`。
+The `runs` text table shows only 7 columns; `--json` returns all `RunRow` fields
+(including `trigger`, `scanned`, `skipped_count`, `error_count`, `stats`) — use
+`--json` to distinguish `cli` / `schedule` / `manual` triggers.
 
-`status` 取值：`running` / `succeeded` / `partial`（跑完但有 conflict 或 entry error）/ `failed`。
+`status` values: `running` / `succeeded` / `partial` (finished with conflicts or
+entry errors) / `failed`.
 
-### 9.5 退出码与失败语义
+### 9.5 Exit codes and failure semantics
 
-- 成功 `0`；任何错误 `1`（`main` 返回 `anyhow::Result`），错误摘要同时以 `Error: …` 打到输出，便于 CI 判定。
-- 源不存在 / 配置解析失败：`load_source` 在 `open_run` **之前**执行，因此 `Error: directory source not found: <code>` 之类只终止进程，**不落 run 记录、也不写审计**（`source::get_by_code` → `SourceConfig::parse`）。
-- 连接失败等规划期错误：发生在 `open_run` **之后**，会把该 run 以 `failed` + `error` 收尾，并写一条 `directory.sync.failed` 审计（dry run 的 `run_id` 为 `null`）。留下失败记录是有意为之——否则进程被杀会永久占住"运行中"。
-- **并发保护**：迁移 `025` 的单运行唯一索引保证一个源同一时刻只有一条 `running`。与 dashboard 手动触发或调度器抢跑时，后来者会拿到 `another sync run for this source is already in progress`（HTTP 侧为 409），而不是两次同步交错。运行中的 run 每 60 秒写心跳；只有心跳超过 `STALE_RUN_MINUTES`（120 分钟）未更新的 `running` 才会被标记为 `abandoned by a previous process` 再开新 run——长任务不会因为跑得久而误判，进程被杀也不会永久卡住源。运行历史默认保留 90 天。
+- Success `0`; any error `1` (`main` returns `anyhow::Result`), with an `Error: …`
+  summary on the output so CI can decide.
+- Missing source / config parse failure: `load_source` runs **before**
+  `open_run`, so `Error: directory source not found: <code>` merely terminates the
+  process — **no run record, no audit** (`source::get_by_code` →
+  `SourceConfig::parse`).
+- Connection failures and other planning errors happen **after** `open_run`, so
+  the run closes as `failed` + `error` and a `directory.sync.failed` audit is
+  written (a dry run has `run_id = null`). Leaving the failure record is
+  deliberate — otherwise a killed process would hold "running" forever.
+- **Concurrency**: migration `025`'s single-run unique index allows one `running`
+  row per source. Racing the dashboard trigger or the scheduler, the later caller
+  gets `another sync run for this source is already in progress` (HTTP 409)
+  instead of two interleaved syncs. A running run heartbeats every 60 seconds;
+  only a `running` row whose heartbeat is older than `STALE_RUN_MINUTES` (120
+  minutes) is marked `abandoned by a previous process` before a new run starts —
+  long tasks are not misjudged for running long, and a killed process never wedges
+  the source. Run history is kept for 90 days by default.
 
-### 9.6 运行前提（重要）
+### 9.6 Prerequisites (important)
 
-CLI **不是**轻量客户端：它复用 `build_state`，因此启动时会做与 server 完全相同的一套初始化——
+The CLI is **not** a lightweight client: it reuses `build_state` and therefore
+performs the same initialisation as the server:
 
-- 连接 `SIGNET_DATABASE_URL` 并**执行迁移**；
-- 加载或**自动生成** `jwt_private.pem` 与 `encryption.key`；
-- 一次性重加密 webhook secret（失败即致命，不会静默降级为不签名）；
-- 修剪过期审计日志、按需创建 SCIM token、构造 WebAuthn 依赖方。
+- Connects to `SIGNET_DATABASE_URL` and **runs migrations**;
+- Loads or **auto-generates** `jwt_private.pem` and `encryption.key`;
+- Re-encrypts webhook secrets once (failure is fatal, never silently downgrading
+  to unsigned);
+- Prunes expired audit logs, seeds the SCIM token when needed, and builds the
+  WebAuthn relying party.
 
-由此引出两条运维硬要求：
+Two operational requirements follow:
 
-1. **DB、密钥路径、`SIGNET_WEBAUTHN_RP_ID` / `RP_ORIGIN` 必须与 server 一致**。用不同的 `SIGNET_ENCRYPTION_KEY_PATH` 跑 CLI 会就地生成一份**新**密钥文件，然后因解不开已有密文而失败；即使侥幸跑通，也会留下一份与 server 不一致的密钥产物。建议通过同一份 env（或容器内同 cwd）执行。
-2. `dotenvy` 会读取**当前工作目录**的 `.env`。在容器外手工执行时务必 `cd` 到装载 env 的目录，否则会静默退回内置默认值。
+1. **The database, key paths and `SIGNET_WEBAUTHN_RP_ID` / `RP_ORIGIN` must match
+   the server.** Running the CLI with a different `SIGNET_ENCRYPTION_KEY_PATH`
+   generates a **new** key file in place and then fails to decrypt existing
+   ciphertext; even if it happens to work, it leaves a key artifact inconsistent
+   with the server. Use the same env (or the same cwd inside the container).
+2. `dotenvy` reads `.env` from the **current working directory**. When running by
+   hand outside the container, always `cd` to the directory holding the env file,
+   or it silently falls back to built-in defaults.
 
-生产环境的执行方式（容器内 `exec`）见 [deploy.md §4](./deploy.md#4-容器内执行目录同步-cli)。
+Production execution (container `exec`) is in
+[deploy.md §4](./deploy.md#4-running-the-directory-sync-cli-inside-the-container).
 
-### 9.7 日志与管道
+### 9.7 Logs and pipelines
 
-日志走 **stdout**（与报告同一流），直接 `| jq` 会被 INFO 行污染。管道消费时显式关日志：
+Logs go to **stdout** (the same stream as the report), so a bare `| jq` is
+polluted by INFO lines. Disable logs when consuming a pipe:
 
 ```bash
 RUST_LOG=off signet sync sources --json | jq -r '.[].code'
 ```
 
-日志本身遵循 [日志规范](../.cursor/rules/logging.mdc)：静态消息 + 结构化字段。`APP_ENV=production` 时为单行 JSON。
+Logs follow the [logging rules](../.cursor/rules/logging.mdc): static messages +
+structured fields. `APP_ENV=production` switches to single-line JSON.
 
 ---
 
-## 10. 定时调度与运行历史
+## 10. Scheduling and run history
 
-现状：**没有任何**后台/定时任务设施，全仓库只有 `webhooks.rs` 两处 request-scoped `tokio::spawn`。
+Today there is **no** background/scheduled-task facility; the only request-scoped
+`tokio::spawn`s are two in `webhooks.rs`.
 
-设计：
+Design:
 
-- 在 `build_app` 中 `tokio::spawn` 一个调度循环，`tokio::time::interval` 每分钟 tick；
-- 每次 tick 寻找 `enabled = TRUE AND interval_minutes IS NOT NULL` 且到期的源；
-- **多副本安全**：执行前用 `pg_try_advisory_lock` 抢源级锁（key 由 `source_id` 派生），抢不到就跳过。否则每个副本都会跑一遍同步；
-- v1 用 `interval_minutes`（整数）而非 cron 表达式，避免引入 cron 解析依赖；后续需要再升级；
-- 运行历史写 `directory_sync_runs`，并提供查询 API：
+- Spawn a scheduler loop in `build_app`, ticking every minute with
+  `tokio::time::interval`;
+- Each tick finds sources with `enabled = TRUE AND interval_minutes IS NOT NULL`
+  that are due;
+- **Replica safety**: take a source-level `pg_try_advisory_lock` (key derived from
+  `source_id`) before running and skip when it is held; otherwise every replica
+  runs the sync;
+- v1 uses `interval_minutes` (integer) rather than cron expressions, avoiding a
+  cron-parsing dependency; upgrade later if needed;
+- Run history is written to `directory_sync_runs` and exposed through:
 
 ```text
-GET  /api/v1/admin/directory/sources                        # 列表
-POST /api/v1/admin/directory/sources                        # 新建（凭据加密入库）
-PUT  /api/v1/admin/directory/sources/{code}                 # 更新
-POST /api/v1/admin/directory/sources/{code}/enabled         # 启停
-POST /api/v1/admin/directory/sources/{code}/sync            # 手动触发（异步，返回 run id）
-GET  /api/v1/admin/directory/sources/{code}/runs            # 运行历史
-GET  /api/v1/admin/directory/sources/{code}/runs/{id}       # 单次详情
+GET  /api/v1/admin/directory/sources                        # list
+POST /api/v1/admin/directory/sources                        # create (credential encrypted)
+PUT  /api/v1/admin/directory/sources/{code}                 # update
+POST /api/v1/admin/directory/sources/{code}/enabled         # enable/disable
+POST /api/v1/admin/directory/sources/{code}/sync            # manual trigger (async, returns a run id)
+GET  /api/v1/admin/directory/sources/{code}/runs            # run history
+GET  /api/v1/admin/directory/sources/{code}/runs/{id}       # one run's detail
 ```
 
-权限：全部 `require_admin_role`（凭据属敏感配置）。
+Permissions: all require `require_admin_role` (credentials are sensitive).
 
-**已实现（P3）**：`directory::scheduler`（tick 60s / `MissedTickBehavior::Delay` / 跳过第一个立即 tick）+ `model::due_sources`。「到期」的判定全部落在这一条 SQL 里：`enabled`、`interval_minutes IS NOT NULL`、无**存活的** running run、距最近一次 `started_at` 已满 interval。
+**Implemented (P3)**: `directory::scheduler` (60-second tick /
+`MissedTickBehavior::Delay` / skipping the first immediate tick) plus
+`model::due_sources`. "Due" is decided in one SQL statement: `enabled`,
+`interval_minutes IS NOT NULL`, no **live** running run, and at least the
+interval elapsed since the most recent `started_at`.
 
-> **对 §10 的一处偏离：未使用 `pg_try_advisory_lock`。** 原因是会话级 advisory lock 属于**获取它的那个连接**，而本仓库的连接来自池、按查询借还——"加锁 → spawn 任务 → 解锁"会跨连接，锁根本锁不住，而一把锁不住的锁比没有锁更危险，因为读代码的人会以为有保护。
+> **One deviation from §10: no `pg_try_advisory_lock`.** A session-level advisory
+> lock belongs to the **connection that took it**, and this repository's
+> connections come from a pool, borrowed and returned per query — "lock → spawn a
+> task → unlock" spans connections, so the lock does not lock anything, and a lock
+> that does not lock is worse than none because readers assume protection.
 >
-> 真正提供互斥的是迁移 `025` 的部分唯一索引（`directory_sync_runs (source_id) WHERE status = 'running'`）：`begin_run` 在**所有副本、所有触发方式**（schedule/manual/cli）下都只能插入一行、且插入发生在连接目录**之前**。输掉竞争的副本拿到 `Conflict`，不写任何东西。数据库约束不会被忘记。
+> The real mutex is migration `025`'s partial unique index
+> (`directory_sync_runs (source_id) WHERE status = 'running'`): `begin_run` can
+> insert exactly one row across **all replicas and all trigger modes**
+> (schedule/manual/cli), and the insert happens **before** connecting to the
+> directory. The losing replica gets `Conflict` and writes nothing. A database
+> constraint cannot be forgotten.
 >
-> **另一个偏离（且是修 bug）**：`due_sources` 把"存活"定义为 `started_at` 在 `STALE_RUN_MINUTES` 之内。若把任何 `running` 都当作阻塞，一次崩溃留下的 run 会让该源**永远不再被调度**——恢复逻辑 `fail_stale_runs` 只在 `open_run` 里执行，而 `open_run` 只在有东西调用它时才到达。两个常量因此共享 `engine::STALE_RUN_MINUTES`：一旦漂移，要么永久卡死，要么和正在跑的同步撞车。`tests/directory_scheduler.rs` 用 `a_crashed_run_is_recovered_instead_of_wedging_the_source_forever` 钉住这一点。
+> **Another deviation, and a bug fix**: `due_sources` defines "live" as
+> `started_at` within `STALE_RUN_MINUTES`. Treating any `running` row as blocking
+> would let one crashed run stop the source **forever** — the recovery path
+> `fail_stale_runs` only runs inside `open_run`, and `open_run` is only reached
+> when something calls it. Both constants therefore share
+> `engine::STALE_RUN_MINUTES`: if they drift, the source either wedges forever or
+> collides with a live sync. `tests/directory_scheduler.rs` pins this with
+> `a_crashed_run_is_recovered_instead_of_wedging_the_source_forever`.
 
 ---
 
-## 11. 审计与可观测性
+## 11. Audit and observability
 
-### 11.1 审计事件
+### 11.1 Audit events
 
-| 事件 | 粒度 |
+| Event | Granularity |
 |---|---|
-| `directory.source.created` / `.updated` / `.deleted` / `.enabled` / `.disabled` | 每次操作 |
-| `directory.sync.started` / `.finished` / `.failed` | 每次运行（含 trigger、统计、耗时） |
-| `directory.user.created` | **逐条** |
-| `directory.user.disabled` | **逐条**（`detail.reason = absent_upstream` / `out_of_scope`） |
-| `directory.user.enabled` | **逐条**，且**仅在账号真的恢复 active 时**（§6.3） |
-| `directory.user.updated` | **仅汇总**（计数），不逐条 |
-| `directory.conflict` | **逐条** |
-| `directory.managed_write_blocked` | 每次被拒的本地写入（`detail = { source, field }`） |
+| `directory.source.created` / `.updated` / `.deleted` / `.enabled` / `.disabled` | Per operation |
+| `directory.sync.started` / `.finished` / `.failed` | Per run (with trigger, counts, elapsed) |
+| `directory.user.created` | **Per entry** |
+| `directory.user.disabled` | **Per entry** (`detail.reason = absent_upstream` / `out_of_scope`) |
+| `directory.user.enabled` | **Per entry**, and **only when the account really becomes active** (§6.3) |
+| `directory.user.updated` | **Summary only** (counts), not per entry |
+| `directory.conflict` | **Per entry** |
+| `directory.managed_write_blocked` | Per refused local write (`detail = { source, field }`) |
 
-SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不是每个受影响的行一条 —— IdP 替换一个 500 人的组是**一个**动作，500 条事件只会把它埋掉：
+On the SCIM push side (§14) the granularity is **one event per request**, not per
+affected row — an IdP replacing a 500-person group is **one** action, and 500
+events would bury it:
 
-| 事件 | 触发 |
+| Event | Trigger |
 |---|---|
 | `scim.user.create` | `POST /Users` |
-| `scim.user.update` | `PUT`/`PATCH` **且确实改动了托管属性**（`detail.changed` 列出改了哪些，`detail.via` = `put` / `replace active` / `remove active`） |
-| `scim.user.enabled` / `scim.user.disabled` | `active` 发生**跃迁**时（`detail.via` 说明是哪种拼写） |
-| `scim.user.delete` | `DELETE /Users`（实际是停用，见 §14.1） |
-| `scim.group.create` / `.update` / `.delete` | 组的三类写入（`update` 的 `detail.outcome` 给出成员增删计数） |
+| `scim.user.update` | `PUT`/`PATCH` **that actually changed managed attributes** (`detail.changed` lists them; `detail.via` = `put` / `replace active` / `remove active`) |
+| `scim.user.enabled` / `scim.user.disabled` | When `active` **transitions** (`detail.via` says which spelling) |
+| `scim.user.delete` | `DELETE /Users` (actually a disable, §14.1) |
+| `scim.group.create` / `.update` / `.delete` | The three group writes (`update`'s `detail.outcome` reports member add/remove counts) |
 
-> **幂等推送不记账**。合规客户端每次轮询都会重发整个资源，若"有请求就记一条"，运维要找的那几个时间戳会被 IdP 的轮询周期淹没；同样地，一个反复重发 `active: false` 的客户端并没有做出新决定。所以 `update` 只在 `changed` 非空时记，enable/disable 只在**跃迁**时记 —— 与上面 `directory.user.enabled` 的判据是同一个道理。
+> **Idempotent pushes are not audited.** A compliant client resends the whole
+> resource on every poll; recording one event per request would drown the few
+> timestamps an operator looks for in the polling period — and a client resending
+> `active: false` has not made a new decision. So `update` is recorded only when
+> `changed` is non-empty, and enable/disable only on **transitions** — the same
+> rule as `directory.user.enabled` above.
 
-> ⚠️ **必须处理 webhook 扇出**：`audit.rs:107` 对**每条**审计事件无条件调用 `webhooks::dispatch`，且**不重试**。一次 10 万用户的全量同步若逐条审计，会产生 10 万条审计 + 10 万次 webhook 投递。因此：
-> - `updated` 只汇总不逐条；
-> - 为同步事件增加扇出抑制（如 `directory_sources.config.webhook_events = "summary"`），或按 run 聚合为单条 `directory.sync.finished` 推送。
+> ⚠️ **Webhook fan-out must be handled**: `audit.rs:107` unconditionally calls
+> `webhooks::dispatch` for **every** audit event, with **no retry**. A full sync of
+> 100k users audited per entry means 100k audit rows + 100k webhook deliveries.
+> Therefore:
+> - `updated` is summarised, not per entry;
+> - add fan-out suppression for sync events (e.g.
+>   `directory_sources.config.webhook_events = "summary"`), or aggregate per run
+>   into a single `directory.sync.finished` push.
 
-### 11.2 指标
+### 11.2 Metrics
 
 - `directory_sync_runs_total{source,status}`
 - `directory_sync_duration_seconds{source}`
 - `directory_sync_entries_total{source,action}`
 - `directory_sync_conflicts_total{source}`
-- `directory_bind_total{result}`（登录 bind 成功/失败/不可达）
+- `directory_bind_total{result}` (sign-in bind success/failure/unreachable)
 
-### 11.3 日志
+### 11.3 Logs
 
-遵循 [日志规范](../.cursor/rules/logging.mdc)：静态消息 + 结构化字段（`source_code`、`run_id`、`scanned`、`created`、`updated`、`disabled`、`conflicts`、`elapsed_ms`）；错误放 `error` 字段。**禁止**记录密码、服务账号凭据、bind 密码。
+Follow the [logging rules](../.cursor/rules/logging.mdc): static messages +
+structured fields (`source_code`, `run_id`, `scanned`, `created`, `updated`,
+`disabled`, `conflicts`, `elapsed_ms`); errors in an `error` field. **Never** log
+passwords, service-account credentials or bind passwords.
 
 ---
 
-## 12. 安全
+## 12. Security
 
-| 项 | 要求 |
+| Item | Requirement |
 |---|---|
-| LDAP TLS | LDAPS + 强制证书校验（D4）；代码层不提供跳过校验的开关 |
-| 凭据存储 | 服务账号密码/Bearer token 一律经 `Encryptor`（AES-256-GCM）落库到 `credential_enc`；**不得**明文 |
-| 出站 SSRF | 新建统一出站模块：仅允许 `http(s)`、禁止跟随重定向、连接/整体超时、响应体大小上限、**阻断私网/回环/链路本地地址（含 DNS 解析后二次校验，防 rebinding）**。LDAP 本身不走 HTTP，但 HTTP JSON 源（P4）必须有，故在 P0 一并建立；同时把 `webhooks.rs:80` 与 federation 的 `issuer_url` 校验切到该校验 |
-| 目录账号权限 | 只读，最小授权（仅需读取用户与组子树） |
-| 提权防护 | 目录数据**永不**写 `users.role`；组只写 `directory_groups` |
-| 只读强制 | `admin` 接口按 §5 拒绝修改托管字段，返回 `403` 与明确原因 |
-| 冲突不接管 | 按 email 自动 claim 现有账号（尤其 admin/manager）在 v1 被明确禁止 |
-| 密码 | 不落库、不落日志、不缓存；bind 直通仅用原始提交密码 |
-| 顺带修复 | `webhooks.secret` 目前**明文**存储，而 SSO client secret / TOTP secret 均已加密 —— 应统一到 `Encryptor` |
+| LDAP TLS | LDAPS + certificate verification enforced (D4); the code exposes no skip-verification switch |
+| Credential storage | Service-account passwords / bearer tokens always go through `Encryptor` (AES-256-GCM) into `credential_enc`; **never** plaintext |
+| Outbound SSRF | A new unified outbound module: http(s) only, no redirect following, connect/total timeouts, response-size cap, **private/loopback/link-local addresses blocked (including a second check after DNS resolution, against rebinding)**. LDAP is not HTTP, but the HTTP JSON source (P4) needs it, so it is built in P0 and `webhooks.rs:80` plus federation's `issuer_url` validation switch to it |
+| Directory account permissions | Read-only, least privilege (read the user and group subtrees only) |
+| Privilege escalation | Directory data **never** writes `users.role`; groups write only `directory_groups` |
+| Read-only enforcement | Admin endpoints refuse managed-field edits per §5 with `403` and a clear reason |
+| Conflicts do not take over | Auto-claiming an existing account (especially admin/manager) by email is explicitly forbidden in v1 |
+| Passwords | Never stored, logged or cached; bind-through uses only the submitted password |
+| Incidental fix | `webhooks.secret` was **plaintext** while SSO client secrets and TOTP secrets were already encrypted — unify on `Encryptor` |
 
 ---
 
-## 13. 通用 HTTP JSON 源（P4）—— 已实现
+## 13. Generic HTTP JSON source (P4) — implemented
 
-配置（`kind = 'http_json'`，`config` 全部为显式点号路径，`deny_unknown_fields`）：
+Configuration (`kind = 'http_json'`; `config` uses explicit dotted paths and
+`deny_unknown_fields`):
 
 ```json
 {
@@ -740,29 +1056,66 @@ SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不�
 }
 ```
 
-- **鉴权**：`auth` 为 `"none"` / `"bearer"` / `{"basic": {"username": "..."}}`；密钥本身走 `credential_enc`（`Encryptor`，AES-256-GCM），**不落在 `config` 里**；`auth: none` 时不再强制要求凭据（`SourceConfig::requires_credential`，创建与更新走同一个判断）；
-- **字段映射**：`a.b[0].c` 形式的点号路径（支持 `["带.点的键"]` 与可选 `$.` 根标记）。路径语法错误（空段、未闭合括号/引号）不允许被当作"取不到值"——否则写错的映射会静默变成"目录为空"，而空目录会把该源管理的用户全部 disable（D3）；
-- **必须报错的失败**：`users_path` 不存在或不是数组 → 报错并带上路径名与命中值的 JSON 类型，**不返回空列表**；上游非 2xx → 只报状态码与去掉 query 的 URL，不回显 response body（可能是 HTML 错误页）；
-- **分页**：`none` / `page`（`?page=N&page_size=M`，起始页与参数名可配）/ `cursor`（从 `next_path` 取下一个游标，取不到即结束）。三者都由 `max_pages` 硬性封顶（配置上限 1000）：一个"永远还有下一页"的上游会让同步在持有服务账号令牌时无限循环；
-- **出站校验**：每页请求都重新走 `outbound::ensure_allowed`（DNS rebinding 意味着保存时的检查在抓取时已失效），不跟随重定向，响应体大小上限与连接/整体超时直接复用 P0 的 `outbound` 模块。保存时另做一次（`source::ensure_destination_allowed`），与 webhooks 同层：字面内网地址只有在 `SIGNET_OUTBOUND_ALLOW_PRIVATE` 打开时才允许保存；
-- **复用 P1 的映射与对账层**：connector 只负责"取数据"，产出 `Vec<UpstreamUser>` 后进入同一个 planner / apply / 运行历史 / 审计链路；`engine::fetch_and_plan` 是唯一按 kind 分派的位置；
-- **明确不做（v1）**：`method` 只支持 `GET`（POST body 没有配置面，故报错而非静默降级），不做通配符/过滤式的通用 JSONPath，不解析"组对象数组"（`{id,name}` 这类无法猜字段，宁可报"无组"也不臆造组名）；
-- **作用域**：`email_domains` / `department_path` + `department_values` 与 LDAP 侧语义完全一致（§7.2.1），包括"掉出作用域即 disable"和 `out_of_scope` 原因。区别只在取值来源：部门是一个 JSON 路径而不是目录属性。URL 里自带 query 的上游筛选（`?dept=eng`）属于上游自己的过滤，Signet 看不见也无法校验，因此**不替代**这里的谓词；
-- **增量**：仍未实现，退化为全量对账（与 LDAP 一致，见 §7.4）。
+- **Authentication**: `auth` is `"none"` / `"bearer"` / `{"basic": {"username": "..."}}`;
+  the secret itself lives in `credential_enc` (`Encryptor`, AES-256-GCM) and is
+  **never in `config`**; `auth: none` drops the credential requirement
+  (`SourceConfig::requires_credential`, the same decision on create and update);
+- **Field mapping**: dotted paths of the form `a.b[0].c` (supporting
+  `["keys.with.dots"]` and an optional `$.` root marker). Path syntax errors
+  (empty segments, unclosed brackets/quotes) must not be treated as "no value" —
+  otherwise a typo silently becomes an empty directory, and an empty directory
+  disables every user the source manages (D3);
+- **Failures that must error**: a missing or non-array `users_path` → error naming
+  the path and the JSON type actually found, **never an empty list**; a non-2xx
+  upstream → status code plus the URL without its query, never the response body
+  (it may be an HTML error page);
+- **Pagination**: `none` / `page` (`?page=N&page_size=M`, first page and parameter
+  names configurable) / `cursor` (next cursor from `next_path`, absent means
+  done). All are hard-capped by `max_pages` (config max 1000): an upstream that
+  always has another page would loop forever while holding the service token;
+- **Outbound validation**: every page re-runs `outbound::ensure_allowed` (DNS
+  rebinding means the save-time check is stale by fetch time), no redirects are
+  followed, and the response-size cap plus connect/total timeouts reuse P0's
+  `outbound` module. Saving also checks once
+  (`source::ensure_destination_allowed`), same layer as webhooks: a literal
+  private address may only be saved with `SIGNET_OUTBOUND_ALLOW_PRIVATE` on;
+- **Reuses P1's mapping and reconciliation layer**: the connector only fetches
+  data, producing `Vec<UpstreamUser>` into the same planner / apply / run history
+  / audit chain; `engine::fetch_and_plan` is the only place dispatching by kind;
+- **Explicitly not done (v1)**: `method` supports only `GET` (a POST body has no
+  configuration surface, so it errors rather than silently downgrading), no
+  wildcard/filter general JSONPath, and no parsing of "group object arrays"
+  (`{id,name}` cannot be guessed; report "no groups" rather than inventing names);
+- **Scope**: `email_domains` / `department_path` + `department_values` match the
+  LDAP semantics exactly (§7.2.1), including "out of scope means disable" and the
+  `out_of_scope` reason. The only difference is where values come from: a
+  department is a JSON path, not a directory attribute. Upstream filtering
+  embedded in the URL (`?dept=eng`) belongs to the upstream and is invisible to
+  Signet, so it **does not replace** the predicates here;
+- **Incremental**: still unimplemented; full reconciliation only (as with LDAP,
+  §7.4).
 
-Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致），HTTP JSON 表单覆盖 URL / 鉴权 / 分页；**映射部分现在由两种 pull kind 共用**，见 §13.1。
+Dashboard: creating a source lets you choose the kind (immutable afterwards,
+matching the API); the HTTP JSON form covers URL / auth / pagination; **the
+mapping part is now shared by both pull kinds** (§13.1).
 
 ---
 
-## 13.1 映射 UI 与预览端点（两种 pull kind 共用）
+## 13.1 Mapping UI and preview endpoint (shared by both pull kinds)
 
-### 13.1.1 为什么不是六个输入框
+### 13.1.1 Why not six input boxes
 
-原先的映射是一组孤立的文本框（`data.users` / `id` / `mail` / `entryUUID`…），它把三件事同时推给运维：要凭记忆知道上游长什么样、要能背出路径语法、写错了要等到**下一次同步**才知道。第四件事更危险：规范化过程（邮箱小写、显示名回落邮箱前缀、组排序去重）在表单里完全不可见，提交完并不知道库里会变成什么。
+The old mapping was a set of isolated text inputs (`data.users` / `id` / `mail` /
+`entryUUID`…), offloading three things at once onto the operator: remembering what
+the upstream looks like, memorising path syntax, and waiting until **the next
+sync** to discover a mistake. A fourth is worse: the normalisation (lowercased
+emails, display-name fallback to the email prefix, group sorting/dedup) is
+invisible in the form, so nobody knows what the database will contain.
 
-所以共用形态是：**一张共享的映射表 + 按 kind 换的"样例面板"**。两种 pull kind 回答的是同一组问题，只是答案的语法不同：
+The shared shape is therefore: **one mapping table + a kind-specific "sample
+pane"**. Both pull kinds answer the same questions with different syntax:
 
-| 映射行（`ROW_*`） | LDAP | HTTP JSON |
+| Mapping row (`ROW_*`) | LDAP | HTTP JSON |
 |---|---|---|
 | `scope` | `base_dn` + `user_filter` | `users_path` |
 | `external_id` | `external_id_attribute` | `external_id_path` |
@@ -771,20 +1124,38 @@ Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致�
 | `display_name` | `display_name_attribute` | `display_name_path` |
 | `groups` | `group_base_dn` + `group_filter` + `group_member_attribute` + `group_name_attribute` | `groups_path` |
 
-行定义在前端一处（`dashboard/src/lib/directoryMapping.ts`），加 kind 是改数据而不是再写一个表单。`scim` **不在**这张表里：它是 push 方向（§3），映射由 SCIM schema 固定，所以 UI 上明确它不是待配置的拉取源，而不是给它摆一张假映射表。
+The row definitions live in one frontend place (`dashboard/src/lib/directoryMapping.ts`);
+adding a kind changes data rather than writing another form. `scim` is **not** in
+that table: it is the push direction (§3), its mapping is fixed by the SCIM
+schema, and the UI says so explicitly instead of offering a fake pull mapping.
 
-### 13.1.2 样例：贴一次，然后点选
+### 13.1.2 Sample: paste once, then click
 
-不在第一批做"从上游拉取"，因此两个 kind 都用**粘贴**获得样例，各自贴合其数据形状：
+"Fetch a sample from the upstream" is not in the first batch, so both kinds take a
+**paste**, shaped to their data:
 
-- **JSON 是嵌套的 → 两棵树**。第一棵"列表在哪"（只有数组节点可点，数组以外的节点置灰并说明原因）；选定后第二棵"单条记录长什么样"，**以 entry 为根重新挂载**，因此它给出的路径自动是 entry 相对的（`id`，而不是 `data.users[0].id`——后者只对第一页第一条成立，换页即失效）。
-- **LDIF 是扁平的 → 属性清单**。`ldapsearch -LLL` 的输出就是 LDIF，正好是 LDAP 侧最常配错的东西（`uid` vs `sAMAccountName`、`entryUUID` vs `objectGUID`）的权威来源。解析在**后端**（`directory::ldif`），前端只渲染返回的 `targets`，避免第二份 LDIF 实现。
+- **JSON is nested → two trees.** The first is "where is the list" (only array
+  nodes are clickable; others are greyed with a reason); after choosing, the second
+  is "what does one record look like", **re-rooted at the entry**, so the paths it
+  yields are entry-relative (`id`, not `data.users[0].id` — the latter only holds
+  for the first row of the first page).
+- **LDIF is flat → an attribute list.** `ldapsearch -LLL` output is LDIF, exactly
+  the authoritative source for the LDAP settings most often wrong (`uid` vs
+  `sAMAccountName`, `entryUUID` vs `objectGUID`). Parsing is **server-side**
+  (`directory::ldif`); the frontend renders the returned `targets`, avoiding a
+  second LDIF implementation.
 
-`targets` 带出现次数与来源（`user` / `group` / `both`），多值属性标 `N values`。JSON 侧的"某个键在 12 条里有几条有"由前端按 entry 统计并显示为 `12/12` / `3/12` 徽标——存在于少数条目的字段会被高亮，这正是"只看第一条"必然看不出的问题。
+`targets` carry occurrence counts and provenance (`user` / `group` / `both`), and
+multi-valued attributes are tagged `N values`. The JSON side's "how many of 12
+entries have this key" is computed in the frontend per entry and shown as a
+`12/12` / `3/12` badge — keys present in only a few entries get highlighted, which
+"look only at the first record" can never reveal.
 
-**点击落点**：点击样例里的字段会填进**当前获得焦点的输入框**；没有焦点时不响应并显示提示。这样不需要"模态里再套一个选择器"。
+**Click target**: clicking a field in the sample fills the **currently focused
+input**; with no focus it does nothing and shows a hint. No modal-inside-a-modal
+picker.
 
-### 13.1.3 `POST /admin/directory/sources/preview-mapping`（admin-only，纯函数）
+### 13.1.3 `POST /admin/directory/sources/preview-mapping` (admin-only, pure)
 
 ```
 { kind, config, sample?, sync_groups?, offset? }
@@ -794,122 +1165,202 @@ Dashboard：新建数据源时可选 kind（创建后不可改，与 API 一致�
     warnings: [...], entry_count, offset, page_size, truncated }
 ```
 
-- **不碰数据库、不发网络请求**：`sample` 只在内存里参与计算，不落库、不写日志（它是一段真实目录数据）；
-- **与同步共用同一段代码**，因此预览不可能与真实运行分歧：LDAP 走 `ldap::upstream_from_entry`（`fetch_users` 也调它），HTTP JSON 走 `http_json::to_upstream`，规范化走 `plan::ManagedFields::from_upstream` + `plan::normalize_groups`；
-- **按行报错而不是一句"配置无效"**：`ok/resolved/total` 让 UI 把结论挂在出错的那一行上。`scope` 行对 LDAP 检查两件事：样例 DN 是否落在 `base_dn` 之下（`user_filter` 由服务器执行，本地无法判定，响应里明说），以及 §7.2.1 的作用域谓词是否**至少放行一条** —— 谓词是本地求值的，所以这一条能判定，而"匹配 0 条"直接判 `ok: false`（原因写在 `error` 里，并且指出它在真实运行里会禁用该源已管理的所有人）。未配置作用域时该行维持原语义（`resolved` = 落在 `base_dn` 之下的条目数），因此老配置的回显不变；
-- **不做的事也要说清**：未提供样例时 `fields` 为空 + 一条 warning，**不假装已校验**；没有组条目时明说组列未验证；`group_base_dn` 已配但 `sync_groups` 关闭时明确警告"组不会写入"；
-- **样例体积上限 1 MiB**（路由额外放宽 body limit 到 4 MiB，避免被框架的 413 抢先）；
-- **校验全量、回显分页**：`fields` 的 `resolved/total` 与 `targets` 的出现次数一律对**全部**样例条目计算（`total == entry_count`），只有 `rows` 按 `offset` 分页返回，每页 `page_size = 25`。二者刻意不共用同一个数：早期版本把校验也截断在前 50 条，于是同一块面板上同时出现 "120 entries" 和 "10/50" 两个分母，而那个小的分母把稀缺属性说得比实际更普遍（8% 显示成 20%）——这正是该计数要防的误判。分析是一次内存遍历，`MAX_SAMPLE_BYTES` 已封顶，因此"算全量"的代价可以忽略；
-- `offset` 超出范围时**回落到最后一页**而不是返回空表（两次防抖之间样例可能变短，空表会被读成"这个源没有用户"）。`page_size` 恒为页宽（容量），**不要用 `rows.len()` 步进**：条目可能因缺少 external id 而不产生行，末页也会短于页宽，用行数步进会与前后的窗口重叠；
-- `deny_unknown_fields`：拼错的请求字段（例如 `sample_json`）会 400，而不是静默变成"没样例、校验通过"；
-- **不写审计**：它不写库、不读库、不持有凭据，且在编辑映射时会被反复调用；真正需要审计的是配置的保存（`directory.source.*`）。样例同样**不持久化**。
+- **Touches no database and makes no network request**: `sample` is used in memory
+  only, never stored or logged (it is real directory data);
+- **Shares the same code as sync**, so the preview cannot diverge from a real run:
+  LDAP goes through `ldap::upstream_from_entry` (also used by `fetch_users`), HTTP
+  JSON through `http_json::to_upstream`, normalisation through
+  `plan::ManagedFields::from_upstream` + `plan::normalize_groups`;
+- **Per-row errors instead of one "invalid configuration"**: `ok/resolved/total`
+  let the UI pin the conclusion to the offending row. The `scope` row checks two
+  things for LDAP: whether the sample DN falls under `base_dn` (`user_filter` runs
+  server-side and cannot be judged locally — the response says so), and whether
+  §7.2.1's scope predicate **admits at least one** entry — the predicate is
+  evaluated locally, so this is decidable, and "0 matched" fails the row with
+  `ok: false` (the `error` explains that a real run would disable everyone the
+  source manages). With no scope configured the row keeps its original meaning
+  (`resolved` = entries under `base_dn`), so old configurations render unchanged;
+- **Things not done are stated too**: no sample → empty `fields` plus a warning,
+  **never a pretended validation**; no group entries → the group column is
+  explicitly unverified; `group_base_dn` set with `sync_groups` off → an explicit
+  "groups will not be written" warning;
+- **Sample cap 1 MiB** (the route raises the body limit to 4 MiB so the framework's
+  413 does not win first);
+- **Validate everything, page the output**: `fields`' `resolved/total` and
+  `targets`' counts are computed over **all** sample entries (`total ==
+  entry_count`); only `rows` are paged by `offset`, 25 per page. They deliberately
+  do not share a number: an earlier version truncated validation to the first 50
+  entries, so one panel showed two denominators, "120 entries" and "10/50", and the
+  smaller one made rare attributes look more common than they are (8% rendered as
+  20%) — exactly the misjudgement the count exists to prevent. Analysis is one
+  in-memory pass and `MAX_SAMPLE_BYTES` caps it, so the cost is negligible;
+- An out-of-range `offset` **falls back to the last page** instead of returning an
+  empty table (the sample may shrink between two debounced calls, and an empty
+  table reads as "this source has no users"). `page_size` is always the page width
+  (capacity); **never step by `rows.len()`**, because entries without an external
+  id produce no row and the last page is shorter than the width, so stepping by
+  row count would overlap windows;
+- `deny_unknown_fields`: a misspelled request field (e.g. `sample_json`) returns
+  400 instead of silently becoming "no sample, validation passed";
+- **No audit**: it writes nothing, reads no database, holds no credential, and is
+  called repeatedly while editing the mapping; what deserves auditing is the
+  saved configuration (`directory.source.*`). Samples are **not persisted**
+  either.
 
-### 13.1.4 一处刻意的近似
+### 13.1.4 One deliberate approximation
 
-LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_membership` 对 `group_base_dn` 做带 `group_filter` 的服务器端搜索）。粘贴的 LDIF 没有服务器可查，只能按"DN 落在 `group_base_dn` 之下且带 `group_member_attribute`"推定成员关系。
+In a real sync, LDAP groups come from the **group side** (`fetch_group_membership`
+runs a server-side search on `group_base_dn` with `group_filter`). A pasted LDIF
+has no server to query, so membership is inferred from "the DN falls under
+`group_base_dn` and carries `group_member_attribute`".
 
-因此组列在 LDIF 模式下标注**最佳推定**（`warnings`），其余五列是精确的。精确答案留给"从上游拉取样例"（不做 probe 就不做精确承诺）。
+The group column is therefore marked **best effort** in LDIF mode (`warnings`);
+the other five columns are exact. Exactness awaits "fetch the sample from the
+upstream" (no probe, no exact promise).
 
-### 13.1.5 预览与保存的一致性
+### 13.1.5 Preview and save consistency
 
-预览请求里的 `config` 直接取自**表单当前值**，而不是保存用的 `buildBody()`，因此输入框里有什么就预览什么，改动即时生效。
+The preview's `config` comes directly from **the form's current values**, not the
+save-time `buildBody()`, so it shows exactly what is typed and reacts to edits.
 
-之所以能这样做，是因为**后端放宽了校验**：未填写的映射键被报成"尚未设置"（该行 `ok = false`，`error = "… is not set yet"`），而不是"配置非法"。早期的严格校验要求 `display_name_attribute` 这类可选键必须存在，于是直接预览原始表单会因为一个空字符串而 400 —— 那样反而会逼着前端把预览接到 `buildBody()` 上。
+That works because **the backend relaxed validation**: unfilled mapping keys are
+reported as "not set yet" (that row `ok = false`, `error = "… is not set yet"`),
+not as "invalid configuration". The earlier strict validation required optional
+keys such as `display_name_attribute`, so previewing the raw form 400'd on an
+empty string — which would have pushed the frontend to preview
+`buildBody()` instead.
 
-一致性靠这一点保证：预览与保存读同一份表单值，而"保存会省略空的可选键"这件事由后端按"空即未设置"来解释，两边就不会出现"预览通过但保存失败"或反之。
+Consistency rests on this: preview and save read the same form values, and "save
+omits empty optional keys" is interpreted by the backend as "empty means unset",
+so neither "preview passes but save fails" nor the reverse can occur.
 
 ---
 
-## 14. SCIM inbound push（P5 概要）
+## 14. SCIM inbound push (P5 outline)
 
-现有 `/scim/v2` 是 SCIM **服务端**，路线正确，但需加固才能真正承接 Okta / Entra 的推送：
+The existing `/scim/v2` is a SCIM **server**, on the right track, but needs
+hardening to really take Okta / Entra pushes:
 
-| 问题 | 位置 | 待办 | 状态 |
+| Problem | Location | To do | Status |
 |---|---|---|---|
-| `role = 'user'` 违反 CHECK（只允许 admin/manager/member），**建用户必然 500** | `scim.rs` create_user | 改为 `'member'` | ✅ 已修（与 §15 #1 同一处） |
-| `PATCH` 请求体的操作列表名是 `operations`，而 RFC 7644 与各 IdP 发的是 `Operations`；serde 大小写敏感 + `#[serde(default)]` ⇒ 列表为空、**整个请求体被丢弃**，却回 200 与未改动的资源 | `scim.rs` `PatchUserBody` / `PatchGroupBody` | 接受两种拼写 | ✅ 已修（`rename = "Operations"`, `alias = "operations"`） |
-| 操作未读 `op`/`path`，一律按写入处理 ⇒ 组路由上 `remove` **反而把成员加上**；`{"op":"remove","path":"active"}` 无 `value` ⇒ 静默无效；Entra 的 `{"op":"Replace","path":"active","value":false}`（标量）⇒ 被接受并忽略 | `scim.rs` `patch_user` / `patch_group` | 按 RFC 7644 §3.5.2 解析 `op`/`path`，支持 `active`/`displayName`/`members` | ✅ 已修（语义抽成 `user_attrs_from_patch` / `group_member_changes` 纯函数） |
-| `PATCH /Groups` 只能加不能删 | `scim.rs` `patch_group` | 支持 add/remove/replace | ✅ 已修（含 Okta 的 `members[value eq "<id>"]` 过滤器形式） |
-| `delete_group` 绑定了未使用的 `$1` | `scim.rs` `delete_group` | 修正绑定 | ✅ 已修（与 §15 #4 同一处） |
-| DELETE 返回 200 + Error schema | `scim.rs` `delete_user` / `delete_group` | 改为 `204` | ✅ 已修 |
-| `PATCH /Users` 不支持 `userName` / `emails` 写入 | `scim.rs` `patch_user` | 按 op/path 正确解析，支持 `userName`/`emails`/`active` | ⏳ 待做：`emails`/`username` 是 UNIQUE 列，写入需要先决定唯一冲突对推送客户端意味着什么（409 还是合并），属 P5 功能而非缺陷 |
-| 无 filter 支持 | `scim.rs:100` | 视上游要求决定是否实现 | ⏳ 待做 |
-| 审计缺失（无 `scim.group.*`） | — | 补齐 | ✅ 已修：见 §14.1 与 §11.1 的事件表 |
-| 组模型 | — | 从 `users.groups` 迁移到 `directory_groups`，与 §6.5 对齐 | ⏳ 待做 |
+| `role = 'user'` violates the CHECK (only admin/manager/member), so **user creation always 500s** | `scim.rs` create_user | Use `'member'` | ✅ Fixed (same place as §15 #1) |
+| The PATCH body's operation list is named `operations`, while RFC 7644 and IdPs send `Operations`; serde is case-sensitive + `#[serde(default)]` ⇒ an empty list, **the whole body discarded**, yet 200 with an unchanged resource | `scim.rs` `PatchUserBody` / `PatchGroupBody` | Accept both spellings | ✅ Fixed (`rename = "Operations"`, `alias = "operations"`) |
+| Operations ignored `op`/`path` and treated everything as a write ⇒ on the group route `remove` **added** members; `{"op":"remove","path":"active"}` without `value` ⇒ silently ineffective; Entra's `{"op":"Replace","path":"active","value":false}` (scalar) ⇒ accepted and ignored | `scim.rs` `patch_user` / `patch_group` | Parse `op`/`path` per RFC 7644 §3.5.2, supporting `active`/`displayName`/`members` | ✅ Fixed (semantics extracted into `user_attrs_from_patch` / `group_member_changes` pure functions) |
+| `PATCH /Groups` could only add, never remove | `scim.rs` `patch_group` | Support add/remove/replace | ✅ Fixed (including Okta's `members[value eq "<id>"]` filter form) |
+| `delete_group` bound an unused `$1` | `scim.rs` `delete_group` | Fix the binding | ✅ Fixed (same place as §15 #4) |
+| DELETE returned 200 + an Error schema | `scim.rs` `delete_user` / `delete_group` | Return `204` | ✅ Fixed |
+| `PATCH /Users` cannot write `userName` / `emails` | `scim.rs` `patch_user` | Parse by op/path, supporting `userName`/`emails`/`active` | ⏳ Pending: `emails`/`username` are UNIQUE columns, so writing them first requires deciding what a uniqueness conflict means for a pushing client (409 or merge) — a P5 feature, not a defect |
+| No filter support | `scim.rs:100` | Implement if an upstream requires it | ⏳ Pending |
+| Missing audits (no `scim.group.*`) | — | Add them | ✅ Fixed: see §14.1 and the event table in §11.1 |
+| Group model | — | Migrate from `users.groups` to `directory_groups`, aligning with §6.5 | ⏳ Pending |
 
-> **`Operations` 那一项值得单独说明**：它让上面所有 PATCH 缺陷都变得不可观测——真实客户端的请求体在反序列化阶段就变成了空列表，路由于是"成功"地什么都没做。先前的缺陷分析（"完全忽略 op/path 语义"）是在只有小写拼写的请求体下才成立；对上真实 IdP，症状是"PATCH 一律返回 200 且无任何变化"。回归测试因此走**请求体**这一层（`user_attrs_from_body` / `group_member_changes_from_body`），而不是直接调用解释器——否则这个 bug 依然测不到。
+> **The `Operations` item deserves its own note**: it made every PATCH defect above
+> unobservable — a real client's body became an empty list during
+> deserialisation, and the route "successfully" did nothing. The earlier defect
+> analysis ("op/path semantics completely ignored") only held for lowercase
+> bodies; against a real IdP the symptom is "PATCH always returns 200 and nothing
+> changes". Regression tests therefore go through the **body** layer
+> (`user_attrs_from_body` / `group_member_changes_from_body`) rather than calling
+> the interpreter directly — otherwise the bug stays untestable.
 
-推送写入路径应复用同步的映射与冲突逻辑，并写 `directory_sync_runs`（`trigger = 'push'`）以获得统一的运行历史与审计。
+The push write path should reuse the sync mapping and conflict logic, and write
+`directory_sync_runs` (`trigger = 'push'`) for a unified run history and audit.
 
-### 14.1 上游的删除只停用，不删数据（D3 的落地）
+### 14.1 Upstream deletes only disable, never remove data (D3 in practice)
 
-与目录同步同一个原则：上游的删除是**一个意图**，不是一次删除。落点：
+The same principle as directory sync: an upstream delete is **an intent**, not a
+deletion. Landing points:
 
-| 入口 | 行为 | 为什么这样 |
+| Entry | Behaviour | Why |
 |---|---|---|
-| `DELETE /scim/v2/Users/{id}` | 置 `scim_disabled = TRUE`（`status` 由 §4.2 派生），并置 `scim_managed = TRUE`，**不删行** | `directory_entries.user_id` 与 IdP 的 `externalId` 都指向这个 id。删行意味着下一次 push 会为同一个人**新开一个账号**，旧账号的会话、审计与组历史全部失去归属；而一次误删是不可恢复的 |
-| `DELETE /scim/v2/Groups/{id}` | 置 `deleted_at = NOW()`，把成员快照写进 `members_at_delete`（迁移 `028`），并把组名从所有用户的 `groups` 中移除 | 两个方向必须同时成立：成员关系**必须停止授权**（`groups` 是 claim 的来源），又**必须留下可恢复的记录**。只删行会把"这个组存在过、当时有谁"一起销毁 |
-| 管理员删除托管账号 | `403`，提示改用 disable | 托管账号的删除权在上游（§5） |
+| `DELETE /scim/v2/Users/{id}` | Set `scim_disabled = TRUE` (`status` derives per §4.2) and `scim_managed = TRUE`; **never delete the row** | `directory_entries.user_id` and the IdP's `externalId` both point at this id. Deleting it would make the next push **open a new account** for the same person, and the old account's sessions, audits and group history would lose their owner — and a mistaken delete is unrecoverable |
+| `DELETE /scim/v2/Groups/{id}` | Set `deleted_at = NOW()`, snapshot members into `members_at_delete` (migration `028`), and remove the group name from every user's `groups` | Both directions must hold: membership **must stop authorising** (`groups` feeds the claim), and a recoverable record **must remain**. Deleting the row would destroy "this group existed and who was in it" |
+| An admin deletes a managed account | `403`, suggesting disable | Deletion rights for managed accounts belong upstream (§5) |
 
-**同名组重建**：`scim_groups.display_name` 的唯一约束改为**只覆盖未删除行**的部分索引（`scim_groups_live_display_name_key`），否则墓碑会永久占住那个名字，IdP 想重建同名组会被挡死。
+**Recreating a same-named group**: `scim_groups.display_name`'s unique constraint
+becomes a partial index over live rows only
+(`scim_groups_live_display_name_key`); otherwise the tombstone would hold the name
+forever and block an IdP recreating it.
 
-### 14.2 混合部署：SCIM 与目录同步不再互相覆盖
+### 14.2 Mixed deployments: SCIM and directory sync no longer overwrite each other
 
-同一账号既被目录 link 又被 SCIM 推时（§4.2 的三个意图位就是为此）：
+When one account is both directory-linked and SCIM-pushed (the three intent bits
+in §4.2 exist for this):
 
-- SCIM 的停用只写 `scim_disabled`，**不写** `local_disabled` —— "上游的意图"与"本地的意图"是两件事，混成一个字段会让运维无法分辨"是 IdP 停的还是我自己停的"；
-- 目录同步只写 `directory_disabled`，所以它看不到 SCIM 的停用，也就无从抹掉；
-- 属性归属上目录优先（§4.4），但**停用意图互不覆盖**：两个权威各自按着就是各自按着，`status` 是二者的或。
+- A SCIM disable writes only `scim_disabled`, **not** `local_disabled` — "the
+  upstream's intent" and "the local intent" are two things, and merging them
+  leaves operators unable to tell "the IdP disabled it" from "I disabled it";
+- Directory sync writes only `directory_disabled`, so it cannot see SCIM's
+  disable and therefore cannot erase it;
+- Attribute ownership favours the directory (§4.4), but **disable intents never
+  overwrite each other**: each authority holds its own bit, and `status` is their
+  OR.
 
 ---
 
-## 15. P0 缺陷修复清单（所有阶段的前置）
+## 15. P0 defect list (prerequisite for every phase)
 
-这些是当前代码里**已经坏掉**、且正好落在本设计要复用的链路上的缺陷：
+These were **already broken** in the code and sit on the paths this design
+reuses:
 
-| # | 位置 | 问题 | 修法 | 状态 |
+| # | Location | Problem | Fix | Status |
 |---|---|---|---|---|
-| 1 | `scim.rs:228` | 插入 `role = 'user'`，违反 `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` 必然 500 | 改为 `'member'` | ✅ 已修 |
-| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'`，违反 `CHECK (purpose IN ('login','enroll'))` → 强制改密流程坏 | 扩展 CHECK 或改用既有值 | ✅ 已修（迁移 `022`，按约束定义查名删除，不依赖自动命名） |
-| 3 | `auth/routes.rs:90` | `password_hash = ''` 的用户（SSO JIT / SCIM 创建）会使 `PasswordHash::new("")` 报错，被 `?` 转成 **500** 而非 401 | 按 §8.1 分派；非托管用户的空 hash 返回 401 | ✅ 已修（空 hash → 401；§8.1 的 LDAP 分派待 P2） |
-| 4 | `scim.rs:684` | `delete_group` 的 UPDATE 只引用 `$2`，却先绑定了 `group.id` | 修正参数绑定 | ✅ 已修 |
-| 5 | `webhooks.rs:80` | 出站 URL 只校验 `http(s)://` 前缀，无 SSRF 防护 | 接入 §12 统一出站校验 | ✅ 已修（新增 `outbound` 模块；创建时 + **每次投递时**校验，禁用重定向） |
-| 6 | `webhooks.rs:87` | `webhooks.secret` 明文存储，与其它密钥处理不一致 | 经 `Encryptor` 加解密 | ✅ 已修（迁移 `023` 加 `secret_enc`；`audit::record` 改为接收 `&AppState`，53 处调用点同步更新；`bootstrap::encrypt_webhook_secrets` 在启动时把存量明文一次性搬走） |
-| 7 | `federation/provider.rs` | 出站 HTTP 无 timeout（仅 webhook 有 10s） | 统一到出站模块 | ✅ 已修（统一 client：连接 5s / 整体 10s、禁重定向、响应体 1 MiB 上限） |
+| 1 | `scim.rs:228` | Inserts `role = 'user'`, violating `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` always 500s | Use `'member'` | ✅ Fixed |
+| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'` violates `CHECK (purpose IN ('login','enroll'))` → forced password change broken | Extend the CHECK or reuse an existing value | ✅ Fixed (migration `022`; constraint looked up by definition, not auto-name) |
+| 3 | `auth/routes.rs:90` | Users with `password_hash = ''` (SSO JIT / SCIM) make `PasswordHash::new("")` fail, turning into **500** rather than 401 | Branch per §8.1; unmanaged users with an empty hash return 401 | ✅ Fixed (empty hash → 401; the §8.1 LDAP branch landed in P2) |
+| 4 | `scim.rs:684` | `delete_group`'s UPDATE references only `$2` but binds `group.id` first | Fix the binding | ✅ Fixed |
+| 5 | `webhooks.rs:80` | Outbound URLs only checked for an `http(s)://` prefix; no SSRF protection | Adopt §12's unified outbound validation | ✅ Fixed (new `outbound` module; checked at creation **and on every delivery**; redirects disabled) |
+| 6 | `webhooks.rs:87` | `webhooks.secret` stored in plaintext, inconsistent with other secrets | Encrypt with `Encryptor` | ✅ Fixed (migration `023` adds `secret_enc`; `audit::record` now takes `&AppState` with 53 call sites updated; `bootstrap::encrypt_webhook_secrets` migrates existing plaintext at startup) |
+| 7 | `federation/provider.rs` | Outbound HTTP had no timeout (only webhooks had 10s) | Unify on the outbound module | ✅ Fixed (one client: connect 5s / total 10s, no redirects, 1 MiB response cap) |
 
-> **第 6 项的落点**：`audit::record(pool, event)` 已改为 `audit::record(state, event)`，`webhooks::dispatch` / `deliver_one` 同样接收 `&AppState`，因此投递路径能拿到 `Encryptor` 解密 `secret_enc`。`login_alert::track_login` 一并改签名。存量明文通过启动时的 `bootstrap::encrypt_webhook_secrets` 搬迁，且该步骤**故意设为致命错误**：静默失败会让 `secret_enc` 为空，投递直接降级为不签名。
+> **Where item 6 landed**: `audit::record(pool, event)` became
+> `audit::record(state, event)`, and `webhooks::dispatch` / `deliver_one` take
+> `&AppState` as well, so the delivery path can reach the `Encryptor` to decrypt
+> `secret_enc`. `login_alert::track_login` changed signature too. Existing
+> plaintext is migrated by `bootstrap::encrypt_webhook_secrets` at startup, and
+> that step is **deliberately fatal**: a silent failure would leave `secret_enc`
+> empty and downgrade deliveries to unsigned.
 
-> **出站校验的兼容性提示**：`outbound` 默认拒绝解析到私网/回环/链路本地地址的目标，因此**指向内网地址的既有 webhook 会开始投递失败**（会记录一条 `success = false` 的投递记录）。若内网 webhook 接收方确实需要保留，设 `SIGNET_OUTBOUND_ALLOW_PRIVATE=true`（部署级开关，默认关闭；开启时启动会打一条 WARN，且该开关只放宽**地址**策略，仍拒绝非 http(s) 协议与内嵌凭据）。另：所有出站请求都禁用了重定向，若某 provider 的 endpoint 依赖重定向会受影响。`issuer_url` 与 OIDC discovery 走的是严格模式（仅字面地址检查、不解析 DNS），内网 IdP 用主机名即可正常工作。
-
-
----
-
-## 16. 分期与验收
-
-| 阶段 | 内容 | 验收标准 | 状态 |
-|---|---|---|
-| **P0 地基** | §15 全部缺陷修复；`is_managed`/只读语义；§4 三张表 + `users` 变更；审计事件；统一出站模块；凭据加密 | 现有测试通过；SCIM 建用户不再 500；强制改密可用；空密码用户返回 401；管理员改目录用户被拒 | ✅ 已完成：迁移 `024`（三张表 + `users` 两列）；`directory` 模块 + `tests/directory_policy.rs`；拒写已记审计。同步引擎自身的 `directory.sync.*` 事件推迟到 P1——现在还没有同步可审计 |
-| **P1 LDAP 同步引擎** | 连接/LDAPS；全量分页拉取；指纹比对；创建/更新；缺失即 disable；组写入 `directory_groups`；CLI（含 `--dry-run`、`--json`）；手动触发 API；运行历史 | `--dry-run` 输出的差异与真实执行一致；对目标目录跑通全量；上游删人后用户变 disabled 且审计留痕；重复运行第二遍 `updated = 0` | ✅ 已实现：`directory/{source,plan,model,ldap,engine,api,cli}.rs`；迁移 `025` 保证单源单 run；CLI `signet sync`；`/admin/directory/sources` 系列端点。测试：`tests/directory_plan.rs`（纯规划 10 例）、`tests/directory_engine.rs`（真库 7 例，含"第二次运行 `updated = 0`"）。**未对真实目录联调**——需要 Q1 确定 AD/OpenLDAP 后做 |
-| **P2 LDAP bind 直通** | 按 §8 分派登录；LDAPS bind；fail closed；指标 | 目录用户能用目录密码登录并正常走 MFA；改密后新密码生效；LDAP 停机时返回 503 且明确不回退 | ✅ 已实现：`directory::auth`（三态结果）+ `ldap::bind_as`（一次性 bind、必 unbind）+ 登录处理器分派 + 两个独立指标 + `set_user_password` 收口。测试：`tests/directory_login.rs`（18 例，含"不可达 → 503 而非 401""复选源按 priority""停用源/删除源回退本地""托管账号拒绝写本地密码"，以及空密码既不发起 bind 也不变成 503 的两例）。**未对真实目录验证**：`改密后新密码生效`、`正常走 MFA` 需 Q1 确定 AD/OpenLDAP 后联调 |
-| **P3 定时调度** | §10 调度循环 + advisory lock；运行历史 UI 入口 | 到点自动运行；双副本同时启动只跑一次；失败有审计与指标 | ✅ 已完成：调度（`directory::scheduler` + `model::due_sources`，含崩溃遗留 run 的自动恢复）、运行历史 UI（`DirectoryView.vue` 的 History 面板 + `/admin/directory/sources/{code}/runs`）、调度与同步指标（`signet_directory_sync_runs_total` / `_failures_total` / `_partial_total` / `_conflicts_total` / `_last_success_timestamp_seconds`）。测试：`tests/directory_scheduler.rs` 8 例。**未做**：advisory lock（见 §10 说明，改由迁移 `025` 的部分唯一索引保证） |
-| **P4 HTTP JSON 源** | §13 | 完成一次全量同步；SSRF 用例（内网地址、重定向、超大响应）全部被拒 | ✅ 已完成：`directory/http_json.rs`（点号路径映射 + `none`/`page`/`cursor` 分页 + Bearer/Basic 鉴权 + 每页重新走 `outbound` 校验）；`SourceConfig` 按 kind 分派，planner/apply 完全复用；API 与 Dashboard 支持 `kind = http_json`。测试：`tests/http_json_source.rs` 21 例，含**真库端到端**一次全量同步 + 二次运行零变更，以及"严格策略下内网地址在抓取时被拒且请求未发出" |
-| **P4.5 共用映射 UI** | §13.1 | 贴一次样例即可点选映射；预览与真实写入（规范化后）一致；样例不落库不写日志 | ✅ 已完成：后端 `directory/{ldif,mapping}.rs` + `POST /admin/directory/sources/preview-mapping`（纯函数，与同步共用 `upstream_from_entry` / `to_upstream` / planner 规范化）；LDAP 侧把 entry→`UpstreamUser` 抽成 `ldap::upstream_from_entry` 供同步与预览共用。前端 `lib/directoryMapping.ts`（共享行定义）+ `components/directory/{MappingPanel,MappingTable,FieldPicker}.vue` + `lib/valueShape.ts`（交互规范见 `docs/directory-mapping-ux.md`）；LDAP 表单把映射键交还给面板（连接/鉴权/分页仍留在表单）。**校验全量、回显分页**：`fields`/`targets` 的计数对全部样例条目计算（`total == entry_count`），`rows` 按 `offset` 每页 25 条返回。测试：`tests/directory_mapping_preview.rs` 52 例（LDIF 折行/`::` base64/二进制 `objectGUID`→GUID/注释与 `version`/畸形行报行号/URL 值拒绝、两种 kind 的逐行判定与规范化行、样例体积上限、请求体契约、分页与完整计数的一致性、作用域行的判定）。**未做**：从上游拉取样例（probe），故 LDAP 组列为最佳推定（§13.1.4） |
-| **P4.6 从上游拉取样例（probe）** | §13.1.2 | 不必手工粘贴；LDAP 组列由近似变为精确 | 待做（可独立交付；需新增 admin-only 的 probe 端点，复用 `outbound::ensure_allowed`） |
-| **P4.7 源作用域：邮箱域 / 部门** | §7.2.1 | 只同步指定域/部门；配置写错（匹配 0 条）时预览直接判失败而不是静默清空；运行历史能区分「离职」与「调岗」 | ✅ 已完成：`plan::ScopeFilter`（纯谓词，域按标签边界比较、无通配符）+ `UpstreamUser.department` + `PlanOptions.scope`；planner 对掉出作用域的已 link 用户产出 `Disable`，`reason = out_of_scope`（与 `absent_upstream` 区分，并一路带到审计 detail）；`apply_disables` 改为逐条沿用 planner 的原因；两个 kind 的配置字段与保存期校验（空条目、通配符、把地址当域、`department_values` 缺 `department_attribute`/`department_path` 一律拒绝）；预览的 `scope` 行改为可判定（匹配 0 条 ⇒ `ok: false`，且对**全量**样例计数）；Dashboard 在 scope 行加入域/部门输入（列表在表单里是单个字符串，出站时才切分成数组）。测试：`tests/directory_scope.rs` 29 例（谓词边界，含 `evilcorp.example` 不得匹配；planner 的两个 reason 与 `--limit` 下不禁用；配置校验）+ `tests/directory_mapping_preview.rs` 新增 11 例。**刻意未做**：单次运行禁用数超过阈值即中止（本次只要求"可区分"，见 §7.2.1 的安全阀讨论） |
-| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 | ✅ 已实现（除下列"剩余"）：§14 的缺陷已修（`Operations` 字段名、`op`/`path` 语义、组成员 remove/replace、DELETE `204`）；上游语义已落地（删除只停用、组墓碑、`scim_managed` 归属、§11.1 的完整事件集）。测试：`tests/scim_patch.rs`（含"改 `displayName` 不得被读成清空成员"）、`tests/scim_audit.rs`、`tests/scim_ownership.rs`、`tests/scim_group_retention.rs`、`tests/scim_delete_guard.rs`。**剩余为功能**——`userName`/`emails` 写入、filter、组模型迁移到 `directory_groups` |
-
-> **P1 与 P2 必须紧邻交付**：只做同步不做 bind 直通，目录用户同步进来却登不进去，功能等于没交付。
+> **Outbound validation compatibility note**: `outbound` rejects targets resolving
+> to private/loopback/link-local addresses by default, so **existing webhooks
+> pointing at intranet addresses start failing** (a `success = false` delivery is
+> recorded). If an intranet receiver must stay, set
+> `SIGNET_OUTBOUND_ALLOW_PRIVATE=true` (deployment-level, off by default; turning
+> it on logs a WARN at startup, and it only relaxes the **address** policy — non
+> http(s) schemes and embedded credentials are still refused). Also: all outbound
+> requests disable redirects, so a provider whose endpoint relies on redirects is
+> affected. `issuer_url` and OIDC discovery use a strict mode (literal address
+> check only, no DNS resolution), so an intranet IdP works fine by hostname.
 
 ---
 
-## 17. 未决事项
+## 16. Phasing and acceptance
 
-| # | 待定 | 影响 |
+| Phase | Content | Acceptance | Status |
+|---|---|---|---|
+| **P0 foundation** | All §15 defects; `is_managed`/read-only semantics; the three tables + `users` changes in §4; audit events; unified outbound module; credential encryption | Existing tests pass; SCIM user creation no longer 500s; forced password change works; empty-password users return 401; an admin editing a directory user is refused | ✅ Done: migration `024` (three tables + two `users` columns); `directory` module + `tests/directory_policy.rs`; refusals audited. The sync engine's own `directory.sync.*` events slipped to P1 — there was no sync to audit yet |
+| **P1 LDAP sync engine** | Connect/LDAPS; full paged pull; fingerprint comparison; create/update; missing means disable; groups into `directory_groups`; CLI (`--dry-run`, `--json`); manual trigger API; run history | `--dry-run` diff matches a real run; a full run against the target directory succeeds; an upstream deletion disables the user with an audit trail; a second run reports `updated = 0` | ✅ Implemented: `directory/{source,plan,model,ldap,engine,api,cli}.rs`; migration `025` enforces one run per source; CLI `signet sync`; the `/admin/directory/sources` endpoints. Tests: `tests/directory_plan.rs` (10 pure plans), `tests/directory_engine.rs` (7 against a real DB, including "second run updated = 0"). **Not yet exercised against a real directory** — needs Q1 (AD vs OpenLDAP) |
+| **P2 LDAP bind-through** | Branch sign-in per §8; LDAPS bind; fail closed; metrics | Directory users sign in with their directory password and pass MFA normally; a changed password takes effect; LDAP down returns 503 with no fallback | ✅ Implemented: `directory::auth` (three-state) + `ldap::bind_as` (one bind, always unbind) + handler dispatch + two metrics + `set_user_password` choke point. Tests: `tests/directory_login.rs` (18 cases, including "unreachable → 503 not 401", "multiple sources follow priority", "disabled/deleted source falls back to local", "managed account refuses a local password", and two empty-password cases that neither bind nor become 503). **Not verified against a real directory**: "changed password takes effect" and "MFA works" need Q1 |
+| **P3 scheduling** | §10 scheduler + advisory lock; run-history UI entry | Runs on time; two replicas starting together run once; failures audited and metered | ✅ Done: scheduler (`directory::scheduler` + `model::due_sources`, including recovery of crashed runs), run-history UI (the History panel in `DirectoryView.vue` + `/admin/directory/sources/{code}/runs`), scheduler/sync metrics (`signet_directory_sync_runs_total` / `_failures_total` / `_partial_total` / `_conflicts_total` / `_last_success_timestamp_seconds`). Tests: `tests/directory_scheduler.rs` 8 cases. **Not done**: advisory lock (see §10 — migration `025`'s partial unique index provides the mutex instead) |
+| **P4 HTTP JSON source** | §13 | One full sync; SSRF cases (private address, redirect, oversized response) all refused | ✅ Done: `directory/http_json.rs` (dotted-path mapping + `none`/`page`/`cursor` pagination + Bearer/Basic auth + per-page `outbound` validation); `SourceConfig` dispatches by kind, planner/apply fully reused; API and dashboard support `kind = http_json`. Tests: `tests/http_json_source.rs` 21 cases, including a **real-database end-to-end** full sync with zero changes on the second run, and "a private address is refused at fetch time under the strict policy, before any request is sent" |
+| **P4.5 Shared mapping UI** | §13.1 | Paste a sample once and click mappings; preview matches real writes after normalisation; the sample is never stored or logged | ✅ Done: backend `directory/{ldif,mapping}.rs` + `POST /admin/directory/sources/preview-mapping` (pure, sharing `upstream_from_entry` / `to_upstream` / planner normalisation with sync); LDAP's entry→`UpstreamUser` extracted into `ldap::upstream_from_entry` for both paths. Frontend `lib/directoryMapping.ts` + `components/directory/{MappingPanel,MappingTable,FieldPicker}.vue` + `lib/valueShape.ts` (the interaction spec is `docs/directory-mapping-ux.md`); the LDAP form hands mapping keys to the panel (connection/auth/pagination stay in the form). **Validate all, page the display**: `fields`/`targets` count over all sample entries (`total == entry_count`), `rows` page 25 per `offset`. Tests: `tests/directory_mapping_preview.rs` 52 cases (LDIF folding/`::` base64/binary `objectGUID`→GUID/comments and `version`/malformed lines reporting line numbers/URL values refused, per-row verdicts and normalised rows for both kinds, sample-size cap, request contract, paging and full-count consistency, the scope row). **Not done**: fetching a sample from the upstream (probe), so the LDAP group column stays best effort (§13.1.4) |
+| **P4.6 Upstream sample probe** | §13.1.2 | No manual paste; the LDAP group column becomes exact | Pending (independently deliverable; needs an admin-only probe endpoint reusing `outbound::ensure_allowed`) |
+| **P4.7 Source scope: email domains / departments** | §7.2.1 | Sync only the configured domains/departments; a misconfiguration (0 matches) fails the preview instead of silently emptying; run history distinguishes "left" from "transferred" | ✅ Done: `plan::ScopeFilter` (pure predicate; domains by label boundary, no wildcards) + `UpstreamUser.department` + `PlanOptions.scope`; the planner emits `Disable` for linked users out of scope with `reason = out_of_scope` (distinct from `absent_upstream` and carried into audit detail); `apply_disables` follows the planner's reason; both kinds' config fields and save-time validation (empty entries, wildcards, address-as-domain, `department_values` without `department_attribute`/`department_path` refused); the preview's `scope` row is now decidable (0 matched ⇒ `ok: false`, counted over the **full** sample); the dashboard adds domain/department inputs on the scope row (a single string in the form, split into an array on submit). Tests: `tests/directory_scope.rs` 29 cases (predicate boundaries, including `evilcorp.example` not matching; the two planner reasons and no disable under `--limit`; config validation) plus 11 new cases in `tests/directory_mapping_preview.rs`. **Deliberately not done**: aborting a run when the disabled count exceeds a threshold (this phase only required distinguishability; see the safety-valve discussion in §7.2.1) |
+| **P5 SCIM push hardening** | §14 | Real Okta/Entra pushes can create/update/delete; group add/remove correct; audits complete | ✅ Implemented (except the remainder below): §14's defects fixed (`Operations` spelling, `op`/`path` semantics, group member remove/replace, DELETE `204`); upstream semantics in place (delete disables, group tombstones, `scim_managed` ownership, the full event set in §11.1). Tests: `tests/scim_patch.rs` (including "changing `displayName` must not be read as clearing members"), `tests/scim_audit.rs`, `tests/scim_ownership.rs`, `tests/scim_group_retention.rs`, `tests/scim_delete_guard.rs`. **Remaining are features**: `userName`/`emails` writes, filter, moving the group model to `directory_groups` |
+
+> **P1 and P2 must ship together**: syncing users without bind-through means
+> directory users are imported but cannot sign in — the feature is not delivered.
+
+---
+
+## 17. Open questions
+
+| # | Open | Impact |
 |---|---|---|
-| Q1 | 首个联调目标是 **AD** 还是 **OpenLDAP**？ | 决定 `external_id` 字段、成员解析方式、增量字段。建议**先锁死一个**，不要同时兼容 |
-| Q2 | 用户量级与期望同步频率？ | 决定 `page_size`、批事务大小、是否需要增量（全量对账在 10 万级下的窗口） |
-| Q3 | LDAP 认证失败是否累加本地锁定计数？（§8.4 建议**不累加**） | 双重锁定风险 |
-| Q4 | 组是否采用分列方案 `directory_groups`？（§6.5 推荐） | 影响 OIDC claim 组装与后台展示 |
-| Q5 | 是否需要多源同时托管一个用户？ | 影响冲突仲裁（`priority`）与 `directory_entries` 是否允许多行同用户 |
-| Q6 | 是否需要在 `README.md` / `README.zh-CN.md` 的文档索引中登记本文？ | 文档可达性 |
-| Q7 | `department_values` 是否需要**层级/前缀**语义（如"Engineering 下所有子部门都算"）？ | 当前只做精确值比较（§7.2.1），AD 里若把部门写成 `Engineering / Platform` 这类路径，则必须把 `department_attribute` / `department_path` 指到**恰好那一层**，否则配了也不匹配。加前缀语义等于放宽作用域判定，会改变"掉出作用域即禁用"的边界，需要连带决定：是否要在预览的 `scope` 行区分"前缀命中"与"精确命中"，以及前缀是否只按 `/` 分隔符切。**暂不实现**，先只记录 |
+| Q1 | Is the first integration target **AD** or **OpenLDAP**? | Decides the `external_id` field, member resolution and incremental fields. Lock down **one** first; do not support both at once |
+| Q2 | User count and expected sync frequency? | Decides `page_size`, batch-transaction size and whether incremental is needed (the full-reconciliation window at 100k users) |
+| Q3 | Should LDAP auth failures increment local lockout? (§8.4 recommends **no**) | Double-lockout risk |
+| Q4 | Adopt the split-column `directory_groups` approach? (§6.5 recommends it) | Affects OIDC claim assembly and dashboard display |
+| Q5 | Must multiple sources co-manage one user? | Affects conflict arbitration (`priority`) and whether `directory_entries` may hold several rows per user |
+| Q6 | Should this document be listed in the README documentation index? | Discoverability |
+| Q7 | Should `department_values` support **hierarchy/prefix** semantics (e.g. "everything under Engineering")? | Today it compares exact values (§7.2.1); if AD writes departments as paths like `Engineering / Platform`, `department_attribute` / `department_path` must point at **exactly that level**, otherwise a configured filter matches nothing. Prefix semantics would loosen the scope test and change the "out of scope means disabled" boundary, requiring follow-up decisions: whether the preview's `scope` row distinguishes "prefix hit" from "exact hit", and whether prefixes split only on `/`. **Not implemented for now** — recorded only |

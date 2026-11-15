@@ -19,8 +19,8 @@ Three ways to get a server running. **The release binary is the recommended way*
 ```bash
 # 1. Download the asset for your platform from GitHub Releases (grab the
 #    latest tag there), e.g.:
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.1/signet-0.6.1-macos-arm64
-chmod +x signet-0.6.1-macos-arm64 && mv signet-0.6.1-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/latest/download/signet-macos-arm64
+chmod +x signet-macos-arm64 && mv signet-macos-arm64 signet
 
 # 2. Start a PostgreSQL matching the built-in default connection string
 #    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
@@ -112,7 +112,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 - **Runtime policies** (token/session lifetimes, lockout, password policy, audit retention, rate limit) edited in the dashboard — DB-backed, no redeploy
 - **Signing-key rotation** (`signet keys rotate` / `keys prune`) with a JWKS key ring that keeps outstanding tokens verifiable
 - **Third-party sign-in** (identity federation): GitHub · Google · Feishu · WeChat Open Platform · generic OIDC  
-  Binding: verified email match → auto-link; else **JIT create** a `member` when Settings → JIT is on (default; also `SIGNET_SSO_JIT_PROVISION` fallback) and the provider returns a verified email; otherwise stash pending identity (15 min) for password bind. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+  Binding: verified email match → auto-link; else **JIT create** a `member` when Settings → JIT is on (default; also `SIGNET_SSO_JIT_PROVISION` fallback) and the provider returns a verified email; otherwise stash pending identity (15 min) for password bind. Details: [docs/api-v1.md §12](./docs/api-v1.md#12-third-party-sign-in-identity-federation)
 
 ![Dashboard overview](./docs/screenshot_overview.png)
 
@@ -131,6 +131,8 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 | [docs/directory-sync.md](./docs/directory-sync.md) | **Directory sync** (LDAP / HTTP JSON pull, bind-through login, scheduler, `signet sync` CLI) |
 | [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes and breaking changes |
+
+These English documents are the source of truth. Chinese translations live in [docs/zh-CN](./docs/zh-CN/) and may lag behind a release.
 
 ## Local development
 
@@ -245,4 +247,5 @@ build/                  Dockerfiles + local compose (image build, optional Postg
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 Production compose + env template (OSS config bundle)
 docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync
+docs/zh-CN/             Chinese translations of the documents above
 ```

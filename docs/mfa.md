@@ -1,96 +1,98 @@
-# Signet MFA（TOTP + 恢复码）
+# Signet MFA (TOTP + recovery codes)
 
-| 项 | 内容 |
+> English · [简体中文](./zh-CN/mfa.md)
+
+| Item | Detail |
 |---|---|
-| 方式 | TOTP（RFC 6238，SHA1 / 30s / 6 位） |
-| 恢复 | 10 个一次性恢复码（argon2 存储） |
-| TOTP 密钥 | `totp_secret` 以 AES-256-GCM 应用层加密后落库（明文不再存库）；待确认的种子同样加密 |
-| 防重放 | 每个 30 秒时间步只接受一次（`users.totp_last_step` 严格前进）；时钟回跳超过 10 分钟视为校时而非重放 |
-| 猜测限制 | 单个 challenge 最多 5 次失败，达上限即作废；失败不写账户锁定计数（密码正确时本就不计） |
-| 强制策略 | 全局开关 + 用户级开关（均可关） |
-| Settings UI | `/settings`，**仅 admin** |
-| API 前缀 | `/api/v1/...`（见 [api-v1.md](./api-v1.md)） |
-| UI 说明 | [dashboard.md](./dashboard.md) |
+| Method | TOTP (RFC 6238, SHA1 / 30s / 6 digits) |
+| Recovery | 10 single-use recovery codes (stored with argon2) |
+| TOTP secret | `totp_secret` is encrypted at rest with AES-256-GCM at the application layer (no plaintext in the database); pending seeds are encrypted the same way |
+| Replay protection | Each 30-second time step is accepted once (`users.totp_last_step` must advance strictly); a clock going back more than 10 minutes is treated as a resync, not a replay |
+| Guess limiting | A single challenge allows at most 5 failures and is then invalidated; failures do not count towards account lockout (the password was already correct) |
+| Enforcement | Global switch + per-user switch (both may be off) |
+| Settings UI | `/settings`, **admin only** |
+| API prefix | `/api/v1/...` (see [api-v1.md](./api-v1.md)) |
+| UI guide | [dashboard.md](./dashboard.md) |
 
 ---
 
-## 1. 强制策略
+## 1. Enforcement policy
 
-| 开关 | 存储 | 谁改 | 默认 |
+| Switch | Stored in | Who changes it | Default |
 |------|------|------|------|
-| 全局 `mfa.required_globally` | `app_settings` | admin | `false` |
-| 用户 `users.mfa_required` | users | admin / manager | `false` |
-| 绑定事实 `users.totp_enabled` | users | 用户绑定 / admin reset | `false` |
+| Global `mfa.required_globally` | `app_settings` | admin | `false` |
+| Per-user `users.mfa_required` | users | admin / manager | `false` |
+| Enrollment fact `users.totp_enabled` | users | user enrollment / admin reset | `false` |
 
-登录分支：
+Sign-in branches:
 
 ```text
 if totp_enabled:
-    → 始终二次校验（与开关无关）
+    → always a second check (independent of the switches)
 else if global_required OR user.mfa_required:
-    → 强制 enroll
+    → forced enrollment
 else:
-    → 密码直登；可在账户菜单自愿绑定
+    → the password signs in directly; enrollment stays optional in the account menu
 ```
 
-关闭强制开关**不会**自动解绑；解绑途径：
+Turning the enforcement switches **off** does not unbind anyone. The unbind paths are:
 
-- **用户自主禁用**（`POST /api/v1/me/mfa/disable`）：仅当**全局与用户级强制均未开启**时允许，需验证当前 TOTP 码；
-- admin **Reset 2FA**：清空该用户绑定；
-- 用户**换绑**（rebind）流程。
+- **Self-service disable** (`POST /api/v1/me/mfa/disable`): allowed only when **neither the global nor the per-user requirement is on**, and it takes the current TOTP code;
+- admin **Reset 2FA**: clears that user's binding;
+- the user's own **rebind** flow.
 
-若全局强制或该用户 `mfa_required` 开启，用户侧「Disable MFA」不可用（返回 `400 MFA is required by policy and cannot be disabled`）。
-
----
-
-## 2. 会话模型
-
-需要 MFA 时，密码通过后**不**签发 `signet_session`，只签发短时 `signet_mfa` challenge（约 10 分钟）。  
-verify / enroll confirm 成功后签发正式会话并清除 challenge。
-
-OIDC `/oauth/authorize` 仅接受正式会话。
+While the global requirement or that user's `mfa_required` is on, "Disable MFA" is unavailable on the user side (it returns `400 MFA is required by policy and cannot be disabled`).
 
 ---
 
-## 3. 权限
+## 2. Session model
 
-| 能力 | admin | manager | member |
+When MFA is needed, a correct password does **not** issue `signet_session`; it issues only a short-lived `signet_mfa` challenge (about 10 minutes).
+A successful verify / enroll confirm issues the real session and clears the challenge.
+
+OIDC `/oauth/authorize` accepts a real session only.
+
+---
+
+## 3. Permissions
+
+| Capability | admin | manager | member |
 |------|-------|---------|--------|
-| Settings 全局 MFA 开关 | 读写 | 无 | 无 |
-| 用户 `mfa_required` | 读写 | 读写 | 无 |
-| Reset 他人 2FA | 是 | 否 | 否 |
-| 本人绑定 / 换绑 / 恢复码 | 是 | 是 | 是 |
+| Global MFA switch in Settings | read/write | none | none |
+| Per-user `mfa_required` | read/write | read/write | none |
+| Reset another user's 2FA | yes | no | no |
+| Own enrollment / rebind / recovery codes | yes | yes | yes |
 
 ---
 
-## 4. API（摘要）
+## 4. API (summary)
 
-| 端点 | 说明 |
+| Endpoint | Notes |
 |------|------|
-| `GET/PATCH /api/v1/admin/settings/mfa` | admin：全局开关 |
+| `GET/PATCH /api/v1/admin/settings/mfa` | admin: the global switch |
 | `POST /api/v1/login` | `ok` / `mfa_required` / `enroll_required` |
-| `POST /api/v1/mfa/verify` | TOTP 或恢复码 |
-| `POST /api/v1/mfa/enroll/start\|confirm` | 强制 enroll（challenge） |
-| `GET /api/v1/me/mfa` | 状态与剩余恢复码 |
-| `POST /api/v1/me/mfa/enroll/start\|confirm` | 已登录自愿绑定 |
-| `POST /api/v1/me/mfa/recovery/regenerate` | 轮换恢复码（需 TOTP） |
-| `POST /api/v1/me/mfa/rebind/start\|confirm` | 换绑 |
-| `POST /api/v1/me/mfa/disable` | 用户自主禁用（需当前 TOTP；强制时禁止，body `{ code }`） |
-| `POST /api/v1/admin/users/:id/mfa/reset` | admin 清绑定 |
+| `POST /api/v1/mfa/verify` | TOTP code or recovery code |
+| `POST /api/v1/mfa/enroll/start\|confirm` | forced enrollment (challenge) |
+| `GET /api/v1/me/mfa` | status and remaining recovery codes |
+| `POST /api/v1/me/mfa/enroll/start\|confirm` | optional enrollment while signed in |
+| `POST /api/v1/me/mfa/recovery/regenerate` | rotate recovery codes (needs TOTP) |
+| `POST /api/v1/me/mfa/rebind/start\|confirm` | rebind |
+| `POST /api/v1/me/mfa/disable` | self-service disable (needs the current TOTP; refused while enforced; body `{ code }`) |
+| `POST /api/v1/admin/users/:id/mfa/reset` | admin clears the binding |
 
 ---
 
-## 5. 审计动作
+## 5. Audit actions
 
-`mfa.verify`、`mfa.enroll`、`mfa.recovery_use`、`mfa.recovery_regen`、`mfa.rebind`、`mfa.reset`、`mfa.disable`、`settings.mfa_update`  
-（`mfa.reset` / `settings.mfa_update` 仅 admin 审计列表可见。）
+`mfa.verify`, `mfa.enroll`, `mfa.recovery_use`, `mfa.recovery_regen`, `mfa.rebind`, `mfa.reset`, `mfa.disable`, `settings.mfa_update`
+(`mfa.reset` / `settings.mfa_update` are visible in the audit list to admins only.)
 
 ---
 
 ## 6. UI
 
-- Login：密码 → 验码 / 强制绑定 + 一次性恢复码展示  
-- 恢复码一次性展示页提供 **Copy** 与 **Download**（`signet-recovery-codes.txt`），重绑/轮换后同样可下载  
-- TopNav：Two-factor auth（全角色），含状态、剩余恢复码，以及**禁用 MFA**（仅非强制时可见）  
-- Users：Require MFA；**MFA 状态列**（Enabled / Required / Off）；Reset 2FA（admin）  
-- Settings：全局 Require MFA（admin only）  
+- Login: password → code, or forced enrollment + one-time display of recovery codes
+- The one-time recovery-code page offers **Copy** and **Download** (`signet-recovery-codes.txt`); the same applies after a rebind or rotation
+- TopNav: Two-factor auth (all roles) — status, remaining recovery codes, and **Disable MFA** (shown only while not enforced)
+- Users: Require MFA; the **MFA status column** (Enabled / Required / Off); Reset 2FA (admin)
+- Settings: the global Require MFA switch (admin only)
