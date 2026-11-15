@@ -231,9 +231,20 @@ function onLogoClick(e: MouseEvent) {
       <div class="border-t border-sidebar-border/80 pt-3">
         <p
           class="flex flex-wrap items-center px-1 text-left text-[11px] tabular-nums text-muted-foreground"
-          :title="`Signet v${appVersion}`"
+          :title="`Powered by Signet v${appVersion}`"
         >
-          <span>Signet</span>
+          <span>
+            Powered by
+            <a
+              href="https://github.com/schiplat/signet"
+              target="_blank"
+              rel="noreferrer"
+              class="rounded transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/30"
+              title="Source code on GitHub"
+            >
+              Signet<span aria-hidden="true"> ↗</span>
+            </a>
+          </span>
           <span class="px-1.5 text-muted-foreground/45">·</span>
           <span>v{{ appVersion }}</span>
           <span class="px-1.5 text-muted-foreground/45">·</span>
