@@ -8,7 +8,7 @@ repository root does not accumulate compose files.
 | Directory | Responsibility |
 |------|------|
 | [`build/`](../build/) | Dockerfile + **local** compose (optional Postgres) |
-| [`deploy/`](../deploy/) | **Production** compose (pull-only) + `env.tpl` (the Buz / OSS config bundle) |
+| [`deploy/`](../deploy/) | **Production** compose (pull-only); `.env` is provided by the deployment environment |
 
 Day-to-day development still runs on `cargo run` + `pnpm dev`; the two compose
 stacks below are for containerised integration and rollout.
@@ -49,7 +49,6 @@ selects the matching architecture automatically.
 | File | Purpose |
 |------|------|
 | `docker-compose.yml` | **Pull-only**, no build; joins the external `manager-net` network |
-| `env.tpl` | Template Buz renders into `deploy/.env` (`${secrets.*}` / `${vars.*}`) |
 
 Production does not start a database in this stack: it connects to an existing
 Postgres (the URL is composed from `SIGNET_POSTGRES_*`, with `postgres` as the
@@ -57,21 +56,15 @@ host on `manager-net`).
 
 ```bash
 cd deploy
-# For a local trial, copy .env.example; in production Buz renders env.tpl from OSS
-cp ../.env.example .env   # temporary only
+# Local trial only; production injects .env from its secret store
+cp ../.env.example .env
 docker compose pull
 docker compose up -d
 ```
 
-CI packages the config:
-
-```text
-tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
-→ OSS config_tpl/signet/<tag>/configs.tar.gz
-```
-
-So do **not** rename `deploy/docker-compose.yml` or `env.tpl`, and do not move
-them: the Buz unpacking contract breaks.
+`.env` is supplied by the deployment environment — Buz or any other pipeline can
+render it from its own secrets. The image workflow publishes only the image; no
+configuration bundle is uploaded anywhere.
 
 First deployment: open the issuer URL; the dashboard redirects to `/setup` to
 create the first administrator.

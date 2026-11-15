@@ -164,11 +164,11 @@ Signet exposes four surfaces; the full references live in `docs/`:
 |----------|---------|--------------|
 | **CI** | Push / PR on source paths | Dashboard typecheck + build + runtime-dependency audit; Rust `fmt` / `clippy` (tests run locally before pushing) |
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
-| **Build Signet Image** | After binary release succeeds | Multi-arch runtime image (`linux/amd64`, `linux/arm64`) from prebuilt binaries → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
+| **Build Signet Image** | After binary release succeeds | Multi-arch runtime image (`linux/amd64`, `linux/arm64`) from prebuilt binaries → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`) |
 
 Tag a release (example): `git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`.
 
-Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
+Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).
 
 
@@ -200,7 +200,7 @@ dashboard/              Vue 3 + Tailwind CSS v4
 migrations/             Postgres migrations (… audit client_id, identity federation, …)
 build/                  Dockerfiles + local compose (image build, optional Postgres)
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
-deploy/                 Production compose + env template (OSS config bundle)
+deploy/                 Production compose (pull-only image)
 docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync
 docs/zh-CN/             Chinese translations of the documents above
 ```
