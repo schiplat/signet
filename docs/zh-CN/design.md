@@ -10,7 +10,6 @@
 | 开发 Issuer | `http://localhost:8443`（默认值；Dashboard → Settings → Server identity 保存的值优先，`SIGNET_ISSUER` 仅作初始值/回退） |
 | 协议 | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
 | 首个客户端 | Cella（内网部署、可出网） |
-| 状态 | Phase 1 MVP 实现中 |
 
 ---
 
@@ -348,35 +347,38 @@ Signet **不是**对外账户体系：无公开自助注册。
 - 外部 IdP 联邦（企业微信等）  
 - 多租户 / 多环境隔离  
 
-### Phase 4 — 安全加固（已实施，除短信验证）
+### Phase 4 — 安全加固
 
 按优先级排序：
 
-| 优先级 | 功能 | 状态 | 说明 |
-|--------|------|------|------|
-| P0 | 密码重置/找回 | ✅ | `/api/v1/password-reset/*`；30 分钟单次 token；SMTP 真实投递（未配置时 503） |
-| P0 | **手机号短信验证绑定** | ⏳ | 唯一未实施项：需短信网关；当前 `phone` 仅作联系信息落库，未验证 |
-| P0 | RFC 7009 吊销端点 | ✅ | 独立 `/oauth/revoke` |
-| P0 | WebAuthn/Passkey + 恢复码 | ✅ | 注册/登录/管理；挑战存内存 |
-| P1 | 新设备/IP 登录告警 | ✅ | `login_devices` + `auth.new_device` 审计/告警邮件 |
-| P1 | API 全局速率限制 | ✅ | 按 IP 滑动窗口限流，超限 429 |
+| 优先级 | 功能 | 说明 |
+|--------|------|------|
+| P0 | 密码重置/找回 | `/api/v1/password-reset/*`；30 分钟单次 token；SMTP 真实投递（未配置时 503） |
+| P0 | **手机号短信验证绑定** | 需短信网关；当前 `phone` 仅作联系信息落库，未验证 |
+| P0 | RFC 7009 吊销端点 | 独立 `/oauth/revoke` |
+| P0 | WebAuthn/Passkey + 恢复码 | 注册/登录/管理；挑战存内存 |
+| P1 | 新设备/IP 登录告警 | `login_devices` + `auth.new_device` 审计/告警邮件 |
+| P1 | API 全局速率限制 | 按 IP 滑动窗口限流，超限 429 |
 
-### Phase 5 — 集成与运维（已实施）
+### Phase 5 — 集成与运维
 
-| 优先级 | 功能 | 状态 | 说明 |
-|--------|------|------|------|
-| P1 | OAuth 客户端动态注册 | ✅ | RFC 7591 `/oauth/register` + 一次性注册 token |
-| P2 | SCIM v2 用户/组同步 | ✅ | `/scim/v2/Users`、`/scim/v2/Groups` |
-| P2 | Webhooks 事件推送 | ✅ | 审计事件异步推送 + HMAC 签名 |
+| 优先级 | 功能 | 说明 |
+|--------|------|------|
+| P1 | OAuth 客户端动态注册 | RFC 7591 `/oauth/register` + 一次性注册 token |
+| P2 | SCIM v2 用户/组同步 | `/scim/v2/Users`、`/scim/v2/Groups` |
+| P2 | Webhooks 事件推送 | 审计事件异步推送 + HMAC 签名 |
 
-### Phase 6 — 监控与可观测（部分实施）
+### Phase 6 — 监控与可观测
 
-| 优先级 | 功能 | 状态 | 说明 |
-|--------|------|------|------|
-| P1 | HTTP 指标 | ✅ | 请求计数（按状态类）/ 在途 / 延迟直方图导出到 `/metrics` |
-| P1 | 健康检查增强 | ✅ | `/health` 探测 Postgres，失败 503 |
-| P2 | 告警对接 | ⏳ | 基于 Prometheus 指标接入 Alertmanager |
-| P2 | 链路追踪 / 请求 ID | ✅ | `x-request-id` 生成/透传/回显 + tracing span 关联 |
+| 优先级 | 功能 | 说明 |
+|--------|------|------|
+| P1 | HTTP 指标 | 请求计数（按状态类）/ 在途 / 延迟直方图导出到 `/metrics` |
+| P1 | 健康检查增强 | `/health` 探测 Postgres，失败 503 |
+| P2 | 告警对接 | 基于 Prometheus 指标接入 Alertmanager |
+| P2 | 链路追踪 / 请求 ID | `x-request-id` 生成/透传/回显 + tracing span 关联 |
+
+尚未实现：**手机号短信验证绑定** 与 **Alertmanager 告警对接**。上述各阶段
+其余功能均已发布；未实现项的权威清单见文档目录页。
 
 ### 连接器与 SAML（同行对比后核实：维持不做，附触发条件）
 
@@ -393,7 +395,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 - **过渡方案已存在**：Signet 的通用 OIDC 上游连接器可以前置一个具备 SAML 能力的 IdP（如 Keycloak/ADFS），把"某个上游只会 SAML"的问题转化为标准联邦对接，不需要 Signet 自己实现 SAML。
 - 触发条件：出现**无法改用 OIDC** 的下游 SP 且业务必须接入时，单独立项（含专门的 XMLDsig 安全评审）。
 
-### 组身份与组织树（0.6.0 已实现）
+### 组身份与组织树
 
 - `users.groups` / `users.directory_groups` 改存 `UUID[]`（迁移 `043`），读取经 `signet_group_names()` 还原名字，写入经 `signet_group_ids(names, src)`；未知名字按 `src` 建行
 - `scim_groups` 增加 `parent_id` / `kind`（department|group）/ `source`（local|scim|directory），成为唯一组实体与组织树

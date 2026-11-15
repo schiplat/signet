@@ -222,7 +222,7 @@ cd .. && cargo build -p signet
 
 | Workflow | 触发 | 作用 |
 |----------|------|------|
-| **CI** | 源码路径的 Push / PR | Dashboard typecheck + build；Rust `fmt` / `clippy` / `test`（依赖 `dashboard/dist`） |
+| **CI** | 源码路径的 Push / PR | Dashboard typecheck + build + 运行时依赖审计；Rust `fmt` / `clippy`（测试在本地推送前跑） |
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 

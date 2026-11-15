@@ -4,7 +4,6 @@
 
 | 项 | 内容 |
 |---|---|
-| 状态 | **P0 + P1 + P2 + P3 + P4 已实现**（地基 + LDAP 拉取引擎 + bind 直通登录 + 定时调度 + 通用 HTTP JSON 源 + 两种 pull kind 共用的映射 UI，见 §13.1）；P5 SCIM push 待做 |
 | 定位 | 把外部目录作为**只读数据源**同步进 Signet 本地用户库；LDAP 用户可直接用目录密码登录 |
 | 首选落地 | LDAP（pull） |
 | 相关文档 | [设计总览](./design.md) · [安全设计](./security.md) · [集成对接](./integrations.md) · [Dashboard API](./api-v1.md) · [MFA](./mfa.md) |
@@ -720,7 +719,7 @@ SCIM push 侧（§14）另有一组，粒度是**每个请求一条**，而不�
 
 ---
 
-## 13. 通用 HTTP JSON 源（P4）—— 已实现
+## 13. 通用 HTTP JSON 源（P4）
 
 配置（`kind = 'http_json'`，`config` 全部为显式点号路径，`deny_unknown_fields`）：
 
@@ -826,18 +825,19 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 
 现有 `/scim/v2` 是 SCIM **服务端**，路线正确，但需加固才能真正承接 Okta / Entra 的推送：
 
-| 问题 | 位置 | 待办 | 状态 |
-|---|---|---|---|
-| `role = 'user'` 违反 CHECK（只允许 admin/manager/member），**建用户必然 500** | `scim.rs` create_user | 改为 `'member'` | ✅ 已修（与 §15 #1 同一处） |
-| `PATCH` 请求体的操作列表名是 `operations`，而 RFC 7644 与各 IdP 发的是 `Operations`；serde 大小写敏感 + `#[serde(default)]` ⇒ 列表为空、**整个请求体被丢弃**，却回 200 与未改动的资源 | `scim.rs` `PatchUserBody` / `PatchGroupBody` | 接受两种拼写 | ✅ 已修（`rename = "Operations"`, `alias = "operations"`） |
-| 操作未读 `op`/`path`，一律按写入处理 ⇒ 组路由上 `remove` **反而把成员加上**；`{"op":"remove","path":"active"}` 无 `value` ⇒ 静默无效；Entra 的 `{"op":"Replace","path":"active","value":false}`（标量）⇒ 被接受并忽略 | `scim.rs` `patch_user` / `patch_group` | 按 RFC 7644 §3.5.2 解析 `op`/`path`，支持 `active`/`displayName`/`members` | ✅ 已修（语义抽成 `user_attrs_from_patch` / `group_member_changes` 纯函数） |
-| `PATCH /Groups` 只能加不能删 | `scim.rs` `patch_group` | 支持 add/remove/replace | ✅ 已修（含 Okta 的 `members[value eq "<id>"]` 过滤器形式） |
-| `delete_group` 绑定了未使用的 `$1` | `scim.rs` `delete_group` | 修正绑定 | ✅ 已修（与 §15 #4 同一处） |
-| DELETE 返回 200 + Error schema | `scim.rs` `delete_user` / `delete_group` | 改为 `204` | ✅ 已修 |
-| `PATCH /Users` 不支持 `userName` / `emails` 写入 | `scim.rs` `patch_user` | 按 op/path 正确解析，支持 `userName`/`emails`/`active` | ⏳ 待做：`emails`/`username` 是 UNIQUE 列，写入需要先决定唯一冲突对推送客户端意味着什么（409 还是合并），属 P5 功能而非缺陷 |
-| 无 filter 支持 | `scim.rs:100` | 视上游要求决定是否实现 | ⏳ 待做 |
-| 审计缺失（无 `scim.group.*`） | — | 补齐 | ✅ 已修：见 §14.1 与 §11.1 的事件表 |
-| 组模型 | — | 从 `users.groups` 迁移到 `directory_groups`，与 §6.5 对齐 | ⏳ 待做 |
+| 问题 | 位置 | 修法 |
+|---|---|---|
+| `role = 'user'` 违反 CHECK（只允许 admin/manager/member），**建用户必然 500** | `scim.rs` create_user | 改为 `'member'` |
+| `PATCH` 请求体的操作列表名是 `operations`，而 RFC 7644 与各 IdP 发的是 `Operations`；serde 大小写敏感 + `#[serde(default)]` ⇒ 列表为空、**整个请求体被丢弃**，却回 200 与未改动的资源 | `scim.rs` `PatchUserBody` / `PatchGroupBody` | 接受两种拼写 |
+| 操作未读 `op`/`path`，一律按写入处理 ⇒ 组路由上 `remove` **反而把成员加上**；`{"op":"remove","path":"active"}` 无 `value` ⇒ 静默无效；Entra 的 `{"op":"Replace","path":"active","value":false}`（标量）⇒ 被接受并忽略 | `scim.rs` `patch_user` / `patch_group` | 按 RFC 7644 §3.5.2 解析 `op`/`path`，支持 `active`/`displayName`/`members` |
+| `PATCH /Groups` 只能加不能删 | `scim.rs` `patch_group` | 支持 add/remove/replace |
+| `delete_group` 绑定了未使用的 `$1` | `scim.rs` `delete_group` | 修正绑定 |
+| DELETE 返回 200 + Error schema | `scim.rs` `delete_user` / `delete_group` | 改为 `204` |
+| 审计缺失（无 `scim.group.*`） | — | 补齐 |
+
+尚未实现：`PATCH /Users` 写 `userName` / `emails`（需先定义唯一冲突
+对推送客户端的语义）、SCIM `filter` 支持、把 SCIM 组存储迁到
+`directory_groups`。权威清单见[文档目录](./README.md#尚未实现)。
 
 > **`Operations` 那一项值得单独说明**：它让上面所有 PATCH 缺陷都变得不可观测——真实客户端的请求体在反序列化阶段就变成了空列表，路由于是"成功"地什么都没做。先前的缺陷分析（"完全忽略 op/path 语义"）是在只有小写拼写的请求体下才成立；对上真实 IdP，症状是"PATCH 一律返回 200 且无任何变化"。回归测试因此走**请求体**这一层（`user_attrs_from_body` / `group_member_changes_from_body`），而不是直接调用解释器——否则这个 bug 依然测不到。
 
@@ -869,15 +869,15 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 
 这些是当前代码里**已经坏掉**、且正好落在本设计要复用的链路上的缺陷：
 
-| # | 位置 | 问题 | 修法 | 状态 |
-|---|---|---|---|---|
-| 1 | `scim.rs:228` | 插入 `role = 'user'`，违反 `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` 必然 500 | 改为 `'member'` | ✅ 已修 |
-| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'`，违反 `CHECK (purpose IN ('login','enroll'))` → 强制改密流程坏 | 扩展 CHECK 或改用既有值 | ✅ 已修（迁移 `022`，按约束定义查名删除，不依赖自动命名） |
-| 3 | `auth/routes.rs:90` | `password_hash = ''` 的用户（SSO JIT / SCIM 创建）会使 `PasswordHash::new("")` 报错，被 `?` 转成 **500** 而非 401 | 按 §8.1 分派；非托管用户的空 hash 返回 401 | ✅ 已修（空 hash → 401；§8.1 的 LDAP 分派待 P2） |
-| 4 | `scim.rs:684` | `delete_group` 的 UPDATE 只引用 `$2`，却先绑定了 `group.id` | 修正参数绑定 | ✅ 已修 |
-| 5 | `webhooks.rs:80` | 出站 URL 只校验 `http(s)://` 前缀，无 SSRF 防护 | 接入 §12 统一出站校验 | ✅ 已修（新增 `outbound` 模块；创建时 + **每次投递时**校验，禁用重定向） |
-| 6 | `webhooks.rs:87` | `webhooks.secret` 明文存储，与其它密钥处理不一致 | 经 `Encryptor` 加解密 | ✅ 已修（迁移 `023` 加 `secret_enc`；`audit::record` 改为接收 `&AppState`，53 处调用点同步更新；`bootstrap::encrypt_webhook_secrets` 在启动时把存量明文一次性搬走） |
-| 7 | `federation/provider.rs` | 出站 HTTP 无 timeout（仅 webhook 有 10s） | 统一到出站模块 | ✅ 已修（统一 client：连接 5s / 整体 10s、禁重定向、响应体 1 MiB 上限） |
+| # | 位置 | 问题 | 修法 |
+|---|---|---|---|
+| 1 | `scim.rs:228` | 插入 `role = 'user'`，违反 `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` 必然 500 | 改为 `'member'` |
+| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'`，违反 `CHECK (purpose IN ('login','enroll'))` → 强制改密流程坏 | 扩展 CHECK 或改用既有值 |
+| 3 | `auth/routes.rs:90` | `password_hash = ''` 的用户（SSO JIT / SCIM 创建）会使 `PasswordHash::new("")` 报错，被 `?` 转成 **500** 而非 401 | 按 §8.1 分派；非托管用户的空 hash 返回 401 |
+| 4 | `scim.rs:684` | `delete_group` 的 UPDATE 只引用 `$2`，却先绑定了 `group.id` | 修正参数绑定 |
+| 5 | `webhooks.rs:80` | 出站 URL 只校验 `http(s)://` 前缀，无 SSRF 防护 | 接入 §12 统一出站校验 |
+| 6 | `webhooks.rs:87` | `webhooks.secret` 明文存储，与其它密钥处理不一致 | 经 `Encryptor` 加解密 |
+| 7 | `federation/provider.rs` | 出站 HTTP 无 timeout（仅 webhook 有 10s） | 统一到出站模块 |
 
 > **第 6 项的落点**：`audit::record(pool, event)` 已改为 `audit::record(state, event)`，`webhooks::dispatch` / `deliver_one` 同样接收 `&AppState`，因此投递路径能拿到 `Encryptor` 解密 `secret_enc`。`login_alert::track_login` 一并改签名。存量明文通过启动时的 `bootstrap::encrypt_webhook_secrets` 搬迁，且该步骤**故意设为致命错误**：静默失败会让 `secret_enc` 为空，投递直接降级为不签名。
 
@@ -888,17 +888,19 @@ LDAP 的组在真实同步里是从**组侧**搜索得到（`fetch_group_members
 
 ## 16. 分期与验收
 
-| 阶段 | 内容 | 验收标准 | 状态 |
+| 阶段 | 内容 | 验收标准 |
 |---|---|---|
-| **P0 地基** | §15 全部缺陷修复；`is_managed`/只读语义；§4 三张表 + `users` 变更；审计事件；统一出站模块；凭据加密 | 现有测试通过；SCIM 建用户不再 500；强制改密可用；空密码用户返回 401；管理员改目录用户被拒 | ✅ 已完成：迁移 `024`（三张表 + `users` 两列）；`directory` 模块 + `tests/directory_policy.rs`；拒写已记审计。同步引擎自身的 `directory.sync.*` 事件推迟到 P1——现在还没有同步可审计 |
-| **P1 LDAP 同步引擎** | 连接/LDAPS；全量分页拉取；指纹比对；创建/更新；缺失即 disable；组写入 `directory_groups`；CLI（含 `--dry-run`、`--json`）；手动触发 API；运行历史 | `--dry-run` 输出的差异与真实执行一致；对目标目录跑通全量；上游删人后用户变 disabled 且审计留痕；重复运行第二遍 `updated = 0` | ✅ 已实现：`directory/{source,plan,model,ldap,engine,api,cli}.rs`；迁移 `025` 保证单源单 run；CLI `signet sync`；`/admin/directory/sources` 系列端点。测试：`tests/directory_plan.rs`（纯规划 10 例）、`tests/directory_engine.rs`（真库 7 例，含"第二次运行 `updated = 0`"）。**未对真实目录联调**——需要 Q1 确定 AD/OpenLDAP 后做 |
-| **P2 LDAP bind 直通** | 按 §8 分派登录；LDAPS bind；fail closed；指标 | 目录用户能用目录密码登录并正常走 MFA；改密后新密码生效；LDAP 停机时返回 503 且明确不回退 | ✅ 已实现：`directory::auth`（三态结果）+ `ldap::bind_as`（一次性 bind、必 unbind）+ 登录处理器分派 + 两个独立指标 + `set_user_password` 收口。测试：`tests/directory_login.rs`（18 例，含"不可达 → 503 而非 401""复选源按 priority""停用源/删除源回退本地""托管账号拒绝写本地密码"，以及空密码既不发起 bind 也不变成 503 的两例）。**未对真实目录验证**：`改密后新密码生效`、`正常走 MFA` 需 Q1 确定 AD/OpenLDAP 后联调 |
-| **P3 定时调度** | §10 调度循环 + advisory lock；运行历史 UI 入口 | 到点自动运行；双副本同时启动只跑一次；失败有审计与指标 | ✅ 已完成：调度（`directory::scheduler` + `model::due_sources`，含崩溃遗留 run 的自动恢复）、运行历史 UI（`DirectoryView.vue` 的 History 面板 + `/admin/directory/sources/{code}/runs`）、调度与同步指标（`signet_directory_sync_runs_total` / `_failures_total` / `_partial_total` / `_conflicts_total` / `_last_success_timestamp_seconds`）。测试：`tests/directory_scheduler.rs` 8 例。**未做**：advisory lock（见 §10 说明，改由迁移 `025` 的部分唯一索引保证） |
-| **P4 HTTP JSON 源** | §13 | 完成一次全量同步；SSRF 用例（内网地址、重定向、超大响应）全部被拒 | ✅ 已完成：`directory/http_json.rs`（点号路径映射 + `none`/`page`/`cursor` 分页 + Bearer/Basic 鉴权 + 每页重新走 `outbound` 校验）；`SourceConfig` 按 kind 分派，planner/apply 完全复用；API 与 Dashboard 支持 `kind = http_json`。测试：`tests/http_json_source.rs` 21 例，含**真库端到端**一次全量同步 + 二次运行零变更，以及"严格策略下内网地址在抓取时被拒且请求未发出" |
-| **P4.5 共用映射 UI** | §13.1 | 贴一次样例即可点选映射；预览与真实写入（规范化后）一致；样例不落库不写日志 | ✅ 已完成：后端 `directory/{ldif,mapping}.rs` + `POST /admin/directory/sources/preview-mapping`（纯函数，与同步共用 `upstream_from_entry` / `to_upstream` / planner 规范化）；LDAP 侧把 entry→`UpstreamUser` 抽成 `ldap::upstream_from_entry` 供同步与预览共用。前端 `lib/directoryMapping.ts`（共享行定义）+ `components/directory/{MappingPanel,MappingTable,FieldPicker}.vue` + `lib/valueShape.ts`（交互规范见 `docs/directory-mapping-ux.md`）；LDAP 表单把映射键交还给面板（连接/鉴权/分页仍留在表单）。**校验全量、回显分页**：`fields`/`targets` 的计数对全部样例条目计算（`total == entry_count`），`rows` 按 `offset` 每页 25 条返回。测试：`tests/directory_mapping_preview.rs` 52 例（LDIF 折行/`::` base64/二进制 `objectGUID`→GUID/注释与 `version`/畸形行报行号/URL 值拒绝、两种 kind 的逐行判定与规范化行、样例体积上限、请求体契约、分页与完整计数的一致性、作用域行的判定）。**未做**：从上游拉取样例（probe），故 LDAP 组列为最佳推定（§13.1.4） |
-| **P4.6 从上游拉取样例（probe）** | §13.1.2 | 不必手工粘贴；LDAP 组列由近似变为精确 | 待做（可独立交付；需新增 admin-only 的 probe 端点，复用 `outbound::ensure_allowed`） |
-| **P4.7 源作用域：邮箱域 / 部门** | §7.2.1 | 只同步指定域/部门；配置写错（匹配 0 条）时预览直接判失败而不是静默清空；运行历史能区分「离职」与「调岗」 | ✅ 已完成：`plan::ScopeFilter`（纯谓词，域按标签边界比较、无通配符）+ `UpstreamUser.department` + `PlanOptions.scope`；planner 对掉出作用域的已 link 用户产出 `Disable`，`reason = out_of_scope`（与 `absent_upstream` 区分，并一路带到审计 detail）；`apply_disables` 改为逐条沿用 planner 的原因；两个 kind 的配置字段与保存期校验（空条目、通配符、把地址当域、`department_values` 缺 `department_attribute`/`department_path` 一律拒绝）；预览的 `scope` 行改为可判定（匹配 0 条 ⇒ `ok: false`，且对**全量**样例计数）；Dashboard 在 scope 行加入域/部门输入（列表在表单里是单个字符串，出站时才切分成数组）。测试：`tests/directory_scope.rs` 29 例（谓词边界，含 `evilcorp.example` 不得匹配；planner 的两个 reason 与 `--limit` 下不禁用；配置校验）+ `tests/directory_mapping_preview.rs` 新增 11 例。**刻意未做**：单次运行禁用数超过阈值即中止（本次只要求"可区分"，见 §7.2.1 的安全阀讨论） |
-| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 | ✅ 已实现（除下列"剩余"）：§14 的缺陷已修（`Operations` 字段名、`op`/`path` 语义、组成员 remove/replace、DELETE `204`）；上游语义已落地（删除只停用、组墓碑、`scim_managed` 归属、§11.1 的完整事件集）。测试：`tests/scim_patch.rs`（含"改 `displayName` 不得被读成清空成员"）、`tests/scim_audit.rs`、`tests/scim_ownership.rs`、`tests/scim_group_retention.rs`、`tests/scim_delete_guard.rs`。**剩余为功能**——`userName`/`emails` 写入、filter、组模型迁移到 `directory_groups` |
+| **P0 地基** | §15 全部缺陷修复；`is_managed`/只读语义；§4 三张表 + `users` 变更；审计事件；统一出站模块；凭据加密 | 现有测试通过；SCIM 建用户不再 500；强制改密可用；空密码用户返回 401；管理员改目录用户被拒 |
+| **P1 LDAP 同步引擎** | 连接/LDAPS；全量分页拉取；指纹比对；创建/更新；缺失即 disable；组写入 `directory_groups`；CLI（含 `--dry-run`、`--json`）；手动触发 API；运行历史 | `--dry-run` 输出的差异与真实执行一致；对目标目录跑通全量；上游删人后用户变 disabled 且审计留痕；重复运行第二遍 `updated = 0` |
+| **P2 LDAP bind 直通** | 按 §8 分派登录；LDAPS bind；fail closed；指标 | 目录用户能用目录密码登录并正常走 MFA；改密后新密码生效；LDAP 停机时返回 503 且明确不回退 |
+| **P3 定时调度** | §10 调度循环 + advisory lock；运行历史 UI 入口 | 到点自动运行；双副本同时启动只跑一次；失败有审计与指标 |
+| **P4 HTTP JSON 源** | §13 | 完成一次全量同步；SSRF 用例（内网地址、重定向、超大响应）全部被拒 |
+| **P4.5 共用映射 UI** | §13.1 | 贴一次样例即可点选映射；预览与真实写入（规范化后）一致；样例不落库不写日志 |
+| **P4.7 源作用域：邮箱域 / 部门** | §7.2.1 | 只同步指定域/部门；配置写错（匹配 0 条）时预览直接判失败而不是静默清空；运行历史能区分「离职」与「调岗」 |
+| **P5 SCIM push 加固** | §14 | Okta/Entra 真实推送可完成增删改；组增删正确；审计完整 |
+
+尚未实现：从上游拉取样例（P4.6）。映射预览依赖手工粘贴样例，因此
+LDAP 组列仍为最佳推定。
 
 > **P1 与 P2 必须紧邻交付**：只做同步不做 bind 直通，目录用户同步进来却登不进去，功能等于没交付。
 
