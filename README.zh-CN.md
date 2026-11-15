@@ -18,8 +18,8 @@
 
 ```bash
 # 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.1/signet-0.6.1-macos-arm64
-chmod +x signet-0.6.1-macos-arm64 && mv signet-0.6.1-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/latest/download/signet-macos-arm64
+chmod +x signet-macos-arm64 && mv signet-macos-arm64 signet
 
 # 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
 docker run -d --name signet-db -p 5433:5432 \
@@ -40,7 +40,7 @@ cp ../.env.example .env   # 编辑 SIGNET_*；并设置 SIGNET_IMAGE=<registry>/
 docker compose up -d
 ```
 
-生产布局（外部 Postgres、密钥卷）详见 [docs/deploy.md](./docs/deploy.md)。
+生产布局（外部 Postgres、密钥卷）详见 [docs/deploy.md](./docs/zh-CN/deploy.md)。
 
 **方式 C：源码构建（开发）**
 
@@ -94,7 +94,7 @@ cargo run
 # 打开 http://127.0.0.1:3000 → Sign in → SSO 登录成功
 ```
 
-前端热更新开发（`:5173` 代理 `:8443`）见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/client-integration.md)。
+前端热更新开发（`:5173` 代理 `:8443`）见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/zh-CN/client-integration.md)。
 
 ## 功能概览
 
@@ -108,7 +108,7 @@ cargo run
 - **运行时策略**（token/会话有效期、登录锁定、密码策略、审计保留、限流）在后台修改，落库即生效，无需重新部署
 - **签名密钥轮换**（`signet keys rotate` / `keys prune`），JWKS 同时发布新旧公钥，已签发 token 不受影响
 - **第三方登录**（身份联邦）：GitHub · Google · 飞书 · 微信开放平台 · 通用 OIDC  
-  绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则按 JIT 策略（全局 Settings 开关 + **每个 provider 可独立覆盖** `jit_mode`，并可单独配置 email 可信级别 `email_trust`）**JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。本地 MFA / 强制改密策略对第三方登录同样生效。详见 [docs/api-v1.md §12](./docs/api-v1.md#12-第三方登录身份联邦)
+  绑定：上游已验证邮箱匹配本地账号 → 自动绑定；否则按 JIT 策略（全局 Settings 开关 + **每个 provider 可独立覆盖** `jit_mode`，并可单独配置 email 可信级别 `email_trust`）**JIT 创建** `member` 并登录；再否则暂存 15 分钟待密码绑定。本地 MFA / 强制改密策略对第三方登录同样生效。详见 [docs/api-v1.md §12](./docs/zh-CN/api-v1.md#12-第三方登录身份联邦)
 
 ![Dashboard 总览](./docs/screenshot_overview.png)
 
@@ -116,18 +116,20 @@ cargo run
 
 | 文档 | 内容 |
 |------|------|
-| [docs/design.md](./docs/design.md) | 总体设计、角色、安全、路线图 |
-| [docs/security.md](./docs/security.md) | **安全设计汇总**（凭证存储、认证、会话、MFA、OIDC、审计、密钥） |
-| [docs/client-integration.md](./docs/client-integration.md) | **业务客户端 OIDC 对接**（authorize/token/PKCE/IP 白名单） |
-| [docs/integrations.md](./docs/integrations.md) | **集成对接**（RFC 7591 动态注册 · Webhooks/飞书 · SCIM v2） |
-| [docs/api-v1.md](./docs/api-v1.md) | **Dashboard HTTP API**（统一 `/api/v1/...`，含第三方登录） |
-| [docs/mfa.md](./docs/mfa.md) | TOTP / 恢复码 / 全局与用户强制策略 |
-| [docs/dashboard.md](./docs/dashboard.md) | 管理台页面与权限说明 |
-| [docs/groups.md](./docs/groups.md) | **组与部门**（组织树、成员、来源归属、API、claim 语义） |
-| [docs/directory-sync.md](./docs/directory-sync.md) | **目录同步**（LDAP / HTTP JSON 拉取、bind 直通、定时调度、`signet sync` CLI） |
+| [docs/design.md](./docs/zh-CN/design.md) | 总体设计、角色、安全、路线图 |
+| [docs/security.md](./docs/zh-CN/security.md) | **安全设计汇总**（凭证存储、认证、会话、MFA、OIDC、审计、密钥） |
+| [docs/client-integration.md](./docs/zh-CN/client-integration.md) | **业务客户端 OIDC 对接**（authorize/token/PKCE/IP 白名单） |
+| [docs/integrations.md](./docs/zh-CN/integrations.md) | **集成对接**（RFC 7591 动态注册 · Webhooks/飞书 · SCIM v2） |
+| [docs/api-v1.md](./docs/zh-CN/api-v1.md) | **Dashboard HTTP API**（统一 `/api/v1/...`，含第三方登录） |
+| [docs/mfa.md](./docs/zh-CN/mfa.md) | TOTP / 恢复码 / 全局与用户强制策略 |
+| [docs/dashboard.md](./docs/zh-CN/dashboard.md) | 管理台页面与权限说明 |
+| [docs/groups.md](./docs/zh-CN/groups.md) | **组与部门**（组织树、成员、来源归属、API、claim 语义） |
+| [docs/directory-sync.md](./docs/zh-CN/directory-sync.md) | **目录同步**（LDAP / HTTP JSON 拉取、bind 直通、定时调度、`signet sync` CLI） |
 | [docs/directory-mapping-ux.md](./docs/directory-mapping-ux.md) | 目录同步字段映射交互设计（含实现记录） |
-| [docs/deploy.md](./docs/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
+| [docs/deploy.md](./docs/zh-CN/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本变更与破坏性改动 |
+
+英文文档在 [docs/](./docs/)（源版本）；本目录的中文版随版本更新可能滞后。
 
 ## 本地开发
 
@@ -211,7 +213,7 @@ cd .. && cargo build -p signet
 | `GET /api/v1/auth/sso/providers` | 公开：已启用的 SSO provider 列表 |
 | `GET/DELETE /api/v1/auth/sso/identities/*` | 已绑定第三方账号列表 / 解绑 |
 | `/scim/v2/*` | SCIM v2 用户/组同步（Bearer 认证） |
-| `/api/v1/*` | Dashboard / 会话 / 管理 API（**统一前缀**，见 [api-v1.md](./docs/api-v1.md)） |
+| `/api/v1/*` | Dashboard / 会话 / 管理 API（**统一前缀**，见 [api-v1.md](./docs/zh-CN/api-v1.md)） |
 
 示例：`POST /api/v1/login`、`GET /api/v1/admin/users`、`GET /api/v1/admin/stats`。
 
@@ -225,7 +227,7 @@ cd .. && cargo build -p signet
 
 发版示例：`git tag -a v0.6.1 -m v0.6.1 && git push origin v0.6.1`。
 
-构建与部署布局见 [`docs/deploy.md`](./docs/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
+构建与部署布局见 [`docs/deploy.md`](./docs/zh-CN/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。
 
 ## 仓库结构
@@ -238,5 +240,6 @@ examples/               axum-oidc-client：业务系统接入 quickstart（可�
 build/                  Dockerfile + 本地 compose（镜像构建、可选 Postgres）
 .github/workflows/      ci.yml · release-binary.yml · build-signet-image.yml
 deploy/                 生产 compose + env 模板（OSS 配置包）
-docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync
+docs/                   design · security · client-integration · integrations · api-v1 · mfa · dashboard · groups · directory-sync（英文源文档）
+docs/zh-CN/             上述文档的中文译本
 ```

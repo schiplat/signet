@@ -1,238 +1,329 @@
-# Signet 安全设计
+# Signet security design
 
-本文汇总 Signet 的安全机制与实现现状，作为 [design.md](./design.md) 安全要求的展开。
+> English · [简体中文](./zh-CN/security.md)
 
-| 项 | 内容 |
+This document summarises Signet's security mechanisms and their implementation
+status, expanding the security requirements in [design.md](./design.md).
+
+| Item | Detail |
 |---|---|
-| 状态 | 标注 ✅（已实现）/ ⏳（规划中） |
-| 相关文档 | [design.md](./design.md) · [api-v1.md](./api-v1.md) · [mfa.md](./mfa.md) · [client-integration.md](./client-integration.md) · [integrations.md](./integrations.md) |
+| Status | ✅ implemented / ⏳ planned |
+| Related | [design.md](./design.md) · [api-v1.md](./api-v1.md) · [mfa.md](./mfa.md) · [client-integration.md](./client-integration.md) · [integrations.md](./integrations.md) |
 
 ---
 
-## 1. 凭证与密钥存储
+## 1. Credential and key storage
 
-**原则：任何可验证的凭证都只存哈希/密文，不存明文。**
+**Principle: any verifiable credential is stored as a hash or ciphertext, never
+as plaintext.**
 
-| 数据 | 存储位置 | 方式 | 状态 |
+| Data | Stored in | Method | Status |
 |------|---------|------|------|
-| 用户密码 | `users.password_hash` | Argon2（随机盐） | ✅ |
-| 密码历史 | `password_history.password_hash` | Argon2 | ✅ |
-| MFA 恢复码 | `totp_recovery_codes.code_hash` | Argon2（规范化后哈希） | ✅ |
-| OAuth 客户端密钥 | `client_apps.client_secret_hash` | HMAC-SHA256（应用侧 pepper，常量时间比较；历史 Argon2 行在匹配后自动升级） | ✅ |
-| 会话 token | `sessions.token_hash` | SHA-256 | ✅ |
-| 授权码 | `auth_codes.code_hash` | SHA-256 | ✅ |
+| User password | `users.password_hash` | Argon2 (random salt) | ✅ |
+| Password history | `password_history.password_hash` | Argon2 | ✅ |
+| MFA recovery codes | `totp_recovery_codes.code_hash` | Argon2 (normalised before hashing) | ✅ |
+| OAuth client secret | `client_apps.client_secret_hash` | HMAC-SHA256 (application pepper, constant-time comparison; legacy Argon2 rows upgrade on match) | ✅ |
+| Session token | `sessions.token_hash` | SHA-256 | ✅ |
+| Authorization code | `auth_codes.code_hash` | SHA-256 | ✅ |
 | Refresh token | `refresh_tokens.token_hash` | SHA-256 | ✅ |
-| MFA 挑战 token | `mfa_challenges.token_hash` | SHA-256 | ✅ |
-| **TOTP 密钥** | `users.totp_secret` | **AES-256-GCM 应用层加密** | ✅ |
+| MFA challenge token | `mfa_challenges.token_hash` | SHA-256 | ✅ |
+| **TOTP secret** | `users.totp_secret` | **AES-256-GCM application-layer encryption** | ✅ |
 
-### 1.1 TOTP 密钥应用层加密
+### 1.1 Application-layer encryption of TOTP secrets
 
-`totp_secret` 是验证 TOTP 所必需的**可逆共享密钥**，无法像密码一样只做单向哈希，因此使用**应用层加密**而非明文落库：
+`totp_secret` is a **reversible shared secret** required to verify TOTP, so it
+cannot be one-way hashed like a password. It is therefore **encrypted at the
+application layer** rather than stored in plaintext:
 
-- 算法：AES-256-GCM，每次加密生成随机 96-bit nonce，`nonce ‖ ciphertext` base64 后落库。
-- 密钥：`data/encryption.key`（32 字节 hex），首次启动自动生成；可用 `SIGNET_ENCRYPTION_KEY_PATH` 覆盖。
-- 实现：`crates/signet/src/encryption.rs`（`Encryptor`）。
-- 读写点：enroll / rebind 写入时加密；verify / regenerate / rebind 读取时解密。
-- **向后兼容**：解密失败时按明文回退，旧明文行无需迁移，下次换绑/重绑自动转为密文。
-- 密钥与 JWT 私钥同等敏感，生产环境应纳入备份与权限管控。
-- **同一数据库的多实例必须共享同一把 key**：否则会互相写出解不开的密文（典型症状：实例 A 登记、实例 B 校验 TOTP 失败）。启动时以 `app_settings.crypto.encryption_key_fingerprint` 指纹校验，不一致拒绝启动；见 [deploy.md §3](./deploy.md#3-密钥目录-appdata)。
+- Algorithm: AES-256-GCM; each encryption uses a random 96-bit nonce; the value is
+  stored as base64 of `nonce ‖ ciphertext`.
+- Key: `data/encryption.key` (32 bytes hex), generated on first start; override
+  with `SIGNET_ENCRYPTION_KEY_PATH`.
+- Implementation: `crates/signet/src/crypto/encryption.rs` (`Encryptor`).
+- Read/write points: encryption on enroll / rebind writes; decryption on verify /
+  regenerate / rebind reads.
+- **Backward compatibility**: a failed decryption falls back to plaintext, so
+  legacy plaintext rows need no migration and convert to ciphertext on the next
+  rebind.
+- The key is as sensitive as the JWT private key and belongs in backups and
+  permission controls.
+- **Instances sharing one database must share one key**: otherwise they write
+  ciphertext the other cannot read (typical symptom: a TOTP enrolled on instance
+  A fails verification on instance B). Startup checks the
+  `app_settings.crypto.encryption_key_fingerprint` row and refuses to start on a
+  mismatch; see [deploy.md §3](./deploy.md#3-key-directory-appdata).
 
-> ⚠️ 历史数据迁移：已存在的明文 `totp_secret` 不会主动批量重加密（避免影响在线用户），会在下一次换绑/重绑时自然轮换为密文。如需强制全量迁移，可在维护窗口执行一次性脚本遍历 `users.totp_secret` 重新加密。
-
----
-
-## 2. 认证安全
-
-### 2.1 登录防爆破 ✅
-
-- 连续密码错误达 `SIGNET_MAX_LOGIN_ATTEMPTS`（默认 5）后锁定账号 `SIGNET_LOCKOUT_MINUTES`（默认 15）分钟。
-- 字段：`users.failed_login_attempts`、`users.locked_until`。
-- 失败写审计 `auth.login_failed`；锁定期间返回明确提示。
-- 登录成功即清零计数。
-
-### 2.2 密码策略 ✅
-
-- 最小长度 `SIGNET_PASSWORD_MIN_LENGTH`（默认 10）。
-- 复杂度：必须包含大写、小写字母与数字。
-- 历史复用：新密码不得与最近 `SIGNET_PASSWORD_HISTORY_SIZE`（默认 3）次历史相同。
-- 实现：`crates/signet/src/password.rs`（`set_user_password` 统一校验）。
-
-### 2.3 邮箱 / 手机唯一性与查重 ✅
-
-- `users.email` 有数据库唯一约束（`users_email_key`）；`users.phone` 有部分唯一索引（`users_phone_key`，仅非空值）。
-- 创建/更新用户时后端**显式查重**，重复分别返回 `400 email already exists` / `400 phone already exists`。
-- 前端新建/编辑表单对邮箱与手机做防抖实时查重（`email-check` / `phone-check`），命中即提示并禁用提交。
-- 自助 profile 编辑（`PATCH /api/v1/me`）支持 `phone`，同样查重（排除自身）。
-
-> ⏳ **手机号绑定验证（规划，暂未实现）**：当前 `phone` 仅作**未验证的联系信息**落库。完整绑定需经短信验证码（SMS OTP）验证后标记为「已验证」，才可用于找回密码/账号恢复/短信登录等敏感场景。需短信网关（如阿里云短信）与发送限流/防重放设计；详情见 [design.md](./design.md) Phase 4。
-
-### 2.4 登录审计 ✅
-
-- 成功/失败登录均写审计，记录客户端 IP 与浏览器/OS（由 `User-Agent` 解析，见 §6）。
-- **客户端 IP 只信可信代理**（`SIGNET_TRUSTED_PROXIES`）：仅当直连 peer 命中该列表时才采信 `X-Forwarded-For` / `X-Real-IP`，且取**从右往左第一个不可信跳**（而非最左侧——那是客户端可伪造的）。未配置时一律用 peer 地址，伪造的转发头无法影响 IP 白名单、限流与审计。
-
-### 2.5 密码重置 ✅
-
-- `POST /api/v1/password-reset/request` 生成 30 分钟有效、单次使用的重置 token（SHA-256 哈希落库）。
-- 链接经 SMTP 真实投递；未配置 SMTP 时请求返回 503（开发态用 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回成功，防枚举。
-- `POST /api/v1/password-reset/confirm` 校验 token、应用密码策略、消费 token 并吊销全部会话。
-
-### 2.6 WebAuthn / Passkey ✅
-
-- 无密码、抗钓鱼的第二因素；passkey 公钥以 `webauthn-rs` `Passkey` JSON 落库，登录成功后更新签名计数器。
-- 注册（`/api/v1/me/passkeys/*`）需已登录；登录（`/api/v1/passkeys/*`）成功后建立会话并写 `auth.login`（`mfa: passkey`）。
-- 挑战状态存服务端内存（单实例、5 分钟有效、单次使用）。
-
-### 2.7 新设备/IP 登录告警 ✅
-
-- 首次出现的（用户, IP）会写 `auth.new_device` 审计并发送告警邮件；未配置 SMTP 时告警只进日志，不阻塞登录。
-- 登录源记录在 `login_devices` 表，用于后续异常检测。
-
-### 2.8 登录白名单（邮箱域名）✅
-
-- 只允许指定邮箱域名的地址登录 / 被开通 / 被同步；配置见 `docs/api-v1.md` §14。
-- 语义是**准入**而非**所有权**：名单外的地址被拒绝（`auth.sign_in_blocked` / `user.provision_blocked`），账号**不被禁用**，数据与历史保留 —— 缩窄名单不等于批量停用。
-- 域按标签边界比较、无通配符；保存时校验（空条目 / 把地址当域 / 通配符一律拒绝）；保存一个把当前操作者排除在外的名单会被服务端拒绝，避免自锁；启动时若名单排除了全部 admin 会记 `warn`。
-- 首次部署 `/setup` 不受限制（否则新部署建不出第一个管理员）。
+> ⚠️ Legacy data: existing plaintext `totp_secret` rows are not bulk
+> re-encrypted (that would disrupt online users); they convert naturally on the
+> next rebind. A maintenance-window script can force a full migration by walking
+> `users.totp_secret`.
 
 ---
 
-## 3. 会话管理 ✅
+## 2. Authentication security
 
-| 能力 | 说明 |
+### 2.1 Login brute-force protection ✅
+
+- After `SIGNET_MAX_LOGIN_ATTEMPTS` consecutive wrong passwords (default 5) the
+  account locks for `SIGNET_LOCKOUT_MINUTES` (default 15).
+- Fields: `users.failed_login_attempts`, `users.locked_until`.
+- Failures are audited as `auth.login_failed`; a locked account gets an explicit
+  message.
+- A successful login resets the counter.
+
+### 2.2 Password policy ✅
+
+- Minimum length `SIGNET_PASSWORD_MIN_LENGTH` (default 10).
+- Complexity: must contain uppercase, lowercase and a digit.
+- History: a new password may not match the most recent
+  `SIGNET_PASSWORD_HISTORY_SIZE` (default 3).
+- Implementation: `crates/signet/src/auth/password.rs` (`set_user_password`
+  centralises the checks).
+
+### 2.3 Email and phone uniqueness ✅
+
+- `users.email` carries a database unique constraint (`users_email_key`);
+  `users.phone` has a partial unique index (`users_phone_key`, non-null values
+  only).
+- Create/update **checks explicitly** and returns `400 email already exists` /
+  `400 phone already exists`.
+- The create/edit form debounces a live check (`email-check` / `phone-check`) and
+  disables submit on a hit.
+- Self-service profile edit (`PATCH /api/v1/me`) accepts `phone` and performs the
+  same check (excluding self).
+
+> ⏳ **Phone verification is planned, not implemented**: `phone` is stored as
+> **unverified contact information** only. Full binding requires an SMS OTP
+> before the number can be used for password recovery, account recovery or
+> SMS sign-in; that needs an SMS gateway (e.g. Alibaba Cloud SMS) plus sending
+> rate limits and replay protection. See [design.md](./design.md) Phase 4.
+
+### 2.4 Login auditing ✅
+
+- Both successful and failed sign-ins are audited with the client IP and
+  browser/OS (parsed from `User-Agent`, see §6).
+- **Client IP trusts proxies only when configured** (`SIGNET_TRUSTED_PROXIES`):
+  `X-Forwarded-For` / `X-Real-IP` are honoured only when the direct peer is in
+  the list, and the value taken is the **first untrusted hop from the right** —
+  the leftmost entry is client-controlled. Without the setting the peer address
+  is used, so a forged header cannot affect IP allowlists, rate limits or audit.
+
+### 2.5 Password reset ✅
+
+- `POST /api/v1/password-reset/request` mints a 30-minute, single-use reset
+  token (SHA-256 hashed at rest).
+- The link is delivered over SMTP; without SMTP the request returns 503 (dev can
+  use `SIGNET_DEV_LOG_LINKS` to log links). Unknown addresses still report
+  success, to prevent enumeration.
+- `POST /api/v1/password-reset/confirm` validates the token, applies the password
+  policy, consumes it and revokes every session.
+
+### 2.6 WebAuthn / passkeys ✅
+
+- Passwordless, phishing-resistant second factor; the passkey public key is
+  stored as the `webauthn-rs` `Passkey` JSON, and the signature counter is
+  updated after a successful sign-in.
+- Registration (`/api/v1/me/passkeys/*`) requires a session; sign-in
+  (`/api/v1/passkeys/*`) creates the session and writes `auth.login`
+  (`mfa: passkey`).
+- Challenge state lives in server memory (single instance, 5 minutes, single use).
+
+### 2.7 New device/IP alerts ✅
+
+- A previously unseen (user, IP) pair writes `auth.new_device` and sends an alert
+  email; without SMTP the alert only reaches the log and never blocks the
+  sign-in.
+- Sources are recorded in `login_devices` for later anomaly detection.
+
+### 2.8 Sign-in allowlist (email domains) ✅
+
+- Only addresses in the configured domains may sign in, be provisioned or be
+  synced; configuration is in `docs/api-v1.md` §14.
+- The semantics are **admission**, not **ownership**: an address outside the list
+  is refused (`auth.sign_in_blocked` / `user.provision_blocked`) but the account
+  is **not disabled** — data and history stay. Narrowing the list is not a bulk
+  offboarding.
+- Domains are compared on label boundaries, no wildcards; saving validates
+  (empty entries, addresses used as domains and wildcards are refused). A list
+  that would exclude the acting administrator is refused by the server, avoiding
+  self-lockout; at startup a list excluding every admin logs a warning.
+- The first-run `/setup` is exempt (otherwise a new deployment could not create
+  its first administrator).
+
+---
+
+## 3. Session management ✅
+
+| Capability | Detail |
 |------|------|
-| 会话记录 | `sessions` 表记录 `ip`、`user_agent`、`last_seen_at` |
-| 单点撤销 | 用户可撤销自己的指定会话（`/api/v1/me/sessions/{id}`） |
-| 撤销其他 | 撤销除当前外的所有会话 |
-| 管理员强制下线 | `POST /api/v1/admin/users/{id}/sessions/revoke` 下线该用户全部会话 |
-| 统一登出 | OIDC `end_session`（`/oauth/end_session`），`post_logout_redirect_uri` 走客户端白名单 |
-| 冻结联动 | 用户被冻结/删除时自动清除其会话 |
+| Session records | `sessions` stores `ip`, `user_agent`, `last_seen_at` |
+| Revoke one | A user can revoke one of their own sessions (`/api/v1/me/sessions/{id}`) |
+| Revoke others | Revoke every session except the current one |
+| Admin force sign-out | `POST /api/v1/admin/users/{id}/sessions/revoke` ends all of that user's sessions |
+| Unified logout | OIDC `end_session` (`/oauth/end_session`); `post_logout_redirect_uri` follows the client's allowlist |
+| Freeze cascade | Freezing or deleting a user clears their sessions |
 
-会话 Cookie：HttpOnly、SameSite=Lax；Secure 在**生效 issuer**（含 Dashboard 中修改后的值）为 `https://` 时自动强制，http→https 的 Web 端修改即时生效（`SIGNET_COOKIE_SECURE` 仅用于强制 http 场景，此时 Dashboard 会拒绝保存 http issuer）。
+Session cookie: HttpOnly, SameSite=Lax; forced `Secure` when the **effective
+issuer** (including a dashboard change) is `https://`, so an http→https change
+takes effect immediately (`SIGNET_COOKIE_SECURE` only forces the flag for http
+deployments, where the dashboard refuses to save an http issuer in that
+configuration).
 
-### 3.1 第三方登录走同一套本地闸门 ✅
+### 3.1 Third-party sign-in passes the same local gates ✅
 
-联邦登录（GitHub/Google/飞书/微信/通用 OIDC）只证明上游身份；本地账户策略在建立会话前仍然生效（`finish_sign_in`）：强制改密（`must_change_password`）、TOTP 挑战、全局/用户级强制 MFA 的注册（enroll）——与密码登录共用同一套 MFA 挑战与续接端点，挑战行记录来源 `via=sso`，`auth.sign_in_blocked` 审计可区分路径。已持有该账户会话的用户（资料页绑定时）不重复挑战。
+Federated sign-in (GitHub / Google / Feishu / WeChat / generic OIDC) proves the
+upstream identity only; local account policy still applies before a session is
+created (`finish_sign_in`): forced password change (`must_change_password`), the
+TOTP challenge, and enrollment when global or per-user MFA is enforced — sharing
+the same challenge and continuation endpoints as password sign-in. The challenge
+row records `via=sso`, and `auth.sign_in_blocked` lets audits tell the paths
+apart. A user who already holds a session for that account (when binding from the
+profile page) is not challenged again.
 
 ---
 
-## 4. MFA（TOTP + 恢复码）✅
+## 4. MFA (TOTP + recovery codes) ✅
 
-详见 [mfa.md](./mfa.md)。安全要点：
+See [mfa.md](./mfa.md). Security highlights:
 
-- TOTP 密钥应用层加密（§1.1）。
-- 恢复码一次性、Argon2 哈希存储、仅发放时明文展示一次。
-- 全局 / 用户级强制开关；管理员可重置他人 MFA。
-- 非强制时用户可自主禁用 MFA（需验证当前 TOTP）；全局或用户级强制时不可禁用。
-- 恢复码页提供 Copy / Download；Download 生成 `signet-recovery-codes.txt`。
+- TOTP secrets are encrypted at the application layer (§1.1).
+- Recovery codes are single-use, Argon2-hashed, and shown in plaintext only once.
+- Global and per-user enforcement; administrators can reset another user's MFA.
+- Users may disable MFA themselves when it is not enforced (current TOTP
+  required); enforced accounts cannot.
+- The recovery-code page offers Copy / Download; Download produces
+  `signet-recovery-codes.txt`.
 
 ---
 
-## 5. OIDC / OAuth 安全
+## 5. OIDC / OAuth security
 
-| 机制 | 状态 |
+| Mechanism | Status |
 |------|------|
 | Authorization Code + **PKCE S256** | ✅ |
-| `redirect_uri` **精确白名单**（防开放重定向） | ✅ |
-| `state` **强制必填**（防登录 CSRF） | ✅ |
-| `nonce` 防重放 | ✅ |
-| **scope 白名单**：请求 scope 必须是客户端登记 scopes 的子集（防越权取 claim） | ✅ |
-| **prompt 参数**：`none` / `login` / `consent`（防静默授权） | ✅ |
-| 未认证时**不加载 client**（避免枚举 client 是否存在/是否启用） | ✅ |
-| 授权/consent 回跳统一 **303**（避免缓存/方法转换） | ✅ |
-| Token 短 TTL（access/id 1h，auth code 5min） | ✅ |
-| Refresh token **轮换**（每次刷新旧 token 作废） | ✅ |
-| Refresh token **复用检测**（已轮换 token 再次出现 = 疑似盗用，吊销整个 token 家族并写 `oauth.refresh_reuse` 审计） | ✅ |
-| RFC 7009 独立吊销端点 `/oauth/revoke` | ✅ |
-| RFC 7591 动态客户端注册 `/oauth/register`（需一次性注册 token） | ✅ |
-| 客户端 Source IP 白名单（新建默认开启） | ✅ |
-| OIDC Consent（首次授权同意 + 记住） | ✅ |
-| Consent 可选 scope 授权：请求 scope 整体允许/拒绝，客户端允许列表内未请求的 scope 可勾选单独授予（GitHub 式） | ✅ |
-| Consent 用户侧撤销（`/me/consents`，连带吊销 refresh token） | ✅ |
-| `groups` claim 下发（id_token / userinfo，按 scope 裁剪） | ✅ |
-| `phone` scope 下发 `phone_number` / `phone_number_verified`（按 scope 裁剪） | ✅ |
-| `end_session` 统一登出；GET 必须携带有效 `id_token_hint`（`sub` 与会话一致），POST 免 hint 但跨站表单不带 cookie（防注销 CSRF） | ✅ |
-| 登记的 `grant_types` 在 authorize/token 双向强制 | ✅ |
-| id_token 携带 `at_hash`（绑定同次签发的 access token） | ✅ |
-| 签名密钥环：轮换后旧公钥继续验签，JWKS 同时发布 | ✅ |
+| `redirect_uri` **exact allowlist** (prevents open redirects) | ✅ |
+| `state` **mandatory** (login CSRF) | ✅ |
+| `nonce` replay protection | ✅ |
+| **Scope allowlist**: requested scopes must be a subset of the client's registered scopes (no claim escalation) | ✅ |
+| **`prompt`** parameter: `none` / `login` / `consent` (no silent authorization) | ✅ |
+| **No client load before authentication** (prevents client enumeration) | ✅ |
+| Authorize/consent redirects always **303** (no caching or method conversion) | ✅ |
+| Short token TTLs (access/id 1h, auth code 5min) | ✅ |
+| Refresh token **rotation** (each refresh invalidates the old token) | ✅ |
+| Refresh token **reuse detection** (a rotated token reappearing means theft: the whole family is revoked and `oauth.refresh_reuse` is audited) | ✅ |
+| RFC 7009 revocation endpoint `/oauth/revoke` | ✅ |
+| RFC 7591 dynamic client registration `/oauth/register` (single-use registration token) | ✅ |
+| Client Source IP allowlist (on by default for new clients) | ✅ |
+| OIDC consent (first authorization + remembered) | ✅ |
+| Consent with optional scopes: request scopes are granted or refused as a whole; unrequested scopes inside the client's allowlist can be granted individually (GitHub-style) | ✅ |
+| User-side consent revocation (`/me/consents`, which also revokes refresh tokens) | ✅ |
+| `groups` claim (id_token / userinfo, trimmed by scope) | ✅ |
+| `phone` scope emits `phone_number` / `phone_number_verified` (trimmed by scope) | ✅ |
+| `end_session` unified logout; GET requires a valid `id_token_hint` (its `sub` must match the session), POST needs no hint but cross-site forms carry no cookie (logout CSRF) | ✅ |
+| Registered `grant_types` enforced on both authorize and token | ✅ |
+| `at_hash` in the id_token (binds the access token minted with it) | ✅ |
+| Signing key ring: after rotation old public keys still verify; JWKS publishes both | ✅ |
 
-客户端密钥以应用 pepper 的 HMAC-SHA256 存储（常量时间比较，历史 Argon2 自动升级）；授权码/refresh 均 SHA-256 哈希存储。
+Client secrets are stored as HMAC-SHA256 with an application pepper (constant-time
+comparison; legacy Argon2 rows upgrade automatically); authorization codes and
+refresh tokens are SHA-256 hashed.
 
 ---
 
-## 6. 审计与可观测
+## 6. Audit and observability
 
-### 6.1 审计 ✅
+### 6.1 Audit ✅
 
-- 记录：actor（email/role）、action、resource、detail JSON、**IP**、**user_agent / browser / os**、时间。
-- 浏览器/OS 由 `User-Agent` 轻量解析（`crates/signet/src/ua.rs`），覆盖 Chrome/Safari/Firefox/Edge/Opera 与 Windows/macOS/Linux/Android/iOS/ChromeOS。
-- 删除类事件（`user.delete` / `client.delete` 等）仅 admin 可见；manager 受 action 白名单限制。
-- 审计记录**不可删除**（UI 无删除入口）。
-- CSV 导出尊重权限过滤；点击行可查看完整详情（含 detail JSON）。
+- Records: actor (email/role), action, resource, detail JSON, **IP**,
+  **user_agent / browser / os**, timestamp.
+- Browser/OS is parsed lightly from `User-Agent`
+  (`crates/signet/src/http/user_agent.rs`), covering Chrome/Safari/Firefox/Edge/
+  Opera and Windows/macOS/Linux/Android/iOS/ChromeOS.
+- Deletion events (`user.delete` / `client.delete`, …) are admin-only; managers
+  are limited by an action allowlist.
+- Audit records **cannot be deleted** (no UI for it).
+- CSV export respects the permission filter; clicking a row opens the full detail
+  (including the detail JSON).
 
-### 6.2 保留策略 ✅
+### 6.2 Retention ✅
 
-- 小时巡检清理早于保留窗口的记录（`SIGNET_AUDIT_RETENTION_DAYS`，默认 180，启动时拒绝 < 1；运行时可改）。
+- An hourly sweep removes records older than the retention window
+  (`SIGNET_AUDIT_RETENTION_DAYS`, default 180; startup refuses values below 1;
+  changeable at runtime).
 
-### 6.3 可观测 ✅
+### 6.3 Observability ✅
 
-- `/metrics` 在**独立监听**（默认 `127.0.0.1:9464`，`SIGNET_METRICS_BIND`）暴露，公开端口不提供：
-  - 业务计数：登录/登录失败、token 签发、MFA 校验（成功/失败）。
-  - HTTP：请求计数（按状态类 2xx/3xx/4xx/5xx）、在途请求、延迟直方图。
-- `/health` 就绪探测：探测 Postgres（`SELECT 1`），失败返回 503，供负载均衡/K8s 使用。
-- 全局速率限制：按客户端 IP 限流（`SIGNET_RATE_LIMIT_PER_MINUTE`，默认 300），超限返回 429。
-- **链路追踪（`x-request-id`）**：请求头透传/生成 UUID，回显到响应头，并写入 tracing span，访问日志与业务日志按 `request_id` 关联。
+- `/metrics` is exposed on a **separate listener** (default `127.0.0.1:9464`,
+  `SIGNET_METRICS_BIND`) and never on the public port:
+  - Business counters: logins/failures, token issuance, MFA verifications
+    (success/failure).
+  - HTTP: request counts (by 2xx/3xx/4xx/5xx class), in-flight requests, latency
+    histograms.
+- `/health` is a readiness probe: it runs `SELECT 1` against Postgres and returns
+  503 on failure, for load balancers and Kubernetes.
+- Global rate limiting per client IP (`SIGNET_RATE_LIMIT_PER_MINUTE`, default
+  300); exceeding it returns 429.
+- **Request correlation (`x-request-id`)**: a supplied header is passed through,
+  otherwise a UUID is generated; it is echoed, written into the tracing span, and
+  links access logs to business logs.
 
-### 6.4 Webhooks 事件推送 ✅
+### 6.4 Webhook event delivery ✅
 
-- 每条审计事件写入后异步 POST 到所有启用的 webhook，投递结果写入 `webhook_deliveries`。
-- 两种类型：`generic`（原始 JSON + `x-signet-signature` HMAC 头）与 `feishu`（飞书卡片 + 加签 `timestamp`/`sign` 写入 body）。
-- 管理台「Integrations」页可增删 webhook 并查看最近投递状态。
+- Each audit event is asynchronously POSTed to every enabled webhook; delivery
+  outcomes are stored in `webhook_deliveries`.
+- Two types: `generic` (raw JSON plus an `x-signet-signature` HMAC header) and
+  `feishu` (a Feishu card with `timestamp`/`sign` in the body).
+- The dashboard's Integrations page creates, deletes and inspects recent
+  deliveries.
 
 ### 6.5 SCIM v2 ✅
 
-- `/scim/v2/Users`、`/scim/v2/Groups` 提供企业目录（Okta/Entra 等）用户与组同步，Bearer token 认证。
-- Token 在管理台「Integrations → SCIM v2」生成/轮换/吊销；明文仅展示一次，库中只存哈希（`sha256`）。`SIGNET_SCIM_BEARER_TOKEN` 仅作首次启动的种子。
+- `/scim/v2/Users` and `/scim/v2/Groups` provide enterprise directory (Okta/Entra,
+  …) user and group sync behind a bearer token.
+- The token is generated / rotated / revoked under Integrations → SCIM v2; the
+  plaintext is shown once and only its SHA-256 hash is stored.
+  `SIGNET_SCIM_BEARER_TOKEN` only seeds the first start.
 
 ---
 
-## 7. 密钥与配置
+## 7. Keys and configuration
 
-| 配置项 | 默认 | 说明 |
+| Setting | Default | Notes |
 |--------|------|------|
-| `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 私钥，首启生成；`signet keys rotate` 轮换 |
-| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签，JWKS 同时发布） |
-| `SIGNET_ENCRYPTION_KEY_PATH` | `./data/encryption.key` | AES-256-GCM 密钥，首启生成 |
-| `SIGNET_COOKIE_SECURE` | `false` | issuer 为 https 时自动生效；显式配置仅用于覆盖 |
-| `SIGNET_TRUSTED_PROXIES` | — | 可信反向代理 IP/CIDR 列表；未配置时忽略转发头，取 peer 地址 |
-| `SIGNET_MAX_LOGIN_ATTEMPTS` | `5` | 登录锁定阈值 |
-| `SIGNET_LOCKOUT_MINUTES` | `15` | 锁定时长 |
-| `SIGNET_PASSWORD_MIN_LENGTH` | `10` | 密码最小长度 |
-| `SIGNET_PASSWORD_HISTORY_SIZE` | `3` | 密码历史复用检查数 |
-| `SIGNET_AUDIT_RETENTION_DAYS` | `180` | 审计保留天数 |
-| `SIGNET_RATE_LIMIT_PER_MINUTE` | `300` | 每 IP 每分钟请求上限 |
-| `SIGNET_PUBLIC_BASE_URL` | — | 邮件/重置链接的公开基址 |
-| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503）。可在后台 Settings → Email relay 配置（**DB > 环境变量**，密码加密落库，支持发送测试邮件），环境变量仅作后备 |
-| `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH（可信中继可省略） |
-| `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | 指标监听地址；`off` 关闭 |
-| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签） |
-| `SIGNET_OTEL_ENDPOINT` | — | OTLP/HTTP trace 导出地址（如 `http://collector:4318/v1/traces`）；未设置时**零开销关闭** |
-| `SIGNET_OTEL_SERVICE_NAME` | `signet` | trace 的 `service.name` 资源属性 |
-| `SIGNET_OTEL_SAMPLE_RATIO` | `1.0` | 采样比例 0.0–1.0（对 root span 按 trace id 取样，上游已决定的跟随上游） |
-| `SIGNET_EMAIL_FROM` | — | 邮件发件人 |
-| `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API 认证 token（可选，仅作首次启动种子；后续由后台 UI 管理） |
-| `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |
-| `SIGNET_CAPTCHA_PROVIDER` / `_SITE_KEY` / `_SECRET_KEY` | — | 登录/重置页 CAPTCHA（Turnstile 或 hCaptcha）；可在后台 Settings → CAPTCHA 配置（**DB > 环境变量**，secret 加密落库），三要素齐备才启用 |
-| `SIGNET_CAPTCHA_VERIFY_URL` | — | siteverify 端点覆盖（自托管兼容服务/测试用） |
-| `SIGNET_BRAND_NAME` | `Signet` | 产品名（登录页/侧栏/标题）；后台 Settings → Branding 可覆盖（DB > 环境变量）。同页可上传 logo：仅 PNG/JPEG/WebP（**拒绝 SVG**，防同源脚本执行）、校验魔数、≤256 KiB，经公开只读端点 `GET /api/v1/branding/logo` 提供（`nosniff` + 版本化 URL 的 immutable 缓存） |
+| `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 private key, generated on first start; rotated by `signet keys rotate` |
+| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | Retired public keys (still verify; JWKS publishes both) |
+| `SIGNET_ENCRYPTION_KEY_PATH` | `./data/encryption.key` | AES-256-GCM key, generated on first start |
+| `SIGNET_COOKIE_SECURE` | `false` | Automatic when the issuer is https; set explicitly only to force |
+| `SIGNET_TRUSTED_PROXIES` | — | Trusted reverse-proxy IP/CIDR list; unset ignores forwarding headers and uses the peer address |
+| `SIGNET_MAX_LOGIN_ATTEMPTS` | `5` | Lockout threshold |
+| `SIGNET_LOCKOUT_MINUTES` | `15` | Lockout duration |
+| `SIGNET_PASSWORD_MIN_LENGTH` | `10` | Minimum password length |
+| `SIGNET_PASSWORD_HISTORY_SIZE` | `3` | Password history depth |
+| `SIGNET_AUDIT_RETENTION_DAYS` | `180` | Audit retention |
+| `SIGNET_RATE_LIMIT_PER_MINUTE` | `300` | Requests per IP per minute |
+| `SIGNET_PUBLIC_BASE_URL` | — | Public base for mail and reset links |
+| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP server (without one, password reset returns 503). Configurable under Settings → Email relay (**DB > environment**, password encrypted, test send supported); the environment is a fallback |
+| `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH (optional for a trusted relay) |
+| `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | Metrics listener; `off` disables it |
+| `SIGNET_OTEL_ENDPOINT` | — | OTLP/HTTP trace export (e.g. `http://collector:4318/v1/traces`); unset means **zero-overhead off** |
+| `SIGNET_OTEL_SERVICE_NAME` | `signet` | Trace `service.name` resource attribute |
+| `SIGNET_OTEL_SAMPLE_RATIO` | `1.0` | Sampling ratio 0.0–1.0 (root spans sampled by trace id; an upstream decision is followed) |
+| `SIGNET_EMAIL_FROM` | — | Mail sender |
+| `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API token (optional; seeds the first start only, managed in the UI afterwards) |
+| `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | derived | Relying-party ID/origin (a real domain in production) |
+| `SIGNET_CAPTCHA_PROVIDER` / `_SITE_KEY` / `_SECRET_KEY` | — | CAPTCHA (Turnstile or hCaptcha) on sign-in/reset; configurable under Settings → CAPTCHA (**DB > environment**, secret encrypted); enabled only when all three are present |
+| `SIGNET_CAPTCHA_VERIFY_URL` | — | siteverify endpoint override (self-hosted compatible service / tests) |
+| `SIGNET_BRAND_NAME` | `Signet` | Product name (sign-in/sidebar/title); Settings → Branding overrides it (DB > environment). The same page uploads a logo: PNG/JPEG/WebP only (**SVG refused**, to prevent same-origin script execution), magic-byte checked, ≤256 KiB, served from the public read-only `GET /api/v1/branding/logo` (`nosniff` + versioned immutable cache) |
 
-生产容器将 volume `signet_data` 挂到 `/app/data`（JWT / 加密密钥）；`build/` 与 `deploy/` 的 compose 分工见 [deploy.md](./deploy.md)。
+The production container mounts the `signet_data` volume at `/app/data` (JWT and
+encryption keys); the `build/` vs `deploy/` split is in
+[deploy.md](./deploy.md).
 
 ---
 
-## 8. 规划中的安全增强
+## 8. Planned security enhancements
 
-| 优先级 | 功能 | 说明 |
+| Priority | Feature | Notes |
 |--------|------|------|
-| P0 | 手机号短信验证绑定 | 短信网关；当前 `phone` 未验证（见 §2.3），为唯一未实施的高优先级项 |
-| P2 | 告警对接 | 基于 Prometheus 指标接入 Alertmanager |
+| P0 | SMS-verified phone binding | SMS gateway; `phone` is currently unverified (§2.3) — the only high-priority item not yet implemented |
+| P2 | Alerting integration | Feed the Prometheus metrics into Alertmanager |

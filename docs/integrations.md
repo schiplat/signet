@@ -1,28 +1,38 @@
-# Signet 集成对接指南（RFC 7591 · Webhooks · SCIM）
+# Signet integrations guide (RFC 7591 · Webhooks · SCIM)
 
-本文给出 Signet 三类「机器对机器」集成接口的对接示例：**动态客户端注册（RFC 7591）**、**Webhooks 事件推送（含飞书）**、**SCIM v2 目录同步**。
+> English · [简体中文](./zh-CN/integrations.md)
 
-相关文档：[设计总览](./design.md) · [OIDC 客户端对接](./client-integration.md) · [Dashboard API](./api-v1.md) · [安全设计](./security.md)
+Three machine-to-machine integration surfaces with worked examples: **dynamic
+client registration (RFC 7591)**, **webhook event delivery (including Feishu)**
+and **SCIM v2 directory sync**.
 
-| 接口 | 前缀 | 用途 | 鉴权 |
+Related: [design overview](./design.md) · [OIDC client integration](./client-integration.md) · [Dashboard API](./api-v1.md) · [Security design](./security.md)
+
+| Interface | Prefix | Purpose | Authentication |
 |------|------|------|------|
-| OIDC 动态注册 | `/oauth/register` | 业务系统自助登记客户端 | 一次性注册 token（admin 签发） |
-| Webhooks | `/api/v1/admin/webhooks` | 审计事件实时推送到外部系统 | admin session（管理）/ 无（投递） |
-| SCIM v2 | `/scim/v2/*` | 企业目录（Okta/Entra）同步用户与组 | `Bearer <SIGNET_SCIM_BEARER_TOKEN>` |
+| OIDC dynamic registration | `/oauth/register` | Let a subsystem register a client itself | Single-use registration token (issued by an admin) |
+| Webhooks | `/api/v1/admin/webhooks` | Push audit events to external systems in real time | Admin session (manage) / none (delivery) |
+| SCIM v2 | `/scim/v2/*` | Enterprise directory (Okta/Entra) user and group sync | `Bearer <SIGNET_SCIM_BEARER_TOKEN>` |
 
-> 约定：下文 `$ISSUER` 为 Signet 基址（开发 `http://localhost:8443`，生产 `https://sso.example.com`）。所有 admin 管理端点均需先登录拿 `signet_session` Cookie，示例用 `-b /tmp/signet_cookies.txt` 表示。
+> Convention: `$ISSUER` below is the Signet base URL (development
+> `http://localhost:8443`, production `https://sso.example.com`). Every admin
+> endpoint needs a signed-in `signet_session` cookie; the examples pass
+> `-b /tmp/signet_cookies.txt`.
 
 ---
 
-## 1. OAuth 动态客户端注册（RFC 7591）
+## 1. OAuth dynamic client registration (RFC 7591)
 
-让业务系统**自助**登记一个 OAuth 客户端，无需管理员在后台手动建。设计要点：
+Lets a subsystem **register an OAuth client by itself**, without an administrator
+creating it in the dashboard. Design points:
 
-- 必须持有一个**一次性 initial access token**（由 admin 签发，24 小时有效、用后即焚）。
-- 支持放在 `Authorization: Bearer <token>` 头，或放在 JSON body 的 `initial_access_token` 字段。
-- 返回的 `client_secret` **只展示这一次**。
+- It must present a **single-use initial access token** (issued by an admin, valid
+  for 24 hours, consumed on use).
+- The token may be sent as `Authorization: Bearer <token>` or as the
+  `initial_access_token` field in the JSON body.
+- The returned `client_secret` is **shown exactly once**.
 
-### 1.1 签发注册 token（admin）
+### 1.1 Issue a registration token (admin)
 
 ```bash
 curl -s -b /tmp/signet_cookies.txt \
@@ -30,12 +40,12 @@ curl -s -b /tmp/signet_cookies.txt \
 ```
 
 ```json
-{ "token": "9fG3...", "expires_at": "2026-08-14T03:00:00Z" }
+{ "token": "sgn_reg_9fG3...", "expires_at": "2026-08-14T03:00:00Z" }
 ```
 
-`token` 只返回一次，服务端仅存其 SHA-256 哈希。
+`token` is returned once; the server stores only its SHA-256 hash.
 
-### 1.2 用 token 注册客户端
+### 1.2 Register a client with the token
 
 ```bash
 curl -s -X POST "$ISSUER/oauth/register" \
@@ -43,11 +53,11 @@ curl -s -X POST "$ISSUER/oauth/register" \
   -d '{
     "client_name": "cella-web",
     "redirect_uris": ["http://localhost:3000/auth/callback"],
-    "initial_access_token": "9fG3..."
+    "initial_access_token": "sgn_reg_9fG3..."
   }'
 ```
 
-成功响应（201）：
+Success (201):
 
 ```json
 {
@@ -62,69 +72,77 @@ curl -s -X POST "$ISSUER/oauth/register" \
 }
 ```
 
-### 1.3 校验规则
+### 1.3 Validation rules
 
-| 字段 | 规则 |
+| Field | Rule |
 |------|------|
-| `redirect_uris` | 必填，至少 1 条；必须 `http(s)://` 开头；**不得含 `#` 片段**；去重排序 |
-| `scopes` / `scope` | 可选；若提供必须包含 `openid`。`scopes`（数组）为本服务原生形态；同时接受 RFC 7591 标准的空格分隔 `scope` 字符串，两者同时出现时以 `scopes` 为准 |
-| `client_name` | 可选展示名 |
-| `grant_types` | 请求字段当前忽略，固定写入 `authorization_code` + `refresh_token`；**存储的 grant 列表会在 authorize/token 处强制** |
+| `redirect_uris` | Required, at least one; must start with `http(s)://`; **no `#` fragment**; deduplicated and sorted |
+| `scopes` / `scope` | Optional; when present must include `openid`. `scopes` (array) is this service's native shape; the RFC 7591 space-separated `scope` string is accepted too, and `scopes` wins when both are present |
+| `client_name` | Optional display name |
+| `grant_types` | Ignored today: `authorization_code` + `refresh_token` are always written; **the stored grant list is enforced at authorize and token** |
 
-响应中**不返回** `registration_access_token` / `registration_client_uri`：本服务没有 RFC 7591 的客户端管理端点（`GET/PUT /oauth/register/{client_id}`），返回它们只会让标准客户端去请求一个 404。注册后的客户端在 Dashboard → Clients 管理。
+The response deliberately **omits** `registration_access_token` /
+`registration_client_uri`: this service has no RFC 7591 client-management
+endpoints (`GET/PUT /oauth/register/{client_id}`), so returning them would send a
+conformant client to a 404. Manage registered clients under Dashboard → Clients.
 
-注册出的客户端默认：`ip_allowlist_enabled=false`（不限制源 IP）、scopes `openid profile email`。PKCE S256 对所有客户端无条件强制（无开关字段）。
+Defaults for a registered client: `ip_allowlist_enabled=false` (no source-IP
+restriction), scopes `openid profile email`. PKCE S256 is enforced for every
+client unconditionally (no switch).
 
-### 1.4 错误码
+### 1.4 Error codes
 
-| 场景 | 响应 |
+| Case | Response |
 |------|------|
-| 缺 token | `401 missing initial access token` |
-| token 无效/过期/已用过 | `401 invalid or expired registration token` |
-| `redirect_uris` 空或非 http(s) | `400` |
-| `scopes` 缺 `openid` | `400 scopes must include openid` |
+| Missing token | `401 missing initial access token` |
+| Invalid / expired / used token | `401 invalid or expired registration token` |
+| `redirect_uris` empty or non-http(s) | `400` |
+| `scopes` without `openid` | `400 scopes must include openid` |
 
 ---
 
-## 2. Webhooks 事件推送
+## 2. Webhook event delivery
 
-每次审计事件落库后，Signet **异步** POST 到所有启用的 webhook。两种投递类型 `kind`：
+After each audit event is stored, Signet **asynchronously** POSTs it to every
+enabled webhook. Two delivery `kind`s:
 
-| kind | 行为 |
+| kind | Behaviour |
 |------|------|
-| `generic`（默认） | 原始审计 JSON 原样 POST；签名放请求头 `x-signet-signature` |
-| `feishu` | 渲染为飞书交互卡片；签名（加签）写入 body |
+| `generic` (default) | The raw audit JSON is POSTed as-is; the signature goes in the `x-signet-signature` header |
+| `feishu` | Rendered as a Feishu interactive card; the signature (`timestamp`/`sign`) is written into the body |
 
-### 2.1 管理 API（admin）
+### 2.1 Admin API
 
 ```bash
-# 列表
+# List
 curl -s -b /tmp/signet_cookies.txt "$ISSUER/api/v1/admin/webhooks"
 
-# 新建（generic）
+# Create (generic)
 curl -s -b /tmp/signet_cookies.txt -X POST "$ISSUER/api/v1/admin/webhooks" \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://hooks.example.com/audit","secret":"my-hmac-secret","kind":"generic"}'
 
-# 新建（飞书）
+# Create (Feishu)
 curl -s -b /tmp/signet_cookies.txt -X POST "$ISSUER/api/v1/admin/webhooks" \
   -H 'Content-Type: application/json' \
-  -d '{"url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","kind":"feishu","secret":"飞书加签secret"}'
+  -d '{"url":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","kind":"feishu","secret":"<feishu-signing-secret>"}'
 
-# 删除
+# Delete
 curl -s -b /tmp/signet_cookies.txt -X DELETE "$ISSUER/api/v1/admin/webhooks/{id}"
 
-# 最近 50 条投递结果
+# The most recent 50 delivery results
 curl -s -b /tmp/signet_cookies.txt "$ISSUER/api/v1/admin/webhooks/{id}/deliveries"
 ```
 
-创建请求体：`{ "url": string, "secret"?: string, "kind"?: "generic" | "feishu" }`（`kind` 缺省 `generic`；`secret` 缺省不签名/不加签）。
+Create body: `{ "url": string, "secret"?: string, "kind"?: "generic" | "feishu" }`
+(`kind` defaults to `generic`; without `secret` nothing is signed).
 
-> 管理台「**Integrations**」页提供同样能力的图形界面（含飞书预设与投递状态），推荐日常用 UI。
+> The dashboard's **Integrations** page offers the same capabilities with a UI
+> (Feishu preset and delivery status included) — prefer it for daily use.
 
-### 2.2 事件负载（payload）
+### 2.2 Event payload
 
-两类 webhook 都基于同一份审计事件：
+Both webhook kinds share one audit event:
 
 ```json
 {
@@ -143,12 +161,13 @@ curl -s -b /tmp/signet_cookies.txt "$ISSUER/api/v1/admin/webhooks/{id}/deliverie
 }
 ```
 
-### 2.3 generic：签名头
+### 2.3 generic: the signature header
 
-- 头 `x-signet-event`：事件 `id`。
-- 头 `x-signet-signature`：`sha256=<hex>`，其中 `<hex> = HMAC-SHA256(key = secret, msg = 请求体原始字节)`。
+- Header `x-signet-event`: the event `id`.
+- Header `x-signet-signature`: `sha256=<hex>` where
+  `<hex> = HMAC-SHA256(key = secret, msg = raw request bytes)`.
 
-接收端验签示例（Python）：
+Receiver-side verification (Python):
 
 ```python
 import hashlib, hmac
@@ -156,20 +175,24 @@ import hashlib, hmac
 body = request.data
 expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
 sig = request.headers.get("x-signet-signature")  # "sha256=..."
-assert sig == f"sha256={expected}"
+assert hmac.compare_digest(sig, f"sha256={expected}")
 ```
 
-### 2.4 feishu：卡片 + 加签
+### 2.4 feishu: card plus signing
 
-**消息体**为飞书交互卡片（`msg_type: interactive`），标题 `Signet · <action>`，正文含操作者/动作/资源/IP/设备/详情，脚注含时间与事件 id。
+**Body** is a Feishu interactive card (`msg_type: interactive`) titled
+`Signet · <action>`, listing actor/action/resource/IP/device/detail, with time and
+event id in the footer.
 
-**加签**（仅当机器人开启「签名校验」且 webhook 填了 `secret` 时）：
+**Signing** (only when the bot enables signature verification and the webhook has
+a `secret`):
 
 ```text
 sign = Base64( HMAC-SHA256( key = timestamp + "\n" + secret, msg = "" ) )
 ```
 
-`timestamp`（秒级）与 `sign` 两个字段**写入 body 顶层**（不是请求头）：
+`timestamp` (seconds) and `sign` are written **at the top level of the body**,
+not as headers:
 
 ```json
 {
@@ -180,77 +203,90 @@ sign = Base64( HMAC-SHA256( key = timestamp + "\n" + secret, msg = "" ) )
 }
 ```
 
-飞书侧校验：`timestamp` 须在请求时刻 ±3600 秒内；算法见[飞书官方文档](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot?lang=zh-CN)。
+Feishu validates that `timestamp` is within ±3600 seconds of the request; see the
+[Feishu documentation](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot).
 
-### 2.5 投递可靠性
+### 2.5 Delivery reliability
 
-- 投递**异步、尽力而为**；失败只记日志 + 写 `webhook_deliveries`，不重试、不阻塞审计写入。
-- 单次超时 10 秒；HTTP 2xx 记为 `success=true`。
-- 每个 webhook 单独并发投递，互不影响。
+- Delivery is **asynchronous and best-effort**: a failure is logged and recorded in
+  `webhook_deliveries`; there is no retry and the audit write is never blocked.
+- Each attempt times out after 10 seconds; an HTTP 2xx is stored as
+  `success=true`.
+- Every webhook is delivered concurrently and independently.
 
 ---
 
-## 3. SCIM v2 目录同步
+## 3. SCIM v2 directory sync
 
-Signet 实现 **SCIM 2.0 Server** 侧，供 Okta / Entra ID / HR 系统**供给**用户与组。与 SSO 互补：SCIM 管「账号在不在、角色对不对」，SSO 管「能不能登录」。
+Signet implements the **SCIM 2.0 server** side, letting Okta / Entra ID / HR
+systems **provision** users and groups. It complements SSO: SCIM decides "does
+the account exist and is the role right", SSO decides "may this person sign in".
 
-### 3.1 启用
+### 3.1 Enabling
 
-SCIM 的 bearer token 可在**管理后台 → Integrations → SCIM v2** 里生成 / 轮换 / 吊销：
+The SCIM bearer token is generated / rotated / revoked under **Dashboard →
+Integrations → SCIM v2**:
 
-- 点击 **Generate token**（或 **Rotate token**）会返回一段新 token，**明文只显示一次**，请立即复制；库里只存哈希，之后无法回看。
-- 点击 **Revoke** 立即禁用 SCIM 接口，直到下次生成。
+- **Generate token** (or **Rotate token**) returns a new token. The **plaintext
+  is shown once** — copy it immediately; only the hash is stored and it cannot be
+  retrieved later.
+- **Revoke** disables the SCIM API at once, until the next generation.
 
-也可以用环境变量作为**一次性种子**（仅在数据库里还没有 token 时生效）：
+An environment variable can act as a **one-time seed** (only while the database
+has no token):
 
 ```text
 SIGNET_SCIM_BEARER_TOKEN=change-me-scim-token
 ```
 
-一旦数据库里存在 token（无论来自 UI 还是 env 种子），env 就不再干预，后续以 UI 轮换为准。未配置 token 时，整个 `/scim/v2/*` 返回 `401 SCIM is not configured`。
+Once a token exists in the database (from the UI or the env seed), the variable
+is ignored and rotation happens in the UI. With no token configured, the whole
+`/scim/v2/*` surface returns `401 SCIM is not configured`.
 
-所有请求必须带：
+Every request must carry:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-### 3.2 端点一览
+### 3.2 Endpoints
 
-| 方法/路径 | 说明 |
+| Method / path | Notes |
 |-----------|------|
-| `GET/POST /scim/v2/Users` | 列表 / 创建用户 |
-| `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}` | 详情 / 替换 / 部分更新 / 删除 |
-| `GET/POST /scim/v2/Groups` | 列表 / 创建组 |
-| `GET/PATCH/DELETE /scim/v2/Groups/{id}` | 详情 / 更新成员 / 删除组 |
-| `GET /scim/v2/ServiceProviderConfig` | 能力声明（供目录系统探测） |
+| `GET/POST /scim/v2/Users` | List / create users |
+| `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}` | Read / replace / patch / delete |
+| `GET/POST /scim/v2/Groups` | List / create groups |
+| `GET/PATCH/DELETE /scim/v2/Groups/{id}` | Read / update members / delete |
+| `GET /scim/v2/ServiceProviderConfig` | Capability declaration (for the directory to probe) |
 
-`{id}` 可用 **UUID**、**`externalId`** 或 **email** 三种任一值定位。
+`{id}` may be a **UUID**, an **`externalId`** or an **email** address.
 
-### 3.3 字段映射
+### 3.3 Field mapping
 
-| SCIM | Signet | 说明 |
+| SCIM | Signet | Notes |
 |------|--------|------|
-| `userName` | `users.email` | 登录名，必须含 `@` |
-| `displayName` | `users.display_name` | 展示名 |
-| `active` | `users.status` | `true`→`active`，`false`→`disabled` |
-| `externalId` | `users.external_id` | 目录侧唯一 ID，幂等关联 |
-| `password` | `users.password_hash` | 可选；缺省随机生成 |
-| Group `displayName` | `users.groups[]` | 与 OIDC `groups` claim 同源 |
+| `userName` | `users.email` | Login name; must contain `@` |
+| `displayName` | `users.display_name` | Display name |
+| `active` | `users.status` | `true` → `active`, `false` → `disabled` |
+| `externalId` | `users.external_id` | The directory's stable id; used for idempotent matching |
+| `password` | `users.password_hash` | Optional; a random one is generated when absent |
+| Group `displayName` | `users.groups[]` | Same source as the OIDC `groups` claim |
 
-> SCIM User 资源中的 `groups[].value` 是 **Group 资源的 `id`**（`display` 才是组名）；没有对应 SCIM 组的本地组不会出现在该列表中。
+> In a SCIM User resource, `groups[].value` is the **Group resource's `id`**
+> (`display` carries the name). A local group with no SCIM counterpart does not
+> appear in that list.
 
-### 3.4 示例
+### 3.4 Examples
 
 ```bash
 T="change-me-scim-token"
 AUTH="Authorization: Bearer $T"
 JSON="Content-Type: application/json"
 
-# 能力声明
+# Capability declaration
 curl -s -H "$AUTH" "$ISSUER/scim/v2/ServiceProviderConfig"
 
-# 创建用户
+# Create a user
 curl -s -X POST "$ISSUER/scim/v2/Users" -H "$AUTH" -H "$JSON" -d '{
   "userName": "alice@example.com",
   "displayName": "Alice",
@@ -258,45 +294,52 @@ curl -s -X POST "$ISSUER/scim/v2/Users" -H "$AUTH" -H "$JSON" -d '{
   "active": true
 }'
 
-# 列表（分页）
+# List (paged)
 curl -s -H "$AUTH" "$ISSUER/scim/v2/Users?startIndex=1&count=50"
 
-# 按 externalId 取
+# Read by externalId
 curl -s -H "$AUTH" "$ISSUER/scim/v2/Users/emp-001"
 
-# 禁用（PATCH active=false）
+# Disable (PATCH active=false)
 curl -s -X PATCH "$ISSUER/scim/v2/Users/emp-001" -H "$AUTH" -H "$JSON" \
   -d '{"operations":[{"value":{"active":false}}]}'
 
-# 删除（连带清除其会话）
+# Delete (clears the user's sessions too)
 curl -s -X DELETE "$ISSUER/scim/v2/Users/emp-001" -H "$AUTH"
 
-# 创建组
+# Create a group
 curl -s -X POST "$ISSUER/scim/v2/Groups" -H "$AUTH" -H "$JSON" \
   -d '{"displayName":"engineering","externalId":"grp-001"}'
 
-# 组加成员（member.value 填用户 UUID）
+# Add a member (member.value is the user's UUID)
 curl -s -X PATCH "$ISSUER/scim/v2/Groups/grp-001" -H "$AUTH" -H "$JSON" \
   -d '{"operations":[{"value":[{"value":"<user-uuid>"}]}]}'
 ```
 
-### 3.5 实现说明与限制
+### 3.5 Implementation notes and limits
 
-- 每次操作均写审计（`scim.user.create` / `scim.user.delete` / `scim.group.*` 等），actor 为空。
-- 创建的用户角色固定为 `user`（非 admin/manager）；无公开注册。
-- **组 PATCH 目前仅支持「增加成员」**（把用户 UUID 加入组），未实现按 `op` 的 remove/replace 语义；删除组会把成员从 `users.groups[]` 移除。
-- `bulk`、`filter`、`sort`、`etag`、`changePassword` 等能力在 `ServiceProviderConfig` 中声明为 `supported: false`。请求若仍带 `filter`，返回 **400** 而不是静默返回整个目录。
-- 未配置 token 时整体禁用；token 明文不落库（只存哈希），生成后仅展示一次。
+- Every operation is audited (`scim.user.create` / `scim.user.delete` /
+  `scim.group.*`, …); the actor is empty (a machine credential).
+- Created users are always `member` (not admin/manager); there is no public
+  registration.
+- **Group PATCH currently supports adding members only** (appending a user UUID);
+  the `op`-based remove/replace semantics are not implemented. Deleting a group
+  removes its members from `users.groups[]`.
+- `bulk`, `filter`, `sort`, `etag` and `changePassword` are declared
+  `supported: false` in `ServiceProviderConfig`. A request that still sends
+  `filter` gets **400** rather than silently receiving the whole directory.
+- With no token the whole surface is disabled; the plaintext token never reaches
+  the database (hash only) and is shown once.
 
 ---
 
-## 4. 排错
+## 4. Troubleshooting
 
-| 现象 | 原因 |
+| Symptom | Cause |
 |------|------|
-| 注册返回 `401 missing initial access token` | 未传 token 头/字段 |
-| 注册返回 `401 invalid or expired registration token` | token 过期或已被用掉（一次性） |
-| webhook 投递无反应 | 看 `webhook_deliveries` 的 `status_code`/`error`；飞书若开了加签而 secret 没填会 93000 系列错误 |
-| SCIM 一律 `401 SCIM is not configured` | 尚未生成 token（后台未生成，且无 env 种子） |
-| SCIM `401 invalid SCIM bearer token` | `Authorization: Bearer` 值与已配置 token 不一致（或 token 已轮换/吊销） |
-| SCIM 建用户 `400 userName already exists` | `users_email_key` 唯一约束命中 |
+| Registration returns `401 missing initial access token` | No token header or field |
+| Registration returns `401 invalid or expired registration token` | The token expired or was already used (single-use) |
+| Webhook deliveries do nothing | Inspect `webhook_deliveries.status_code` / `error`; a Feishu bot with signing enabled but no `secret` returns a 93000-series error |
+| SCIM always returns `401 SCIM is not configured` | No token has been generated yet (neither in the UI nor via the env seed) |
+| SCIM returns `401 invalid SCIM bearer token` | The `Authorization: Bearer` value does not match the configured token (or it was rotated/revoked) |
+| SCIM user creation returns `400 userName already exists` | The `users_email_key` unique constraint fired |

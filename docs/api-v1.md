@@ -1,11 +1,16 @@
-# Signet HTTP API（`/api/v1`）
+# Signet HTTP API (`/api/v1`)
 
-Dashboard / 会话相关管理接口统一挂在 **`/api/v1/...`**。  
-OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见 [client-integration.md](./client-integration.md)）。动态注册 / Webhooks / SCIM 对接示例见 [integrations.md](./integrations.md)。
+> English · [简体中文](./zh-CN/api-v1.md)
 
-鉴权：浏览器 Cookie `signet_session`（HttpOnly）。未登录返回 `401`；权限不足返回 `403`。
+Dashboard and session-management endpoints live under **`/api/v1/...`**.
+OIDC protocol endpoints stay at `/oauth/*` and
+`/.well-known/openid-configuration` (see [client-integration.md](./client-integration.md)).
+Dynamic registration / webhooks / SCIM examples: [integrations.md](./integrations.md).
 
-错误体（JSON）：
+Authentication: the browser cookie `signet_session` (HttpOnly). An unauthenticated
+call returns `401`; insufficient permission returns `403`.
+
+Error body (JSON):
 
 ```json
 { "error": "message" }
@@ -13,432 +18,633 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 ---
 
-## 1. 认证与当前用户
+## 1. Authentication and the current user
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `POST` | `/api/v1/login` | 密码登录；可能返回 MFA 分支。配置 CAPTCHA 后需带 `captcha_token`（见 `GET /api/v1/captcha`） |
-| `GET` | `/api/v1/captcha` | **公开**：登录/重置表单的挑战描述 `{"enabled","provider","site_key"}`，未启用时 `{"enabled": false}`；secret 永不出现 |
-| `POST` | `/api/v1/logout` | 登出 |
-| `GET` | `/api/v1/me` | 当前用户 |
-| `PATCH` | `/api/v1/me` | 更新 `display_name` / `phone`（手机查重，排除自身） |
-| `POST` | `/api/v1/me/password` | 修改密码（校验复杂度 + 历史） |
-| `GET` | `/api/v1/me/sessions` | 当前用户的活跃会话列表 |
-| `DELETE` | `/api/v1/me/sessions/{id}` | 撤销指定会话（不含当前） |
-| `POST` | `/api/v1/me/sessions` | 撤销除当前外的所有会话 |
-| `GET` | `/api/v1/me/consents` | 当前用户已授权的应用（OAuth 同意记录） |
-| `DELETE` | `/api/v1/me/consents/{client_id}` | 撤销对某应用的授权（连带吊销其 refresh token） |
-| `GET` | `/api/v1/me/activity` | 当前用户自己的活动记录（登录 + 账号/安全操作），`?page=&page_size=` 分页；并附 `summary`（上次登录 / 活跃会话 / 2FA·passkey / 已授权应用数） |
+| `POST` | `/api/v1/login` | Password sign-in; may return an MFA branch. With CAPTCHA configured, send `captcha_token` (see `GET /api/v1/captcha`) |
+| `GET` | `/api/v1/captcha` | **Public**: the challenge descriptor for the sign-in/reset forms `{"enabled","provider","site_key"}`; `{"enabled": false}` when off; the secret never appears |
+| `POST` | `/api/v1/logout` | Sign out |
+| `GET` | `/api/v1/me` | The current user |
+| `PATCH` | `/api/v1/me` | Update `display_name` / `phone` (phone uniqueness excludes self) |
+| `POST` | `/api/v1/me/password` | Change password (complexity + history) |
+| `GET` | `/api/v1/me/sessions` | The current user's active sessions |
+| `DELETE` | `/api/v1/me/sessions/{id}` | Revoke one session (not the current one) |
+| `POST` | `/api/v1/me/sessions` | Revoke every session except the current one |
+| `GET` | `/api/v1/me/consents` | Applications the current user has authorized (OAuth consent records) |
+| `DELETE` | `/api/v1/me/consents/{client_id}` | Revoke one app's authorization (and its refresh tokens) |
+| `GET` | `/api/v1/me/activity` | The current user's own activity (sign-ins + account/security actions), paged by `?page=&page_size=`, with a `summary` (last sign-in / active sessions / 2FA·passkey / authorized apps) |
 
-### 自助客户端注册（任何登录用户，GitHub Developer settings 式）
+### Self-service client registration (any signed-in user, GitHub Developer-settings style)
 
-归属在 `client_apps.owner_id`：每个操作的 SQL 都限定 `owner_id = 当前用户`，查无一律 404（不泄露存在性）。注册默认形态与 RFC 7591 一致（`authorization_code` + `refresh_token`、PKCE、无 IP 白名单）。凭据带 Signet 前缀，便于日志/配置/扫描器识别：`client_id` 形如 `sgn_cl_…`，`client_secret` 形如 `sgn_cs_…`（一次性注册 token 为 `sgn_reg_…`）。`client_secret` 仅在创建/轮换响应中出现一次。管理员在 `/api/v1/admin/clients` 保持全局可见可管（`AdminClient` 新增 `client_name` 字段）。
+Ownership lives in `client_apps.owner_id`: every operation's SQL is scoped to
+`owner_id = current user`, and a miss is a plain 404 (no existence leak). Defaults
+match RFC 7591 (`authorization_code` + `refresh_token`, PKCE, no IP allowlist).
+Credentials carry the Signet prefix so logs/configs/scanners can recognise them:
+`client_id` looks like `sgn_cl_…`, `client_secret` like `sgn_cs_…` (single-use
+registration tokens are `sgn_reg_…`). `client_secret` appears only in the
+create/rotate response. Administrators keep global visibility and control at
+`/api/v1/admin/clients` (`AdminClient` carries `client_name`).
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/me/clients` | 当前用户拥有的应用列表 |
-| `POST` | `/api/v1/me/clients` | 注册新应用：`{client_name, redirect_uris, scopes?}`（name 必填 ≤200 字符；scopes 缺省 `openid profile email`）→ `{client, client_secret}` |
-| `PUT` | `/api/v1/me/clients/{id}` | 仅可改 `client_name` / `redirect_uris`（缺省字段保持原值） |
-| `POST` | `/api/v1/me/clients/{id}/rotate-secret` | 轮换 secret → `{client, client_secret}`（旧 secret 立即失效） |
-| `DELETE` | `/api/v1/me/clients/{id}` | 删除应用（级联清除该 client 的同意记录与 token） |
+| `GET` | `/api/v1/me/clients` | Applications owned by the current user |
+| `POST` | `/api/v1/me/clients` | Register an app: `{client_name, redirect_uris, scopes?}` (name required, ≤200 chars; scopes default `openid profile email`) → `{client, client_secret}` |
+| `PUT` | `/api/v1/me/clients/{id}` | Only `client_name` / `redirect_uris` may change (absent fields keep their value) |
+| `POST` | `/api/v1/me/clients/{id}/rotate-secret` | Rotate the secret → `{client, client_secret}` (the old one stops working immediately) |
+| `DELETE` | `/api/v1/me/clients/{id}` | Delete the app (cascades that client's consents and tokens) |
 
-### 首次部署初始化（首次登录创建管理员）
+### First-deployment setup (create the administrator on first sign-in)
 
-无任何 active `admin` 用户时，首次访问会跳转到 `/setup` 页面，在 Web 上创建首位管理员（替代早期由环境变量在启动时创建的方式）。
+With no active `admin` user, the first visit redirects to `/setup` to create the
+first administrator in the browser (replacing the old environment-variable
+creation at startup).
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/setup/status` | 公开：返回 `{ "needs_setup": true/false }`（是否存在 active admin） |
-| `POST` | `/api/v1/setup` | 公开：创建首位 admin 并登录。body `{ "email", "password", "display_name"? }`；已存在 admin 时返回 `409` |
+| `GET` | `/api/v1/setup/status` | Public: `{ "needs_setup": true/false }` (whether an active admin exists) |
+| `POST` | `/api/v1/setup` | Public: create the first admin and sign in. Body `{ "email", "password", "display_name"? }`; returns `409` when an admin already exists |
 
-- `POST /api/v1/setup` 成功后签发会话（`signet_session` Cookie）并返回 `{ "status": "ok", "user": ... }`。
-- 密码校验与普通用户一致（长度 + 大小写 + 数字，见 `SIGNET_PASSWORD_MIN_LENGTH`）。
-- 并发保护：使用 Postgres 咨询锁（advisory lock）保证只创建一个 admin。
+- A successful `POST /api/v1/setup` issues a session (`signet_session` cookie) and
+  returns `{ "status": "ok", "user": ... }`.
+- Password validation matches normal users (length + case + digit, see
+  `SIGNET_PASSWORD_MIN_LENGTH`).
+- Concurrency is protected by a Postgres advisory lock, so exactly one admin is
+  created.
 
 ### `POST /api/v1/login`
 
-请求：`{ "email", "password" }`
+Request: `{ "email", "password" }`
 
-响应之一：
+One of:
 
-| `status` | 含义 |
+| `status` | Meaning |
 |----------|------|
-| `ok` | 已签发会话；含 `user` |
-| `mfa_required` | 需再调 MFA verify（Cookie：`signet_mfa`） |
-| `enroll_required` | 需强制绑定 TOTP |
+| `ok` | Session issued; includes `user` |
+| `mfa_required` | Call MFA verify next (cookie: `signet_mfa`) |
+| `enroll_required` | Forced TOTP enrollment |
 
-成功登录会写审计 `auth.login`，并记录 **客户端 IP**（`X-Forwarded-For` / `X-Real-IP` / 直连 peer）。
+A successful sign-in writes `auth.login` and records the **client IP**
+(`X-Forwarded-For` / `X-Real-IP` / the direct peer).
 
-### 登录防爆破与密码策略
+### Brute-force protection and password policy
 
-- 连续密码错误达到 `SIGNET_MAX_LOGIN_ATTEMPTS`（默认 5）后锁定账号 `SIGNET_LOCKOUT_MINUTES`（默认 15）分钟；失败写审计 `auth.login_failed`。
-- 密码强度：`SIGNET_PASSWORD_MIN_LENGTH`（默认 10）且需大小写字母 + 数字。
-- 历史复用：新密码不得与最近 `SIGNET_PASSWORD_HISTORY_SIZE`（默认 3）次历史相同。
-- 配置项均通过环境变量覆盖，见 `.env.example`。
+- After `SIGNET_MAX_LOGIN_ATTEMPTS` consecutive wrong passwords (default 5) the
+  account locks for `SIGNET_LOCKOUT_MINUTES` (default 15); failures write
+  `auth.login_failed`.
+- Strength: `SIGNET_PASSWORD_MIN_LENGTH` (default 10) plus upper/lower case and a
+  digit.
+- History: a new password may not match the most recent
+  `SIGNET_PASSWORD_HISTORY_SIZE` (default 3).
+- All of these can be overridden through environment variables; see
+  `.env.example`.
 
 ---
 
 ## 2. MFA
 
-详见 [mfa.md](./mfa.md)。
+See [mfa.md](./mfa.md).
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `POST` | `/api/v1/mfa/verify` | 登录挑战：TOTP / 恢复码 |
-| `POST` | `/api/v1/mfa/enroll/start` | 强制 enroll：生成 secret + otpauth |
-| `POST` | `/api/v1/mfa/enroll/confirm` | 强制 enroll 确认；返回 `recovery_codes` |
-| `GET` | `/api/v1/me/mfa` | 已登录：MFA 状态 |
-| `POST` | `/api/v1/me/mfa/enroll/start\|confirm` | 自愿绑定 |
-| `POST` | `/api/v1/me/mfa/recovery/regenerate` | 轮换恢复码（需当前 TOTP） |
-| `POST` | `/api/v1/me/mfa/rebind/start\|confirm` | 换绑 |
-| `POST` | `/api/v1/me/mfa/disable` | 用户自主禁用 MFA（需当前 TOTP，body `{ code }`；全局或用户级强制时返回 400） |
-| `GET/PATCH` | `/api/v1/admin/settings/mfa` | **admin**：全局强制开关 |
-| `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**：SSO JIT 开户开关 `{ "jit_provision": bool }` |
-| `GET/PATCH` | `/api/v1/admin/settings/sign-in` | **admin**：登录白名单（邮箱域名），见 §14 |
-| `GET/PATCH/DELETE` | `/api/v1/admin/settings/runtime` | **admin**：运行时策略（token/会话有效期、登录锁定、密码策略、审计保留、限流）；优先级 **DB > 环境变量 > 默认**，DELETE 清除覆盖 |
-| `GET/PATCH/DELETE` | `/api/v1/admin/settings/smtp` | **admin**：SMTP 中继（host/port/username/password/from），**优先级 DB > 环境变量**，即时生效。PATCH 每字段三态：省略=不动、`null`=清除覆盖回退环境变量、值=设置；密码只写不读（GET 返回 `password_set`，落库为应用密钥加密的密文，`from` 校验 mailbox 格式）。审计 `settings.smtp_update` / `settings.smtp_reset`（不含密码） |
-| `POST` | `/api/v1/admin/settings/smtp/test` | **admin**：经当前生效中继发送测试邮件 `{ "to": "…" }`；返回 `{ ok, error? }`，transport 错误原样呈现（这是本端点存在的意义） |
-| `GET/PATCH/DELETE` | `/api/v1/admin/settings/captcha` | **admin**：登录/重置页 CAPTCHA（Turnstile/hCaptcha），**优先级 DB > 环境变量**；PATCH 三态同 SMTP；`secret_key` 只写不读（加密落库）；provider/site_key/secret 三要素齐备才启用，半配置状态=关闭。审计 `settings.captcha_update` / `settings.captcha_reset` |
-| `GET/PATCH/DELETE` | `/api/v1/admin/settings/server` | **admin**：issuer（token 的 `iss`、discovery 与所有客户端配置的基准）。优先级 **DB > `SIGNET_ISSUER` > 默认**：保存过的值优先生效，环境变量只在首次保存前作为初始值。PATCH `{issuer?, allow_repeat_changes?}`：issuer 只接受纯 origin（http/https + host + 可选端口，无 path/query/fragment）；**首次保存后锁定**，再次修改需先把 `allow_repeat_changes` 置为 true（解锁动作单独审计）。**DELETE**（Reset override）：清除 `server.issuer` 与重复修改开关，回退到环境变量/默认，审计 `settings.issuer_reset`。保存即生效（本进程），对端副本 30s 内收敛；改 issuer 会使已发 token 失效、客户端与第三方 SSO 回调需同步更新。审计 `settings.issuer_update` / `settings.issuer_repeat_policy` |
-| `GET/PATCH/DELETE` | `/api/v1/admin/settings/branding` | **admin**：产品名（登录页/初始化向导/侧栏/标签页标题），**优先级 DB > `SIGNET_BRAND_NAME` > "Signet"**，即时生效；1–64 字符纯文本（禁控制字符）。DELETE 同时清除 logo。审计 `settings.branding_update` / `settings.branding_reset` |
-| `POST/DELETE` | `/api/v1/admin/settings/branding/logo` | **admin**：上传/移除 logo。POST `{"data_url":"data:image/png;base64,…"}`，仅 PNG/JPEG/WebP（**拒绝 SVG**，避免同源脚本执行），校验 magic bytes，≤256 KiB；返回 `{logo_set, logo_url}`。审计 `settings.branding_logo_update` / `settings.branding_logo_remove` |
-| `GET` | `/api/v1/branding` | **公开**：`{"name": …, "logo_url": …}`，登录/重置/初始化/同意页无需认证读取产品名与 logo |
-| `GET` | `/api/v1/branding/logo` | **公开**：logo 图片（无则 404）；带版本号查询参数，响应 `Cache-Control: immutable` + `nosniff` |
-| `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问本表全部 admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
-| `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**：吊销（立即生效） |
-| `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
+| `POST` | `/api/v1/mfa/verify` | Login challenge: TOTP / recovery code |
+| `POST` | `/api/v1/mfa/enroll/start` | Forced enrollment: generate a secret + otpauth |
+| `POST` | `/api/v1/mfa/enroll/confirm` | Forced enrollment confirmation; returns `recovery_codes` |
+| `GET` | `/api/v1/me/mfa` | Signed in: MFA status |
+| `POST` | `/api/v1/me/mfa/enroll/start\|confirm` | Optional enrollment |
+| `POST` | `/api/v1/me/mfa/recovery/regenerate` | Rotate recovery codes (needs the current TOTP) |
+| `POST` | `/api/v1/me/mfa/rebind/start\|confirm` | Rebind |
+| `POST` | `/api/v1/me/mfa/disable` | Self-service disable (needs the current TOTP, body `{ code }`; returns 400 while globally or per-user enforced) |
+| `GET/PATCH` | `/api/v1/admin/settings/mfa` | **admin**: the global enforcement switch |
+| `GET/PATCH` | `/api/v1/admin/settings/sso` | **admin**: SSO JIT provisioning `{ "jit_provision": bool }` |
+| `GET/PATCH` | `/api/v1/admin/settings/sign-in` | **admin**: the sign-in allowlist (email domains), see §14 |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/runtime` | **admin**: runtime policy (token/session lifetimes, lockout, password policy, audit retention, rate limit); precedence **DB > environment > default**; DELETE clears the override |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/smtp` | **admin**: the SMTP relay (host/port/username/password/from), **DB > environment**, effective immediately. PATCH is tri-state per field: omitted = unchanged, `null` = clear the override and fall back to the environment, a value = set. The password is write-only (GET reports `password_set`; the stored value is encrypted with the application key; `from` is validated as a mailbox). Audits `settings.smtp_update` / `settings.smtp_reset` (never the password) |
+| `POST` | `/api/v1/admin/settings/smtp/test` | **admin**: send a test message through the effective relay `{ "to": "…" }`; returns `{ ok, error? }`, surfacing transport errors verbatim (the point of the endpoint) |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/captcha` | **admin**: CAPTCHA (Turnstile/hCaptcha) on sign-in/reset, **DB > environment**; PATCH is tri-state like SMTP; `secret_key` is write-only (encrypted); enabled only when provider/site_key/secret are all present — a half-configured row means off. Audits `settings.captcha_update` / `settings.captcha_reset` |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/server` | **admin**: the issuer (the basis of `iss`, discovery and every client config). Precedence **DB > `SIGNET_ISSUER` > default**: a saved value wins, and the variable only seeds it before the first save. PATCH `{issuer?, allow_repeat_changes?}`: the issuer must be a bare origin (http/https + host + optional port, no path/query/fragment); **the first save locks it**, and changing it again needs `allow_repeat_changes = true` first (the unlock is audited separately). **DELETE** (Reset override) clears `server.issuer` and the repeat switch, falling back to the variable/default, audited as `settings.issuer_reset`. A save applies immediately in this process; peer replicas converge within 30 s. Changing the issuer invalidates outstanding tokens and requires clients plus third-party SSO callbacks to be updated. Audits `settings.issuer_update` / `settings.issuer_repeat_policy` |
+| `GET/PATCH/DELETE` | `/api/v1/admin/settings/branding` | **admin**: the product name (sign-in/setup/sidebar/tab title), **DB > `SIGNET_BRAND_NAME` > "Signet"**, applied immediately; 1–64 plain-text characters (control characters refused). DELETE clears the logo too. Audits `settings.branding_update` / `settings.branding_reset` |
+| `POST/DELETE` | `/api/v1/admin/settings/branding/logo` | **admin**: upload/remove the logo. POST `{"data_url":"data:image/png;base64,…"}`, PNG/JPEG/WebP only (**SVG refused**, to prevent same-origin script execution), magic-byte checked, ≤256 KiB; returns `{logo_set, logo_url}`. Audits `settings.branding_logo_update` / `settings.branding_logo_remove` |
+| `GET` | `/api/v1/branding` | **Public**: `{"name": …, "logo_url": …}`; the sign-in/reset/setup/consent pages read the name and logo without authentication |
+| `GET` | `/api/v1/branding/logo` | **Public**: the logo image (404 when unset); the versioned query parameter comes with `Cache-Control: immutable` + `nosniff` |
+| `GET/POST` | `/api/v1/admin/tokens` | **admin**: machine credentials (PAT) list / create. Create `{ "name", "expires_in_days"? }` returns `{"id","token":"sgn_pat_… (once)"}`; callers send it as `Authorization: Bearer` to any admin endpoint in this table (no session cookie). The token carries no permissions of its own: every call re-checks the **owner's current** role/status/must_change_password, so a demotion, freeze or password change kills it. The audit actor is the owner |
+| `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**: revoke (immediate) |
+| `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**: reset another user's MFA |
 
 ---
 
-## 3. 管理：用户
+## 3. Administration: users
 
-需 staff（admin / manager）；删除与部分操作仅 admin。
+Staff (admin / manager); deletion and some operations are admin-only.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/admin/users` | 分页列表。返回 `{ users, total, limit, offset }`；行内含 `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities` / `directory_sources` / `scim_managed`。可选 `group_id=<uuid\|ungrouped>` 只返回该组成员（`ungrouped` = 两组均为空）；`include_descendants=true` 递归包含子部门/子组 |
-| `GET` | `/api/v1/admin/users/email-check?email=` | 邮箱查重，返回 `{ "exists": bool }` |
-| `GET` | `/api/v1/admin/users/phone-check?phone=&exclude_id=` | 手机查重，返回 `{ "exists": bool }`（`exclude_id` 可选，编辑时排除自身） |
-| `POST` | `/api/v1/admin/users` | 创建（可带 `groups`、`phone`） |
-| `PUT` | `/api/v1/admin/users/{id}` | 更新（含 `mfa_required`、status、role、`groups`、`phone`…） |
-| `DELETE` | `/api/v1/admin/users/{id}` | **admin** 删除 |
-| `POST` | `/api/v1/admin/users/{id}/disable` | 冻结 |
-| `POST` | `/api/v1/admin/users/{id}/enable` | 解冻 |
-| `POST` | `/api/v1/admin/users/batch-disable` | 批量冻结 `{ "ids": [] }` |
-| `POST` | `/api/v1/admin/users/import` | **admin** 批量导入 `{ users: [...], update?: bool, dry_run?: bool }`，≤1000 行；逐行校验、行级错误不中断批次；`update=true` 时更新已存在账号的资料（**不改密码**）；`dry_run=true` 时全量校验并返回与真实执行相同的分类结果（响应多一个 `dry_run: true` 字段），**不写任何数据、不写审计**（响应含 `created/updated/skipped/errors`）；真实导入每行写 `user.create` 审计，另写一条 `user.import` 汇总 |
-| `GET` | `/api/v1/admin/users/export` | **staff** 用户 CSV（邮箱/用户名/显示名/角色/状态/组/手机，公式中和）；支持与列表相同的 `group_id` / `include_descendants` 过滤 |
-| `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | 强制下线该用户全部会话 |
+| `GET` | `/api/v1/admin/users` | Paged list. Returns `{ users, total, limit, offset }`; rows carry `mfa_required` / `totp_enabled` / `groups` / `phone` / `provisioned_via` / `has_password` / `sso_identities` / `directory_sources` / `scim_managed`. Optional `group_id=<uuid\|ungrouped>` returns that group's members (`ungrouped` = both arrays empty); `include_descendants=true` recurses into child departments/groups |
+| `GET` | `/api/v1/admin/users/email-check?email=` | Email uniqueness: `{ "exists": bool }` |
+| `GET` | `/api/v1/admin/users/phone-check?phone=&exclude_id=` | Phone uniqueness: `{ "exists": bool }` (`exclude_id` excludes self when editing) |
+| `POST` | `/api/v1/admin/users` | Create (may include `groups`, `phone`) |
+| `PUT` | `/api/v1/admin/users/{id}` | Update (including `mfa_required`, status, role, `groups`, `phone`, …) |
+| `DELETE` | `/api/v1/admin/users/{id}` | **admin** delete |
+| `POST` | `/api/v1/admin/users/{id}/disable` | Freeze |
+| `POST` | `/api/v1/admin/users/{id}/enable` | Unfreeze |
+| `POST` | `/api/v1/admin/users/batch-disable` | Batch freeze `{ "ids": [] }` |
+| `POST` | `/api/v1/admin/users/import` | **admin** bulk import `{ users: [...], update?: bool, dry_run?: bool }`, ≤1000 rows; per-row validation, row errors do not abort the batch; `update=true` updates existing profiles (**never passwords**); `dry_run=true` validates everything and returns the same classification as a real run (plus `dry_run: true`), **writing nothing and auditing nothing** (response carries `created/updated/skipped/errors`); a real import audits `user.create` per row plus one `user.import` summary |
+| `GET` | `/api/v1/admin/users/export` | **staff** user CSV (email/username/display name/role/status/groups/phone, formula-neutralised); supports the same `group_id` / `include_descendants` filters as the list |
+| `POST` | `/api/v1/admin/users/{id}/sessions/revoke` | Force all of that user's sessions out |
 
-`groups` 在 API 中仍是**组名数组**（写入时经 `signet_group_ids()` 解析成内部 id；未知名字自动创建 `local` 组），读取时由 `signet_group_names()` 还原为名字。它会作为 `groups` claim 下发到 `id_token` 与 `/oauth/userinfo`（仅直接成员，不继承父部门），供业务侧做初始角色映射（不替代业务 ACL）。`phone` 为可选的明文联系电话（`TEXT`，空即不填）。创建/更新邮箱时后端会显式查重，重复返回 `400 "email already exists"`；手机同理（非空时唯一，重复返回 `400 "phone already exists"`，DB 有部分唯一索引 `users_phone_key`）。
+In the API, `groups` remains an **array of group names** (writes resolve them to
+internal ids through `signet_group_ids()`; an unknown name creates a `local`
+group, and reads resolve back through `signet_group_names()`). The array is
+published as the `groups` claim in `id_token` and `/oauth/userinfo` (direct
+membership only, no ancestor inheritance) as starting data for business role
+mapping (not a replacement for business ACLs). `phone` is an optional plaintext
+contact number (`TEXT`; empty means unset). Creating/updating checks the email
+explicitly and returns `400 "email already exists"`; the phone behaves the same
+(a non-empty unique value; duplicates return `400 "phone already exists"`, backed
+by the partial unique index `users_phone_key`).
 
-列表额外字段：`provisioned_via`（如 `sso_jit` 表示第三方 JIT 开户，否则 `null`）、`has_password`、`sso_identities`（`[{ provider_code, display_name, provider_type }]`，已绑定的第三方）。
+Extra list fields: `provisioned_via` (e.g. `sso_jit` for third-party JIT
+provisioning, otherwise `null`), `has_password`, `sso_identities`
+(`[{ provider_code, display_name, provider_type }]` — the bound third parties).
 
-### 组与部门（staff；删除仅 admin）
+### Groups and departments (staff; deletion admin-only)
 
-组与部门是同一棵树（`kind = group | department`）。`source` 决定可编辑性：`local` 可改名/成员/删除；`scim`、`directory` 可移动但名称、成员与存在性归来源。详见 [groups.md](./groups.md)。
+Groups and departments are one tree (`kind = group | department`). `source`
+decides editability: `local` may rename/change members/delete; `scim` and
+`directory` nodes may be moved, but their name, membership and existence belong
+to the source. See [groups.md](./groups.md).
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/admin/groups` | 扁平节点列表：`id, display_name, parent_id, kind, source, member_count, created_at, updated_at` |
-| `POST` | `/api/v1/admin/groups` | `{name, kind?, parent_id?}`；重名 409 |
-| `PUT` | `/api/v1/admin/groups/{id}` | `{name?, kind?, parent_id?, clear_parent?}`；移动拒环；`parent_id` 省略=保持、`clear_parent=true`=移到根；非 `local` 改名 409 |
-| `DELETE` | `/api/v1/admin/groups/{id}` | **admin** 且仅 `local`；子节点上移、成员释放、行置墓碑 |
-| `GET` | `/api/v1/admin/groups/{id}/members?q=&limit=&offset=` | 直接成员分页（email/display_name 搜索） |
-| `POST` | `/api/v1/admin/groups/{id}/members` | `{user_ids:[uuid]}` 加入；非 `local` 409 |
-| `DELETE` | `/api/v1/admin/groups/{id}/members/{user_id}` | 移除；非 `local` 409 |
+| `GET` | `/api/v1/admin/groups` | Flat node list: `id, display_name, parent_id, kind, source, member_count, created_at, updated_at` |
+| `POST` | `/api/v1/admin/groups` | `{name, kind?, parent_id?}`; a duplicate name returns 409 |
+| `PUT` | `/api/v1/admin/groups/{id}` | `{name?, kind?, parent_id?, clear_parent?}`; cycles are refused on move; omitting `parent_id` keeps it, `clear_parent=true` moves to the root; renaming a non-`local` node returns 409 |
+| `DELETE` | `/api/v1/admin/groups/{id}` | **admin** and `local` only; children move up, members are released, the row becomes a tombstone |
+| `GET` | `/api/v1/admin/groups/{id}/members?q=&limit=&offset=` | Paged direct members (searches email/display_name) |
+| `POST` | `/api/v1/admin/groups/{id}/members` | `{user_ids:[uuid]}` to add; non-`local` returns 409 |
+| `DELETE` | `/api/v1/admin/groups/{id}/members/{user_id}` | Remove; non-`local` returns 409 |
 
-审计：`group.create/update/delete/member_add/member_remove`。
+Audit: `group.create/update/delete/member_add/member_remove`.
 
-**`GET /admin/users` 分页契约**：
+**`GET /admin/users` paging contract**:
 
-- `?q=` 服务端搜索，覆盖 email、username、display_name、status、role、`provisioned_via`、SSO 身份（provider 显示名/code/type）。`_` 与 `%` 按字面字符匹配（已转义），非通配符。
-- `?sort=` 取值白名单：`created_at`（默认）/ `email` / `display_name` / `role` / `status`；`?dir=` 仅接受 `asc`（其余一律 `desc`）。
-- `?limit=` 钳制到 `[1, 200]`（默认 20）；`?offset=` ≥ 0。
-- 排序以 `id ASC` 作次级键：同 `created_at`（如目录批量导入）的行在跨页时不会重复或丢失。
-- `total` 是命中搜索的行数（非本页行数）；翻页用 `offset`，越界返回空 `users` 数组而非错误。
+- `?q=` is a server-side search over email, username, display_name, status, role,
+  `provisioned_via` and SSO identities (provider display name/code/type). `_` and
+  `%` match literally (escaped), not as wildcards.
+- `?sort=` allowlist: `created_at` (default) / `email` / `display_name` / `role` /
+  `status`; `?dir=` accepts only `asc` (anything else means `desc`).
+- `?limit=` is clamped to `[1, 200]` (default 20); `?offset=` ≥ 0.
+- Sorting uses `id ASC` as a secondary key: rows sharing a `created_at` (e.g. a
+  bulk directory import) neither duplicate nor disappear across pages.
+- `total` counts matching rows (not the page); paging uses `offset`, and an
+  out-of-range offset returns an empty `users` array, not an error.
 
-**`POST /admin/users/batch-disable` 语义**：逐行做权限检查（manager 不能冻结 admin，冻结目标排除自己），返回的 `disabled` 计数包含**所有存在的目标 id**——重复冻结已冻结的账号也计入（操作幂等，重复选择不会少报）；仅不存在的 id 不计入。每个目标账号产生一条审计事件；全部成功后一次性吊销其全部会话。
+**`POST /admin/users/batch-disable` semantics**: permissions are checked per row
+(a manager cannot freeze an admin, and the target list excludes the caller); the
+`disabled` count includes **every target id that exists** — freezing an already
+frozen account counts too (idempotent, so a repeated selection is never
+under-reported); only non-existent ids are excluded. Each target produces its own
+audit event; after all succeed, all their sessions are revoked at once.
 
-> `phone` 当前仅作**联系信息**，未做短信验证绑定；验证绑定（SMS OTP）为规划项，见 [design.md](./design.md) Phase 4。
+> `phone` is currently **contact information** only, with no SMS verification.
+> SMS OTP binding is planned; see [design.md](./design.md) Phase 4.
 
 ---
 
-## 4. 管理：Clients
+## 4. Administration: clients
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/admin/clients` | 列表 |
-| `POST` | `/api/v1/admin/clients` | 注册（secret 仅返回一次） |
-| `PUT` | `/api/v1/admin/clients/{id}` | 更新 redirect / scopes / **IP 白名单**（PKCE 已无开关，始终强制 S256） |
-| `DELETE` | `/api/v1/admin/clients/{id}` | **admin** 删除 |
-| `POST` | `/api/v1/admin/clients/{id}/disable\|enable` | 启停 |
-| `POST` | `/api/v1/admin/clients/{id}/rotate-secret` | 轮换 secret |
+| `GET` | `/api/v1/admin/clients` | List |
+| `POST` | `/api/v1/admin/clients` | Register (the secret is returned once) |
+| `PUT` | `/api/v1/admin/clients/{id}` | Update redirect / scopes / **IP allowlist** (PKCE always enforces S256; no switch) |
+| `DELETE` | `/api/v1/admin/clients/{id}` | **admin** delete |
+| `POST` | `/api/v1/admin/clients/{id}/disable\|enable` | Enable / disable |
+| `POST` | `/api/v1/admin/clients/{id}/rotate-secret` | Rotate the secret |
 
-### IP 白名单字段
+### IP allowlist fields
 
-| 字段 | 默认（新建） | 说明 |
+| Field | Default (new client) | Notes |
 |------|--------------|------|
-| `ip_allowlist_enabled` | `true` | 开启后仅 `allowed_cidrs` 可访问该客户端的 authorize/token |
-| `allowed_cidrs` | `[]` | IP 或 CIDR；开启时**至少一条** |
+| `ip_allowlist_enabled` | `true` | When on, only `allowed_cidrs` may reach that client's authorize/token |
+| `allowed_cidrs` | `[]` | IPs or CIDRs; at least one when enabled |
 
-已有客户端迁移后默认为 **关闭**限制。详见 [client-integration.md](./client-integration.md)。
+Existing clients migrate with the restriction **off**. See
+[client-integration.md](./client-integration.md).
 
 ---
 
-## 5. 管理：概览与审计
+## 5. Administration: overview and audit
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Notes |
 |------|------|------|
-| `GET` | `/api/v1/admin/stats` | Overview 统计（登录趋势 24h 小时粒度 + 7d/30d 日粒度；支持按应用筛选与应用/浏览器/OS 分布） |
-| `GET` | `/api/v1/admin/audit-logs` | 审计列表（含 `ip` / `browser` / `os` / `client_id`；可按 action / client_id / browser / os / q / sort） |
-| `GET` | `/api/v1/admin/audit-logs/export` | 审计导出 CSV（`text/csv`，尊重 staff 权限过滤，含 `client_id` 列） |
-| `GET` | `/api/v1/admin/audit-logs/facets` | 审计筛选下拉数据源（近 90 天 browser / os 去重值 + 全部应用） |
+| `GET` | `/api/v1/admin/stats` | Overview stats (24h hourly + 7d/30d daily login trends; optional per-app filter plus app/browser/OS distributions) |
+| `GET` | `/api/v1/admin/audit-logs` | Audit list (with `ip` / `browser` / `os` / `client_id`; filter by action / client_id / browser / os / q / sort) |
+| `GET` | `/api/v1/admin/audit-logs/export` | Audit CSV export (`text/csv`, respecting staff permissions, with a `client_id` column) |
+| `GET` | `/api/v1/admin/audit-logs/facets` | Filter-dropdown sources (distinct browser/OS over 90 days + all apps) |
 
-### `GET /api/v1/admin/stats`（节选）
+### `GET /api/v1/admin/stats` (excerpt)
 
-- 用户 / 客户端计数  
-- `logins_24h` / `logins_7d` / `logins_30d`（当前窗口合计）  
-- `unique_users_24h` / `unique_users_7d` / `unique_users_30d`  
-- `login_trend[]`：近 30 日每日点，含 `day`、`logins_1d`、滚动 `logins_7d` / `logins_30d`
-- `login_trend_24h[]`：近 24 小时逐小时点（UTC 整点，含空桶补零），含 `hour`、`logins`  
-- `by_client[]`：近 30 天按应用聚合（Top 10，按 30d 降序），含 `client_id`（`(direct)` 表示无应用归属的直登）、`logins_24h/7d/30d`、`unique_users_30d`  
-- `browsers[]` / `oses[]`：近 30 天登录事件的浏览器 / 操作系统分布，含 `name` / `count`  
-- `scope`：回显当前筛选（`client_id` 为 `null` 表示全局）  
+- User / client counts
+- `logins_24h` / `logins_7d` / `logins_30d` (current window totals)
+- `unique_users_24h` / `unique_users_7d` / `unique_users_30d`
+- `login_trend[]`: daily points for 30 days with `day`, `logins_1d`, and rolling
+  `logins_7d` / `logins_30d`
+- `login_trend_24h[]`: hourly points for 24 hours (UTC on the hour, empty buckets
+  zero-filled) with `hour`, `logins`
+- `by_client[]`: 30-day aggregation per app (top 10 by 30d descending), with
+  `client_id` (`(direct)` = no app attribution), `logins_24h/7d/30d`,
+  `unique_users_30d`
+- `browsers[]` / `oses[]`: browser / OS distribution of 30-day sign-ins with
+  `name` / `count`
+- `scope`: echoes the current filter (`client_id: null` = global)
 
-Query：可选 `client_id`。传入应用标识时，上述登录类字段（合计 / 独立用户 / 趋势 / 最近登录 / 分布）均过滤为该应用；传 `(direct)` 仅统计无归属的直登。用户与客户端计数恒为全局。
+Query: optional `client_id`. Passing an app id filters the sign-in fields above
+(totals / unique users / trend / recent sign-ins / distributions) to that app;
+`(direct)` counts only unattributed sign-ins. User and client counts are always
+global.
 
 ### `GET /api/v1/admin/audit-logs`
 
-Query：`q`、`action`、`client_id`、`browser`、`os`、`page`、`page_size`、`sort`（含 `ip`）、`dir`。  
-每行含 `ip`、`user_agent`、`browser`、`os`、`client_id`（登录/MFA 等事件有值；`browser`/`os` 由 `User-Agent` 解析；`client_id` 为发起登录的 OAuth 应用，从 2026-09 起的新日志开始记录，历史数据为空）。  
-manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mfa.reset` / `settings.mfa_update` 等仅 admin。
+Query: `q`, `action`, `client_id`, `browser`, `os`, `page`, `page_size`, `sort`
+(including `ip`), `dir`.
+Rows carry `ip`, `user_agent`, `browser`, `os`, `client_id` (set for
+login/MFA-style events; `browser`/`os` are parsed from `User-Agent`; `client_id`
+is the OAuth app that started the sign-in — recorded from September 2026 onwards,
+empty in older rows).
+Managers see an allowlist of actions only; `user.delete` / `client.delete` /
+`mfa.reset` / `settings.mfa_update` and similar are admin-only.
 
 ### `GET /api/v1/admin/audit-logs/facets`
 
-返回 `browsers[]`、`oses[]`（近 90 天日志中的去重值，升序）与 `clients[]`（全部应用，含 `client_id` / `enabled`），供审计页与 Overview 的筛选下拉使用。
+Returns `browsers[]`, `oses[]` (distinct values over 90 days, ascending) and
+`clients[]` (all apps with `client_id` / `enabled`) for the audit page and the
+Overview filter dropdowns.
 
-### 登录审计的应用归属
+### App attribution in login audits
 
-登录接口（`POST /auth/login`、`POST /mfa/verify`、`POST /mfa/enroll/confirm`、`POST /passkeys/finish`）接受可选 `return_to` 字段（形如 `/oauth/authorize?...&client_id=xxx`）。服务端解析并在 `client_apps` 校验通过后，将该应用的 `client_id` 写入 `auth.login` / `auth.login_failed` 审计事件；解析失败不影响登录流程。
+The sign-in endpoints (`POST /auth/login`, `POST /mfa/verify`,
+`POST /mfa/enroll/confirm`, `POST /passkeys/finish`) accept an optional
+`return_to` (a `/oauth/authorize?...&client_id=xxx` URL). When it parses and the
+client validates against `client_apps`, that `client_id` is written into the
+`auth.login` / `auth.login_failed` audit event; a parse failure never affects the
+sign-in itself.
 
 ---
 
-## 6. 与 OIDC 的边界
+## 6. Boundary with OIDC
 
-| 前缀 | 用途 |
+| Prefix | Purpose |
 |------|------|
-| `/api/v1/*` | Signet Dashboard、会话、后台管理 |
-| `/oauth/*` | 标准 OIDC（业务客户端对接） |
-| `/health` | 探活 |
-| `/metrics` | Prometheus 指标（独立监听；默认仅 `127.0.0.1:9464`，`SIGNET_METRICS_BIND` 可改/关） |
+| `/api/v1/*` | Signet dashboard, sessions, administration |
+| `/oauth/*` | Standard OIDC (business-client integration) |
+| `/health` | Liveness |
+| `/metrics` | Prometheus metrics (separate listener; default `127.0.0.1:9464`, `SIGNET_METRICS_BIND` moves or disables it) |
 
-### 审计保留策略
+### Audit retention
 
-小时巡检清理 `created_at` 早于保留窗口的记录（`SIGNET_AUDIT_RETENTION_DAYS`，默认 180；也可在 Settings → Runtime policies 修改，**不得小于 1 天**）。管理台查询与导出不受影响。
+An hourly sweep deletes rows whose `created_at` predates the retention window
+(`SIGNET_AUDIT_RETENTION_DAYS`, default 180; also editable under Settings →
+Runtime policies, **never below 1 day**). Dashboard queries and exports are
+unaffected.
 
-### OIDC 附加端点
+### Additional OIDC endpoints
 
-- `GET/POST /oauth/consent`：同意页提交（`allow` 为 `true`/`false`）。显式请求的 scope 在 `allow` 时整体授予；客户端允许列表内未请求的 scope 作为可选，由用户在授权页勾选，经 body `optional_scopes`（空格分隔）提交。允许则写 `oauth_consents` 并回跳 authorize（回跳只带原本请求的 scope）。
-- `GET/POST /oauth/end_session`：统一登出。GET 必须携带 `id_token_hint`（验签、`sub` 与会话一致）；POST 不需要（Lax cookie 不随跨站表单发送）。`post_logout_redirect_uri` 须在该客户端的白名单内才回跳，`client_id` 与 hint 的 `aud` 同时出现时须一致。
-- `POST /oauth/revoke`：RFC 7009 吊销端点。表单字段 `token`、可选 `token_type_hint`；客户端须以 Basic 或 `client_id`+`client_secret` 认证。仅吊销 refresh token（access token 为无状态 JWT，无法服务端吊销）。无论 token 是否存在均返回 200。
-- `POST /oauth/register`：RFC 7591 动态客户端注册。需 `Authorization: Bearer <token>` 或表单 `initial_access_token`（单次使用，由管理员签发）。返回 `client_id`/`client_secret`。
-- `POST /oauth/introspect`：RFC 7662 令牌自省。客户端以 Basic 或 `client_id`+`client_secret` 认证；body `{ token }`。返回 `{ active: bool, ... }`：`active=false` 覆盖签名无效、已过期、**用户已禁用/删除**、客户端已禁用——这是本地验签 JWT 给不了的能力。未知 token 不报错（§2.2）。
-- `POST /oauth/token` 的 `grant_type=client_credentials`：机器对机器（M2M）令牌。客户端须在注册时被授予该 grant；无刷新令牌、无用户 claim，`sub` = `client_id`，scope 收敛到客户端登记列表（body `scope` 只能子集）。
+- `GET/POST /oauth/consent`: the consent page submission (`allow` is
+  `true`/`false`). Explicitly requested scopes are granted as a whole when
+  `allow` is true; unrequested scopes inside the client allowlist are optional
+  and submitted as `optional_scopes` (space-separated) in the body. An allow
+  writes `oauth_consents` and redirects back to authorize (the redirect carries
+  only the originally requested scopes).
+- `GET/POST /oauth/end_session`: unified logout. GET must carry
+  `id_token_hint` (signature verified, `sub` matching the session); POST needs no
+  hint (a Lax cookie is not sent on a cross-site form). A
+  `post_logout_redirect_uri` redirects only when registered in that client's
+  allowlist, and when both `client_id` and the hint's `aud` are present they must
+  agree.
+- `POST /oauth/revoke`: RFC 7009 revocation. Form fields `token` and optional
+  `token_type_hint`; the client authenticates with Basic or
+  `client_id`+`client_secret`. Only refresh tokens are revoked (access tokens are
+  stateless JWTs, so they cannot be revoked server-side). Returns 200 whether or
+  not the token existed.
+- `POST /oauth/register`: RFC 7591 dynamic client registration. Needs
+  `Authorization: Bearer <token>` or the form field `initial_access_token`
+  (single-use, issued by an administrator). Returns `client_id`/`client_secret`.
+- `POST /oauth/introspect`: RFC 7662 token introspection. The client
+  authenticates with Basic or `client_id`+`client_secret`; body `{ token }`.
+  Returns `{ active: bool, ... }`: `active=false` covers an invalid signature,
+  expiry, **a disabled/deleted user** and a disabled client — semantics local JWT
+  verification cannot provide. An unknown token is not an error (§2.2).
+- `POST /oauth/token` with `grant_type=client_credentials`: machine-to-machine
+  (M2M) tokens. The client must have been granted `client_credentials` at
+  registration; there is no refresh token and no user claim, `sub` is the
+  `client_id`, and scopes narrow to the client's registered list (the body
+  `scope` may only be a subset).
 
-**Authorization Code 附加参数**
+**Additional authorization-code parameters**
 
-| 参数 | 说明 |
+| Parameter | Notes |
 |------|------|
-| `max_age`（秒） | 层次升级（step-up）。会话年龄超过该值时销毁会话并强制重登录；`prompt=none` 下回 `error=login_required`；`max_age=0` 恒需新登录 |
-| `code_challenge` / `code_challenge_method` | 恒为 `S256`，强制，无开关 |
+| `max_age` (seconds) | Step-up: a session older than this is destroyed and a fresh sign-in is required; with `prompt=none` it returns `error=login_required`, so silent renewal gives up; `max_age=0` always requires a fresh sign-in |
+| `code_challenge` / `code_challenge_method` | Always `S256`, enforced, no switch |
 
-`id_token` 附加 claim：`auth_time`（本次认证时间，来自授权码）、`email_verified`。`access_token` 亦携带 `email_verified` 与客户端自定义 claim。
+Additional `id_token` claims: `auth_time` (the actual authentication time,
+carried from the authorization code) and `email_verified`. The `access_token`
+also carries `email_verified` and the client's custom claims.
 
-**每客户端额外 claim**（`client_apps.extra_claims`，Dashboard → Clients 编辑）：JSON 对象，值可为字面量（字符串/数字/布尔）或占位符 `$sub` / `$email` / `$username` / `$display_name` / `$phone`；合并进该客户端的 `id_token`、`access_token` 与 `/oauth/userinfo` 响应。占位符无法解析时**中止签发**（不发出缺 claim 的令牌）；M2M（无用户）令牌只保留字面量。
+**Per-client extra claims** (`client_apps.extra_claims`, edited under Dashboard →
+Clients): a JSON object whose values may be literals (string/number/boolean) or
+the placeholders `$sub` / `$email` / `$username` / `$display_name` / `$phone`;
+merged into that client's `id_token`, `access_token` and `/oauth/userinfo`
+response. An unresolvable placeholder **aborts issuance** (no token is emitted
+with a missing claim); M2M (user-less) tokens keep literals only.
 
-**Back-Channel Logout**（`client_apps.backchannel_logout_uri`）：用户会话被终结（登出 / `end_session` / 管理员强制下线 / 改密或换邮箱）时，向持有该用户授权的每个登记客户端 POST 表单 `logout_token=<签名 JWT>`（含 `events` 成员与 `sub`，`exp` 120 秒）。best-effort：失败只记日志，RP 可另经自省或短 access token TTL 兜底。
+**Back-channel logout** (`client_apps.backchannel_logout_uri`): when a user's
+session is terminated (logout / `end_session` / admin force sign-out / password
+or email change), Signet POSTs the form field `logout_token=<signed JWT>` to every
+registered client holding that user's authorization (with an `events` member and
+`sub`, `exp` 120 seconds). Best-effort: failures are only logged, and RPs may
+fall back to introspection or a short access-token TTL.
 
-> **scope 裁剪**：`id_token` 与 `/oauth/userinfo` 均按已授权 scope 下发 claim——`email` 需 `email` scope、`name` 需 `profile` scope、`phone_number` 需 `phone` scope、`groups` 需 `groups` scope，`sub` 恒有。
+> **Scope trimming**: `id_token` and `/oauth/userinfo` both emit claims by granted
+> scope — `email` needs the `email` scope, `name` needs `profile`,
+> `phone_number` needs `phone`, `groups` needs `groups`; `sub` is always present.
 
-## 7. 密码重置
+## 7. Password reset
 
-| 方法/路径 | 说明 |
+| Method/path | Notes |
 |-----------|------|
-| `POST /api/v1/password-reset/request` | body `{ email }`；生成 30 分钟有效的重置 token 并经 SMTP 发送。**SMTP 未配置时返回 503**（后台 Settings → Email relay 或 `SIGNET_SMTP_HOST`；开发态可开 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回 `{ ok: true }` 防枚举；投递失败返回 502 |
-| `POST /api/v1/password-reset/confirm` | body `{ token, new_password }`；校验 token、应用密码策略、吊销全部会话 |
+| `POST /api/v1/password-reset/request` | body `{ email }`; mints a 30-minute reset token and sends it over SMTP. **Returns 503 when SMTP is not configured** (Settings → Email relay or `SIGNET_SMTP_HOST`; development can set `SIGNET_DEV_LOG_LINKS` to log the link). An unknown email still returns `{ ok: true }` to prevent enumeration; a delivery failure returns 502 |
+| `POST /api/v1/password-reset/confirm` | body `{ token, new_password }`; validates the token, applies the password policy, revokes every session |
 
-### 自助换邮箱（需已验证当前邮箱）
+### Self-service email change (requires a verified current email)
 
-| 方法/路径 | 说明 |
+| Method/path | Notes |
 |-----------|------|
-| `POST /api/v1/me/email/change-request` | session；body `{ new_email }`。校验邮箱格式、与当前不同、域名白名单、未被占用；生成 30 分钟单次 token 投递到**新地址**（走 outbox 队列）。当前邮箱 `email_verified=false` 时返回 403 |
-| `GET /api/v1/me/email/confirm?token=` | 无需登录（链接即凭证）；单次消费。成功 → `302 /settings?email_changed=1`，过期 → `302 /settings?email_error=expired`，已被占用 → `302 /settings?email_error=taken`。成功时置 `email_verified=TRUE`，吊销全部会话与 refresh token，并触发 back-channel logout |
+| `POST /api/v1/me/email/change-request` | session; body `{ new_email }`. Validates the format, that it differs from the current one, the domain allowlist and that it is unused; mints a 30-minute single-use token delivered to the **new address** (through the outbox). When the current email has `email_verified=false` it returns 403 |
+| `GET /api/v1/me/email/confirm?token=` | No sign-in needed (the link is the credential); single-use. Success → `302 /settings?email_changed=1`, expired → `302 /settings?email_error=expired`, taken → `302 /settings?email_error=taken`. On success it sets `email_verified=TRUE`, revokes every session and refresh token, and triggers back-channel logout |
 
-## 8. Passkeys（WebAuthn）
+## 8. Passkeys (WebAuthn)
 
-| 方法/路径 | 认证 | 说明 |
+| Method/path | Auth | Notes |
 |-----------|------|------|
-| `GET /api/v1/me/passkeys` | session | 列出当前用户 passkeys |
-| `POST /api/v1/me/passkeys/start` | session | 开始注册：返回 `{ token, challenge }` |
-| `POST /api/v1/me/passkeys/finish` | session | 完成注册：body `{ token, name, credential }` |
-| `DELETE /api/v1/me/passkeys/{id}` | session | 删除一个 passkey |
-| `POST /api/v1/passkeys/start` | 公开 | 开始登录：body `{ email }` |
-| `POST /api/v1/passkeys/finish` | 公开 | 完成登录：body `{ token, credential }`；成功后建立会话 |
+| `GET /api/v1/me/passkeys` | session | List the current user's passkeys |
+| `POST /api/v1/me/passkeys/start` | session | Begin registration: `{ token, challenge }` |
+| `POST /api/v1/me/passkeys/finish` | session | Finish registration: body `{ token, name, credential }` |
+| `DELETE /api/v1/me/passkeys/{id}` | session | Delete a passkey |
+| `POST /api/v1/passkeys/start` | public | Begin sign-in: body `{ email }` |
+| `POST /api/v1/passkeys/finish` | public | Finish sign-in: body `{ token, credential }`; creates the session on success |
 
-挑战状态存于服务端内存（单实例、5 分钟有效）。passkey 公钥以 `webauthn-rs` `Passkey` JSON 形式落库，登录成功后更新签名计数器。
+Challenge state lives in server memory (single instance, 5 minutes). The passkey
+public key is stored as the `webauthn-rs` `Passkey` JSON, and the signature
+counter is updated after a successful sign-in.
 
 ## 9. Webhooks
 
-| 方法/路径 | 认证 | 说明 |
+| Method/path | Auth | Notes |
 |-----------|------|------|
-| `GET /api/v1/admin/webhooks` | admin | 列出 webhook（含 `kind`、`secret_set`） |
-| `POST /api/v1/admin/webhooks` | admin | body `{ url, secret?, kind? }`，`kind` 为 `generic`（默认）或 `feishu` |
-| `DELETE /api/v1/admin/webhooks/{id}` | admin | 删除 |
-| `GET /api/v1/admin/webhooks/{id}/deliveries` | admin | 最近 50 条投递结果 |
+| `GET /api/v1/admin/webhooks` | admin | List webhooks (with `kind`, `secret_set`) |
+| `POST /api/v1/admin/webhooks` | admin | body `{ url, secret?, kind? }`; `kind` is `generic` (default) or `feishu` |
+| `DELETE /api/v1/admin/webhooks/{id}` | admin | Delete |
+| `GET /api/v1/admin/webhooks/{id}/deliveries` | admin | The latest 50 delivery results |
 
-每条审计事件写入后异步 POST 到所有启用的 webhook。`kind` 决定投递方式：
+After each audit event is stored, it is POSTed asynchronously to every enabled
+webhook. `kind` selects the delivery shape:
 
-- **`generic`**：原始审计 JSON 原样 POST，请求头含 `x-signet-event`（事件 id）与 `x-signet-signature`（`sha256=<HMAC>`，用 `secret` 签名）。
-- **`feishu`**：渲染为飞书交互卡片（`msg_type: interactive`），`secret` 用于飞书「签名校验」——按 `key = timestamp+"\n"+secret`、空消息做 HMAC-SHA256 后标准 Base64，字段 `sign` 与 `timestamp` 写入 body（非请求头）。
+- **`generic`**: the raw audit JSON as-is, with `x-signet-event` (the event id)
+  and `x-signet-signature` (`sha256=<HMAC>`, signed with `secret`).
+- **`feishu`**: rendered as a Feishu interactive card (`msg_type: interactive`);
+  `secret` drives Feishu's signature verification — HMAC-SHA256 over an empty
+  message keyed by `timestamp+"\n"+secret`, standard Base64, with `sign` and
+  `timestamp` in the body (not headers).
 
-投递结果（状态码/成败/错误）写入 `webhook_deliveries`。
+Delivery outcomes (status code / success / error) are stored in
+`webhook_deliveries`.
 
 ## 10. SCIM v2
 
-`/scim/v2/*`，需 `Authorization: Bearer <token>`（token 未配置则禁用）。token 由后台生成/轮换/吊销，明文仅展示一次、库中只存哈希；`SIGNET_SCIM_BEARER_TOKEN` 仅作首次启动种子。
+`/scim/v2/*` requires `Authorization: Bearer <token>` (disabled when no token is
+configured). The token is generated/rotated/revoked in the dashboard; the
+plaintext is shown once and only the hash is stored; `SIGNET_SCIM_BEARER_TOKEN`
+only seeds the first start.
 
-| 方法/路径 | 说明 |
+| Method/path | Notes |
 |-----------|------|
-| `GET/POST /scim/v2/Users` | 列表 / 创建（`userName`→email，`active`→status，`externalId`） |
-| `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}` | 按 id / externalId / email 定位 |
-| `GET/POST /scim/v2/Groups` | 列表 / 创建 |
-| `GET/PATCH/DELETE /scim/v2/Groups/{id}` | 详情 / 增删成员 / 删除 |
-| `GET /scim/v2/ServiceProviderConfig` | 能力声明 |
+| `GET/POST /scim/v2/Users` | List / create (`userName`→email, `active`→status, `externalId`) |
+| `GET/PUT/PATCH/DELETE /scim/v2/Users/{id}` | Look up by id / externalId / email |
+| `GET/POST /scim/v2/Groups` | List / create |
+| `GET/PATCH/DELETE /scim/v2/Groups/{id}` | Read / add-remove members / delete |
+| `GET /scim/v2/ServiceProviderConfig` | Capability declaration |
 
-组以 `users.groups[]` 为成员来源（`scim_groups` 表保存组元数据），与 OIDC `groups` claim 保持一致。
+Groups take `users.groups[]` as the membership source (`scim_groups` stores group
+metadata), consistent with the OIDC `groups` claim.
 
-## 11. 集成状态
+## 11. Integration status
 
-| 方法/路径 | 认证 | 说明 |
+| Method/path | Auth | Notes |
 |-----------|------|------|
-| `GET /api/v1/admin/integrations` | admin | 只读返回 `scim`（是否启用、端点、token 是否配置）与 `webauthn`（`rp_id`/`rp_origin`） |
-| `POST /api/v1/admin/scim/token` | admin | 生成/轮换 SCIM bearer token，返回 `{"token":"<明文，仅此一次>"}` |
-| `DELETE /api/v1/admin/scim/token` | admin | 吊销 SCIM bearer token（禁用 SCIM 接口） |
+| `GET /api/v1/admin/integrations` | admin | Read-only `scim` (enabled, endpoint, token configured) and `webauthn` (`rp_id`/`rp_origin`) |
+| `POST /api/v1/admin/scim/token` | admin | Generate/rotate the SCIM bearer token, returning `{"token":"<plaintext, once>"}` |
+| `DELETE /api/v1/admin/scim/token` | admin | Revoke the SCIM bearer token (disables the SCIM surface) |
 
-## 12. 第三方登录（身份联邦）
+## 12. Third-party sign-in (identity federation)
 
-管理员在后台配置上游身份源后，用户可用第三方账号登录。配置存于 `upstream_providers`（`client_secret` AES-256-GCM 加密存储），绑定关系存于 `user_identities`（`(provider_code, subject)` 唯一）。
+After an administrator configures an upstream identity source, users can sign in
+with a third-party account. Configuration lives in `upstream_providers`
+(`client_secret` AES-256-GCM encrypted) and bindings in `user_identities` (unique
+on `(provider_code, subject)`).
 
-支持类型：`github` / `google` / `feishu` / `wechat` / `oidc`（通用 OIDC discovery，需 `issuer_url`）。
+Supported types: `github` / `google` / `feishu` / `wechat` / `oidc` (generic OIDC
+discovery, needs `issuer_url`).
 
-### 登录流程（浏览器重定向）
+### Sign-in flow (browser redirects)
 
-| 路径 | 说明 |
+| Path | Notes |
 |------|------|
-| `GET /api/v1/auth/sso/{provider}/start?return_to=` | 生成 CSRF state（HttpOnly cookie 存明文、库中仅存 SHA-256，一次性，10 分钟），302 到上游授权页。可选 `return_to`：发起登录的 `/oauth/authorize?...` URL（仅接受同源 OIDC 路径，防开放重定向），登录完成后回跳以续接原流程 |
-| `GET /api/v1/auth/sso/{provider}/callback` | 校验 state → 换 token → 拉取归一化 profile → 绑定判定 → 签发会话或暂存待绑定（`auth.login.thirdparty` 审计）。账号仍有本地闸门（强制改密 / TOTP / 强制 MFA 注册）时，重定向 `/login?sso_step=mfa|enroll|password_change` 走与密码登录相同的续接流程 |
-| `GET /api/v1/auth/sso/providers` | 公开接口：返回启用中的 provider（登录页按钮用） |
+| `GET /api/v1/auth/sso/{provider}/start?return_to=` | Mints a CSRF state (plaintext in an HttpOnly cookie, SHA-256 in the database, single-use, 10 minutes) and 302s to the upstream authorization page. Optional `return_to`: the initiating `/oauth/authorize?...` URL (same-origin OIDC paths only, preventing open redirects), so the flow resumes after sign-in |
+| `GET /api/v1/auth/sso/{provider}/callback` | Verifies state → exchanges the token → fetches the normalised profile → decides the binding → issues a session or stashes a pending identity (audited as `auth.login.thirdparty`). When the account still has local gates (forced password change / TOTP / forced MFA enrollment), it redirects to `/login?sso_step=mfa\|enroll\|password_change`, the same continuation as password sign-in |
+| `GET /api/v1/auth/sso/providers` | Public: the enabled providers (for the sign-in page buttons) |
 
-### 绑定策略（防账号接管 + OA JIT）
+### Binding policy (anti-takeover + OA JIT)
 
-回调时按以下顺序判定（任一成功即结束）：
+The callback decides in this order (first success wins):
 
-1. **已绑定**：`(provider_code, subject)` 已在 `user_identities` → 直接签发会话登录。
-2. **已登录会话**：浏览器已有有效 `signet_session` → 把该上游身份绑到当前用户并登录。
-3. **邮箱自动绑定**：上游返回的 email **已验证**，且 `lower(email)` 精确匹配本地 `status=active` 用户 → 自动写入 `user_identities` 并登录。
-4. **JIT 开户**（默认开启，可关）：上游 email **已验证**且本地尚无该邮箱 → 自动创建 `role=member`、无密码的本地用户，写入绑定并登录。适合公司飞书 / Google / OIDC OA「首次点登录即可进系统、无需管理员预开户」。
-5. **否则 → 暂存待绑定**：将身份写入 `identity_link_challenges` + cookie `signet_sso_pending`（**15 分钟**），重定向 `/login?sso_error=no_matching_account`。用户在时限内用密码 / MFA / Passkey 登录已有账号后完成绑定。
+1. **Already bound**: `(provider_code, subject)` exists in `user_identities` →
+   issue the session immediately.
+2. **Existing session**: the browser already holds a valid `signet_session` →
+   bind that upstream identity to the current user and sign in.
+3. **Email auto-bind**: the upstream email is **verified** and `lower(email)`
+   exactly matches a local `status=active` user → write `user_identities` and
+   sign in.
+4. **JIT provisioning** (on by default, can be turned off): the upstream email is
+   **verified** and no local account uses it → create a `role=member`,
+   passwordless local user, write the binding and sign in. Suits a company
+   Feishu / Google / OIDC OA where "first click signs you in, with no
+   administrator pre-provisioning".
+5. **Otherwise → pending bind**: store the identity in
+   `identity_link_challenges` plus the `signet_sso_pending` cookie (**15
+   minutes**) and redirect to `/login?sso_error=no_matching_account`. Within the
+   window the user signs in to an existing account with a password / MFA /
+   passkey to finish the binding.
 
-注意：
+Notes:
 
-- JIT **不会**在无验证邮箱时开户（微信开放平台通常无邮箱 → 仍需管理员开户或邀请绑定）。
-- 飞书需在应用侧开通邮箱相关权限，且 profile 能返回 `email` / `enterprise_email`，否则走第 5 步。对 `GET /open-apis/authen/v1/user_info`：`email` 需 **获取用户邮箱信息**（`contact:user.email:readonly`）；`enterprise_email` 另需 **获取用户受雇信息**（`contact:user.employee:readonly`）且租户已启用飞书邮箱。权限在开放平台开通并发布后生效（授权 URL 不带 `scope=`）。
-- 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
-- **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。各平台差异速查：
+- JIT **does not** provision without a verified email (WeChat Open Platform
+  usually has none → an administrator must create the account or the user binds
+  it explicitly).
+- Feishu requires the app to enable email permissions and the profile to return
+  `email` / `enterprise_email`, otherwise step 5 applies. For
+  `GET /open-apis/authen/v1/user_info`: `email` needs **Get user email**
+  (`contact:user.email:readonly`); `enterprise_email` additionally needs **Get
+  user employment info** (`contact:user.employee:readonly`) and a tenant with
+  Feishu mail enabled. Permissions take effect after being granted and published
+  in the open platform (the authorization URL carries no `scope=`).
+- Toggle JIT under Dashboard → **Settings → JIT provision on SSO**
+  (`app_settings.sso.jit_provision`), or `GET/PATCH /api/v1/admin/settings/sso`.
+  `SIGNET_SSO_JIT_PROVISION` only backs the setting while the row is absent
+  (default `true`); after migration `020` the DB/Settings win.
+- **Per-provider overrides** (migration `033`): each provider may set `jit_mode`
+  (`inherit` follows the global switch / `on` provisions even when globally off /
+  `off` refuses even when globally on) and `email_trust` (`inherit` uses the
+  adapter's verification flag / `any` treats any email as verified / `verified`
+  requires an explicit upstream verification flag). Platform differences at a
+  glance:
 
-  ⚠️ **`any` 的前提是租户管控联系邮箱**：它信任"provider 断言了该邮箱"这件事本身。若上游允许用户自改联系邮箱（飞书个人版、自建 OIDC 等），攻击者可在受害者注册前以 `victim@corp.com` 完成自动绑定 / JIT 开户（预创建劫持）。保存 `email_trust=any` 时服务端会在日志输出警告；仅对管理员统一管控联系邮箱的租户启用。
+  ⚠️ **`any` assumes the tenant controls contact emails**: it trusts "the provider
+  asserted this email". If the upstream lets users edit their own contact email
+  (personal Feishu, self-hosted OIDC, …), an attacker can bind or JIT-provision
+  `victim@corp.com` before the victim registers (pre-registration takeover).
+  Saving `email_trust=any` logs a warning server-side; enable it only for tenants
+  where administrators control contact emails.
 
-  | provider_type | 邮箱验证标志 | 建议配置 | 说明 |
+  | provider_type | Email verification flag | Suggested setting | Notes |
   |---------------|--------------|----------|------|
-  | `github` | 上游如实返回（primary + verified） | `inherit` | 验证邮箱才自动绑定 / 开户 |
-  | `google` | 上游如实返回（`email_verified`） | `inherit` | 同上 |
-  | `oidc` | 取决于上游，标准字段 | `inherit`；上游不可信时 `verified` 收紧 | 同上 |
-  | `feishu` | **无验证标志**（adapter 如实上报「未验证」） | 自有企业租户 `email_trust=any` + `jit_mode=on`；否则保持 `inherit` | 迁移 033 已把存量飞书 provider 置为 `any` 保持行为；新建默认 `inherit`（只允许绑定，需显式选 `any` 才自动开户） |
-  | `wechat` | **无邮箱 API** | 不适用（`email_trust` 无效果） | 依旧豁免邮箱要求，只能绑定已有账号 |
+  | `github` | Reported faithfully (primary + verified) | `inherit` | Auto-bind/provision only on a verified email |
+  | `google` | Reported faithfully (`email_verified`) | `inherit` | Same |
+  | `oidc` | Depends on the upstream, standard field | `inherit`; use `verified` when the upstream cannot be trusted | Same |
+  | `feishu` | **No verification flag** (the adapter reports "unverified") | Company tenant: `email_trust=any` + `jit_mode=on`; otherwise keep `inherit` | Migration 033 set existing Feishu providers to `any` to preserve behaviour; new ones default to `inherit` (bind only; auto-provisioning requires choosing `any`) |
+  | `wechat` | **No email API** | Not applicable (`email_trust` has no effect) | Still exempt from the email requirement; can only bind an existing account |
 
-  另：SSO 无法自动绑定 / 开户时暂存的 pending 身份，现在**只会在用户登录后于 Dashboard 显式确认时绑定**（`GET/POST/DELETE /api/v1/auth/sso/pending`，登录后顶部横幅），不再跟随"同一浏览器的下一次登录"自动绑定——共享机器上他人的暂存身份不会再落到你的账号上。确认时会按 provider 当前的邮箱域白名单重新校验。
+  Also: a pending identity stashed when SSO could not auto-bind/provision is now
+  bound **only when the user explicitly confirms it in the dashboard after
+  signing in** (`GET/POST/DELETE /api/v1/auth/sso/pending`, a banner at the top
+  after sign-in) and no longer auto-binds on "the next sign-in from the same
+  browser" — so someone else's stashed identity on a shared machine cannot land
+  on your account. Confirmation re-checks the provider's current email-domain
+  allowlist.
 
-  典型组合：企业飞书 / Google Workspace 租户 `jit_mode=on`（可信租户自动开户）；开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。
-- 第三方登录只证明上游身份：本地策略（强制改密、TOTP、全局/用户级强制 MFA）在会话签发前照常生效，与密码登录共用同一套 MFA 挑战（挑战行记录来源 `via=sso`）。
+  Typical combinations: company Feishu / Google Workspace tenants use
+  `jit_mode=on` (trusted tenant, auto-provision); an open-registration GitHub
+  uses `jit_mode=off` (bind only).
 
-失败时回调重定向回登录页并带 `?sso_error=`：`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `access_denied`（用户在第三方授权页拒绝/取消） / `missing_code` / `no_matching_account` / `email_required`（上游未返回邮箱；微信除外。已绑定过的 `(provider, subject)` 仍可直接登录）。
+- Third-party sign-in proves the upstream identity only: local policy (forced
+  password change, TOTP, global/per-user MFA enforcement) still applies before a
+  session is issued, sharing the same MFA challenge as password sign-in (the
+  challenge row records `via=sso`).
 
-### 管理端 API（admin）
+A failure redirects back to the sign-in page with `?sso_error=`:
+`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` /
+`access_denied` (the user refused/cancelled on the third-party page) /
+`missing_code` / `no_matching_account` / `email_required` (no email from the
+upstream, except WeChat; an already-bound `(provider, subject)` can still sign
+in).
 
-| 方法/路径 | 说明 |
+### Admin API
+
+| Method/path | Notes |
 |-----------|------|
-| `GET /api/v1/admin/sso/providers` | 列表（含 `bindings`、`jit_mode`、`email_trust`、每条记录的具体 `callback_url`；`client_secret` 永不回传） |
-| `POST /api/v1/admin/sso/providers` | 创建（`code` `[a-zA-Z0-9_-]`，`oidc` 必填 `issuer_url`；可选 `jit_mode` / `email_trust`，缺省 `inherit`） |
-| `PUT /api/v1/admin/sso/providers/{code}` | 更新；`client_secret` 留空保持不变，传入即轮换；`jit_mode` / `email_trust` 同创建 |
-| `DELETE /api/v1/admin/sso/providers/{code}` | 删除（级联删除绑定关系） |
-| `POST /api/v1/admin/sso/providers/{code}/enabled` | 启用/禁用 `{"enabled": bool}` |
-| `GET/PATCH /api/v1/admin/settings/sso` | JIT 开户开关 `{"jit_provision": bool}`（写入 `app_settings`） |
-| `GET /api/v1/auth/sso/callback-url` | 返回统一 URL 模板：`{base}/api/v1/auth/sso/{provider}/callback` |
+| `GET /api/v1/admin/sso/providers` | List (with `bindings`, `jit_mode`, `email_trust`, each record's `callback_url`; `client_secret` is never returned) |
+| `POST /api/v1/admin/sso/providers` | Create (`code` `[a-zA-Z0-9_-]`; `oidc` requires `issuer_url`; optional `jit_mode` / `email_trust`, default `inherit`) |
+| `PUT /api/v1/admin/sso/providers/{code}` | Update; an empty `client_secret` keeps the current one, a value rotates it; `jit_mode` / `email_trust` as on create |
+| `DELETE /api/v1/admin/sso/providers/{code}` | Delete (cascades bindings) |
+| `POST /api/v1/admin/sso/providers/{code}/enabled` | Enable/disable `{"enabled": bool}` |
+| `GET/PATCH /api/v1/admin/settings/sso` | The JIT switch `{"jit_provision": bool}` (stored in `app_settings`) |
+| `GET /api/v1/auth/sso/callback-url` | The unified URL template: `{base}/api/v1/auth/sso/{provider}/callback` |
 
-**回调地址规范（所有 provider 同一格式）**：  
-`{SIGNET_PUBLIC_BASE_URL|/issuer}/api/v1/auth/sso/{code}/callback`  
-GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体现在适配器内部（换 token、拉 profile），**不改变 URL 形态**。管理端列表每行直接给出该 provider 的完整可复制地址。
+**Callback URL convention (identical for every provider)**:
+`{SIGNET_PUBLIC_BASE_URL|issuer}/api/v1/auth/sso/{code}/callback`
+GitHub / Google / Feishu / WeChat / OIDC all use this path; platform differences
+live inside the adapter (token exchange, profile fetch) and **never change the
+URL shape**. The admin list shows each provider's full copyable address.
 
-### 用户侧 API
+### User-side API
 
-| 方法/路径 | 说明 |
+| Method/path | Notes |
 |-----------|------|
-| `GET /api/v1/auth/sso/identities` | 当前用户已绑定的第三方账号列表 |
-| `DELETE /api/v1/auth/sso/identities/{provider_code}` | 解绑；若解绑后没有任何登录方式（无密码且无其他绑定）则拒绝 |
+| `GET /api/v1/auth/sso/identities` | The current user's bound third-party accounts |
+| `DELETE /api/v1/auth/sso/identities/{provider_code}` | Unbind; refused when no sign-in method would remain (no password and no other binding) |
 
-## 13. 可观测性
+## 13. Observability
 
-| 端点 | 说明 |
+| Endpoint | Notes |
 |------|------|
-| `GET /health` | 就绪探测：探测 Postgres（`SELECT 1`），失败返回 503 |
-| `GET /metrics` | Prometheus 文本格式；登录/token/MFA 计数与 HTTP 请求计数、在途请求、延迟直方图。**独立监听**（默认 `127.0.0.1:9464`，`SIGNET_METRICS_BIND` 配置；公开端口不提供），该监听同时提供 `/health` |
+| `GET /health` | Readiness: probes Postgres (`SELECT 1`), 503 on failure |
+| `GET /metrics` | Prometheus text format; login/token/MFA counters plus HTTP request counts, in-flight requests and latency histograms. **Separate listener** (default `127.0.0.1:9464`, `SIGNET_METRICS_BIND`; not on the public port), which also serves `/health` |
 
-全局速率限制：对 `/api/v1`、`/oauth/*` 等按客户端 IP 限流，默认 `SIGNET_RATE_LIMIT_PER_MINUTE=300`，超限返回 429。
+Global rate limiting: `/api/v1` and `/oauth/*` are limited per client IP, default
+`SIGNET_RATE_LIMIT_PER_MINUTE=300`, returning 429 above it.
 
-链路追踪：所有响应回显 `x-request-id`（透传请求头或生成 UUID），并写入 tracing span，访问日志按 `request_id` 关联。
+Request correlation: every response echoes `x-request-id` (passed through or a
+generated UUID) and writes it into the tracing span; access logs correlate on
+`request_id`.
 
-旧路径 `/api/...`（无 `v1`）已废弃，不再提供 JSON API。
+The legacy `/api/...` paths (without `v1`) are retired and no longer serve JSON.
 
-## 14. 登录白名单（邮箱域名）
+## 14. Sign-in allowlist (email domains)
 
-限制「谁能进来」：只允许指定邮箱域名下的地址登录、被开通、被同步。配置是**全域名列表**（不是邮箱前缀），匹配按标签边界比较（`corp.example` 匹配 `corp.example` 与 `mail.corp.example`，不匹配 `evilcorp.example`），大小写不敏感，无通配符。空列表 = 不限制。
+Restricts **who may come in**: only addresses under the configured email domains
+may sign in, be provisioned or be synced. Configuration is a **full-domain
+list** (not prefixes); matching compares on label boundaries (`corp.example`
+matches `corp.example` and `mail.corp.example`, not `evilcorp.example`),
+case-insensitively, with no wildcards. An empty list means unrestricted.
 
-### 配置与来源
+### Configuration and source
 
-| 来源 | 位置 | 优先级 |
+| Source | Location | Precedence |
 |------|------|--------|
-| `app_settings.auth.allowed_email_domains` | Dashboard → Settings → **Email domain allowlist**，或 `GET/PATCH /api/v1/admin/settings/sign-in` | 高于环境变量 |
-| `SIGNET_ALLOWED_EMAIL_DOMAINS` | 环境变量（逗号或空白分隔） | 仅在该配置行缺失时作为默认值 |
+| `app_settings.auth.allowed_email_domains` | Dashboard → Settings → **Email domain allowlist**, or `GET/PATCH /api/v1/admin/settings/sign-in` | Above the environment |
+| `SIGNET_ALLOWED_EMAIL_DOMAINS` | Environment (comma or whitespace separated) | Only as a default while the setting row is absent |
 
-`GET` 返回 `{ "allowed_email_domains": [...], "origin": "setting" | "environment" | "unrestricted" }`；`PATCH` 的 body 为 `{ "allowed_email_domains": [...] }`。传 `null`（或省略该字段）表示**删除该配置行**、回退到环境变量；传空数组则是显式写入「不限制」（`origin` 仍为 `setting`）—— 两者都放行所有人，但只有前者能被「取消环境变量」撤销。域列表保存前会规范化（去空白、小写、去重）并校验：空条目、含有 `@`（把地址当域名填）、通配符一律 400 拒绝。
+`GET` returns `{ "allowed_email_domains": [...], "origin": "setting" | "environment" | "unrestricted" }`;
+`PATCH` takes `{ "allowed_email_domains": [...] }`. Passing `null` (or omitting
+the field) **deletes the setting row** and falls back to the environment; an
+empty array explicitly writes "unrestricted" (`origin` stays `setting`) — both
+admit everyone, but only the former can be undone by "removing the environment
+variable". The list is normalised (trim, lowercase, dedupe) and validated before
+saving: empty entries, values containing `@` (an address used as a domain) and
+wildcards are all rejected with 400.
 
-服务端拒绝保存「会把当前操作者自己排除在外」的列表（400，提示把自己的域加回去），避免一次配置改动就把所有人锁在门外；如果保存的名单排除了**其他** admin，会在审计 detail 的 `excluded_admins` 里点名，因为被排除的账号没法告诉任何人自己为什么进不来了。环境变量路径没有这个保护，因此在启动时如果名单排除了全部 admin，会打一条 `warn` 日志。
+The server refuses to save a list that would **exclude the acting operator**
+(400, suggesting adding their domain back), so one configuration change cannot
+lock everyone out; if the saved list excludes **other** admins, they are named in
+the audit detail's `excluded_admins`, because an excluded account cannot tell
+anyone why it cannot get in. The environment path has no such protection, so at
+startup a list excluding every admin logs a `warn`.
 
-### 语义：拒绝，而不是禁用
+### Semantics: refusal, not disablement
 
-名单外的地址**登不进去、开不了户、同步不落地**，但账号本身**不会被禁用**，数据与历史都保留 —— 缩窄名单是「谁可以进来」的声明，不是「谁已经离开」的声明。这是它与目录同步作用域（`docs/directory-sync.md` §7.2.1）的关键区别，后者掉出范围即 disable。
+An address outside the list **cannot sign in, be provisioned or be synced**, but
+the account itself is **not disabled**, and data and history stay — narrowing the
+list declares "who may come in", not "who has left". This is the key difference
+from directory-sync scope (`docs/directory-sync.md` §7.2.1), which disables
+accounts that fall out of scope.
 
-| 位置 | 名单外的行为 |
+| Surface | Behaviour outside the list |
 |------|--------------|
-| 登录（密码 / MFA / passkey / SSO 回调） | 统一在会话签发处拒绝：Unauthorized；SSO 回调重定向带 `error=domain_not_allowed` |
-| `POST /api/v1/login` | 凭据先行：未知账号、口令错误与「口令正确但域名不允许」返回**同一句** `invalid email or password`；未知账号同样跑一次 dummy Argon2 对齐耗时；`disabled` / `locked` 只在密码验证通过后提示 |
-| 管理端建号 / 改邮箱 | 400 拒绝 |
-| SCIM `POST`/`PUT` `/scim/v2/Users` | 400 拒绝（IdP 能直接看到原因） |
-| SSO JIT 开户 | 拒绝开户（与上面的登录拒绝同一条路径） |
-| 目录同步 | 该条目 `skip`，`reason = email_domain_not_allowed`；**不计入 disable**，也不视为上游消失（见 `docs/directory-sync.md` §7.2.1） |
-| 密码重置 | 静默：仍返回 `200 {"ok": true}`，但不发信（不泄露账号是否存在） |
-| 首次部署 `/setup` | **不受限制**：否则全新部署连第一个管理员都建不出来 |
+| Sign-in (password / MFA / passkey / SSO callback) | Refused at session issuance: Unauthorized; the SSO callback redirect carries `error=domain_not_allowed` |
+| `POST /api/v1/login` | Credentials first: an unknown account, a wrong password and "correct password but disallowed domain" all return the **same** `invalid email or password`; an unknown account also runs a dummy Argon2 to equalise timing; `disabled` / `locked` are only revealed after the password verifies |
+| Admin create / email change | 400 |
+| SCIM `POST`/`PUT` `/scim/v2/Users` | 400 (the IdP sees the reason directly) |
+| SSO JIT provisioning | Provisioning refused (the same path as the sign-in refusal above) |
+| Directory sync | The entry is `skip`ped with `reason = email_domain_not_allowed`; it **does not count as disabled** and is not treated as disappearing upstream (see `docs/directory-sync.md` §7.2.1) |
+| Password reset | Silent: still returns `200 {"ok": true}` but sends nothing (no account enumeration) |
+| First-deployment `/setup` | **Unrestricted**: otherwise a brand-new deployment could not create its first administrator |
 
-每个 SSO provider 还可以配一份自己的 `allowed_email_domains`（§12 管理端 API / Dashboard → Integrations），它只会**进一步收窄**全局名单，不能放宽：provider 名单为空 = 不额外限制。
+Each SSO provider may also carry its own `allowed_email_domains` (§12 admin API /
+Dashboard → Integrations); it only **narrows** the global list, never widens it —
+an empty provider list means no extra restriction.
 
-审计：拒绝登录记 `auth.sign_in_blocked`，拒绝开户记 `user.provision_blocked`（`detail.via` 区分 `password`（含 MFA 挑战）/ `passkey` / `sso` / `sso_jit` / `admin` / `scim`），改配置记 `settings.sign_in_allowlist_update`。
+Audit: refused sign-ins record `auth.sign_in_blocked`; refused provisioning
+records `user.provision_blocked` (`detail.via` distinguishes `password` (including
+the MFA challenge) / `passkey` / `sso` / `sso_jit` / `admin` / `scim`); config
+changes record `settings.sign_in_allowlist_update`.

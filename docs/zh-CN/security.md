@@ -1,0 +1,240 @@
+# Signet 安全设计
+
+> [English](../security.md) · 简体中文
+
+本文汇总 Signet 的安全机制与实现现状，作为 [design.md](./design.md) 安全要求的展开。
+
+| 项 | 内容 |
+|---|---|
+| 状态 | 标注 ✅（已实现）/ ⏳（规划中） |
+| 相关文档 | [design.md](./design.md) · [api-v1.md](./api-v1.md) · [mfa.md](./mfa.md) · [client-integration.md](./client-integration.md) · [integrations.md](./integrations.md) |
+
+---
+
+## 1. 凭证与密钥存储
+
+**原则：任何可验证的凭证都只存哈希/密文，不存明文。**
+
+| 数据 | 存储位置 | 方式 | 状态 |
+|------|---------|------|------|
+| 用户密码 | `users.password_hash` | Argon2（随机盐） | ✅ |
+| 密码历史 | `password_history.password_hash` | Argon2 | ✅ |
+| MFA 恢复码 | `totp_recovery_codes.code_hash` | Argon2（规范化后哈希） | ✅ |
+| OAuth 客户端密钥 | `client_apps.client_secret_hash` | HMAC-SHA256（应用侧 pepper，常量时间比较；历史 Argon2 行在匹配后自动升级） | ✅ |
+| 会话 token | `sessions.token_hash` | SHA-256 | ✅ |
+| 授权码 | `auth_codes.code_hash` | SHA-256 | ✅ |
+| Refresh token | `refresh_tokens.token_hash` | SHA-256 | ✅ |
+| MFA 挑战 token | `mfa_challenges.token_hash` | SHA-256 | ✅ |
+| **TOTP 密钥** | `users.totp_secret` | **AES-256-GCM 应用层加密** | ✅ |
+
+### 1.1 TOTP 密钥应用层加密
+
+`totp_secret` 是验证 TOTP 所必需的**可逆共享密钥**，无法像密码一样只做单向哈希，因此使用**应用层加密**而非明文落库：
+
+- 算法：AES-256-GCM，每次加密生成随机 96-bit nonce，`nonce ‖ ciphertext` base64 后落库。
+- 密钥：`data/encryption.key`（32 字节 hex），首次启动自动生成；可用 `SIGNET_ENCRYPTION_KEY_PATH` 覆盖。
+- 实现：`crates/signet/src/encryption.rs`（`Encryptor`）。
+- 读写点：enroll / rebind 写入时加密；verify / regenerate / rebind 读取时解密。
+- **向后兼容**：解密失败时按明文回退，旧明文行无需迁移，下次换绑/重绑自动转为密文。
+- 密钥与 JWT 私钥同等敏感，生产环境应纳入备份与权限管控。
+- **同一数据库的多实例必须共享同一把 key**：否则会互相写出解不开的密文（典型症状：实例 A 登记、实例 B 校验 TOTP 失败）。启动时以 `app_settings.crypto.encryption_key_fingerprint` 指纹校验，不一致拒绝启动；见 [deploy.md §3](./deploy.md#3-密钥目录-appdata)。
+
+> ⚠️ 历史数据迁移：已存在的明文 `totp_secret` 不会主动批量重加密（避免影响在线用户），会在下一次换绑/重绑时自然轮换为密文。如需强制全量迁移，可在维护窗口执行一次性脚本遍历 `users.totp_secret` 重新加密。
+
+---
+
+## 2. 认证安全
+
+### 2.1 登录防爆破 ✅
+
+- 连续密码错误达 `SIGNET_MAX_LOGIN_ATTEMPTS`（默认 5）后锁定账号 `SIGNET_LOCKOUT_MINUTES`（默认 15）分钟。
+- 字段：`users.failed_login_attempts`、`users.locked_until`。
+- 失败写审计 `auth.login_failed`；锁定期间返回明确提示。
+- 登录成功即清零计数。
+
+### 2.2 密码策略 ✅
+
+- 最小长度 `SIGNET_PASSWORD_MIN_LENGTH`（默认 10）。
+- 复杂度：必须包含大写、小写字母与数字。
+- 历史复用：新密码不得与最近 `SIGNET_PASSWORD_HISTORY_SIZE`（默认 3）次历史相同。
+- 实现：`crates/signet/src/password.rs`（`set_user_password` 统一校验）。
+
+### 2.3 邮箱 / 手机唯一性与查重 ✅
+
+- `users.email` 有数据库唯一约束（`users_email_key`）；`users.phone` 有部分唯一索引（`users_phone_key`，仅非空值）。
+- 创建/更新用户时后端**显式查重**，重复分别返回 `400 email already exists` / `400 phone already exists`。
+- 前端新建/编辑表单对邮箱与手机做防抖实时查重（`email-check` / `phone-check`），命中即提示并禁用提交。
+- 自助 profile 编辑（`PATCH /api/v1/me`）支持 `phone`，同样查重（排除自身）。
+
+> ⏳ **手机号绑定验证（规划，暂未实现）**：当前 `phone` 仅作**未验证的联系信息**落库。完整绑定需经短信验证码（SMS OTP）验证后标记为「已验证」，才可用于找回密码/账号恢复/短信登录等敏感场景。需短信网关（如阿里云短信）与发送限流/防重放设计；详情见 [design.md](./design.md) Phase 4。
+
+### 2.4 登录审计 ✅
+
+- 成功/失败登录均写审计，记录客户端 IP 与浏览器/OS（由 `User-Agent` 解析，见 §6）。
+- **客户端 IP 只信可信代理**（`SIGNET_TRUSTED_PROXIES`）：仅当直连 peer 命中该列表时才采信 `X-Forwarded-For` / `X-Real-IP`，且取**从右往左第一个不可信跳**（而非最左侧——那是客户端可伪造的）。未配置时一律用 peer 地址，伪造的转发头无法影响 IP 白名单、限流与审计。
+
+### 2.5 密码重置 ✅
+
+- `POST /api/v1/password-reset/request` 生成 30 分钟有效、单次使用的重置 token（SHA-256 哈希落库）。
+- 链接经 SMTP 真实投递；未配置 SMTP 时请求返回 503（开发态用 `SIGNET_DEV_LOG_LINKS` 把链接打到日志）。邮箱不存在仍返回成功，防枚举。
+- `POST /api/v1/password-reset/confirm` 校验 token、应用密码策略、消费 token 并吊销全部会话。
+
+### 2.6 WebAuthn / Passkey ✅
+
+- 无密码、抗钓鱼的第二因素；passkey 公钥以 `webauthn-rs` `Passkey` JSON 落库，登录成功后更新签名计数器。
+- 注册（`/api/v1/me/passkeys/*`）需已登录；登录（`/api/v1/passkeys/*`）成功后建立会话并写 `auth.login`（`mfa: passkey`）。
+- 挑战状态存服务端内存（单实例、5 分钟有效、单次使用）。
+
+### 2.7 新设备/IP 登录告警 ✅
+
+- 首次出现的（用户, IP）会写 `auth.new_device` 审计并发送告警邮件；未配置 SMTP 时告警只进日志，不阻塞登录。
+- 登录源记录在 `login_devices` 表，用于后续异常检测。
+
+### 2.8 登录白名单（邮箱域名）✅
+
+- 只允许指定邮箱域名的地址登录 / 被开通 / 被同步；配置见 `docs/api-v1.md` §14。
+- 语义是**准入**而非**所有权**：名单外的地址被拒绝（`auth.sign_in_blocked` / `user.provision_blocked`），账号**不被禁用**，数据与历史保留 —— 缩窄名单不等于批量停用。
+- 域按标签边界比较、无通配符；保存时校验（空条目 / 把地址当域 / 通配符一律拒绝）；保存一个把当前操作者排除在外的名单会被服务端拒绝，避免自锁；启动时若名单排除了全部 admin 会记 `warn`。
+- 首次部署 `/setup` 不受限制（否则新部署建不出第一个管理员）。
+
+---
+
+## 3. 会话管理 ✅
+
+| 能力 | 说明 |
+|------|------|
+| 会话记录 | `sessions` 表记录 `ip`、`user_agent`、`last_seen_at` |
+| 单点撤销 | 用户可撤销自己的指定会话（`/api/v1/me/sessions/{id}`） |
+| 撤销其他 | 撤销除当前外的所有会话 |
+| 管理员强制下线 | `POST /api/v1/admin/users/{id}/sessions/revoke` 下线该用户全部会话 |
+| 统一登出 | OIDC `end_session`（`/oauth/end_session`），`post_logout_redirect_uri` 走客户端白名单 |
+| 冻结联动 | 用户被冻结/删除时自动清除其会话 |
+
+会话 Cookie：HttpOnly、SameSite=Lax；Secure 在**生效 issuer**（含 Dashboard 中修改后的值）为 `https://` 时自动强制，http→https 的 Web 端修改即时生效（`SIGNET_COOKIE_SECURE` 仅用于强制 http 场景，此时 Dashboard 会拒绝保存 http issuer）。
+
+### 3.1 第三方登录走同一套本地闸门 ✅
+
+联邦登录（GitHub/Google/飞书/微信/通用 OIDC）只证明上游身份；本地账户策略在建立会话前仍然生效（`finish_sign_in`）：强制改密（`must_change_password`）、TOTP 挑战、全局/用户级强制 MFA 的注册（enroll）——与密码登录共用同一套 MFA 挑战与续接端点，挑战行记录来源 `via=sso`，`auth.sign_in_blocked` 审计可区分路径。已持有该账户会话的用户（资料页绑定时）不重复挑战。
+
+---
+
+## 4. MFA（TOTP + 恢复码）✅
+
+详见 [mfa.md](./mfa.md)。安全要点：
+
+- TOTP 密钥应用层加密（§1.1）。
+- 恢复码一次性、Argon2 哈希存储、仅发放时明文展示一次。
+- 全局 / 用户级强制开关；管理员可重置他人 MFA。
+- 非强制时用户可自主禁用 MFA（需验证当前 TOTP）；全局或用户级强制时不可禁用。
+- 恢复码页提供 Copy / Download；Download 生成 `signet-recovery-codes.txt`。
+
+---
+
+## 5. OIDC / OAuth 安全
+
+| 机制 | 状态 |
+|------|------|
+| Authorization Code + **PKCE S256** | ✅ |
+| `redirect_uri` **精确白名单**（防开放重定向） | ✅ |
+| `state` **强制必填**（防登录 CSRF） | ✅ |
+| `nonce` 防重放 | ✅ |
+| **scope 白名单**：请求 scope 必须是客户端登记 scopes 的子集（防越权取 claim） | ✅ |
+| **prompt 参数**：`none` / `login` / `consent`（防静默授权） | ✅ |
+| 未认证时**不加载 client**（避免枚举 client 是否存在/是否启用） | ✅ |
+| 授权/consent 回跳统一 **303**（避免缓存/方法转换） | ✅ |
+| Token 短 TTL（access/id 1h，auth code 5min） | ✅ |
+| Refresh token **轮换**（每次刷新旧 token 作废） | ✅ |
+| Refresh token **复用检测**（已轮换 token 再次出现 = 疑似盗用，吊销整个 token 家族并写 `oauth.refresh_reuse` 审计） | ✅ |
+| RFC 7009 独立吊销端点 `/oauth/revoke` | ✅ |
+| RFC 7591 动态客户端注册 `/oauth/register`（需一次性注册 token） | ✅ |
+| 客户端 Source IP 白名单（新建默认开启） | ✅ |
+| OIDC Consent（首次授权同意 + 记住） | ✅ |
+| Consent 可选 scope 授权：请求 scope 整体允许/拒绝，客户端允许列表内未请求的 scope 可勾选单独授予（GitHub 式） | ✅ |
+| Consent 用户侧撤销（`/me/consents`，连带吊销 refresh token） | ✅ |
+| `groups` claim 下发（id_token / userinfo，按 scope 裁剪） | ✅ |
+| `phone` scope 下发 `phone_number` / `phone_number_verified`（按 scope 裁剪） | ✅ |
+| `end_session` 统一登出；GET 必须携带有效 `id_token_hint`（`sub` 与会话一致），POST 免 hint 但跨站表单不带 cookie（防注销 CSRF） | ✅ |
+| 登记的 `grant_types` 在 authorize/token 双向强制 | ✅ |
+| id_token 携带 `at_hash`（绑定同次签发的 access token） | ✅ |
+| 签名密钥环：轮换后旧公钥继续验签，JWKS 同时发布 | ✅ |
+
+客户端密钥以应用 pepper 的 HMAC-SHA256 存储（常量时间比较，历史 Argon2 自动升级）；授权码/refresh 均 SHA-256 哈希存储。
+
+---
+
+## 6. 审计与可观测
+
+### 6.1 审计 ✅
+
+- 记录：actor（email/role）、action、resource、detail JSON、**IP**、**user_agent / browser / os**、时间。
+- 浏览器/OS 由 `User-Agent` 轻量解析（`crates/signet/src/ua.rs`），覆盖 Chrome/Safari/Firefox/Edge/Opera 与 Windows/macOS/Linux/Android/iOS/ChromeOS。
+- 删除类事件（`user.delete` / `client.delete` 等）仅 admin 可见；manager 受 action 白名单限制。
+- 审计记录**不可删除**（UI 无删除入口）。
+- CSV 导出尊重权限过滤；点击行可查看完整详情（含 detail JSON）。
+
+### 6.2 保留策略 ✅
+
+- 小时巡检清理早于保留窗口的记录（`SIGNET_AUDIT_RETENTION_DAYS`，默认 180，启动时拒绝 < 1；运行时可改）。
+
+### 6.3 可观测 ✅
+
+- `/metrics` 在**独立监听**（默认 `127.0.0.1:9464`，`SIGNET_METRICS_BIND`）暴露，公开端口不提供：
+  - 业务计数：登录/登录失败、token 签发、MFA 校验（成功/失败）。
+  - HTTP：请求计数（按状态类 2xx/3xx/4xx/5xx）、在途请求、延迟直方图。
+- `/health` 就绪探测：探测 Postgres（`SELECT 1`），失败返回 503，供负载均衡/K8s 使用。
+- 全局速率限制：按客户端 IP 限流（`SIGNET_RATE_LIMIT_PER_MINUTE`，默认 300），超限返回 429。
+- **链路追踪（`x-request-id`）**：请求头透传/生成 UUID，回显到响应头，并写入 tracing span，访问日志与业务日志按 `request_id` 关联。
+
+### 6.4 Webhooks 事件推送 ✅
+
+- 每条审计事件写入后异步 POST 到所有启用的 webhook，投递结果写入 `webhook_deliveries`。
+- 两种类型：`generic`（原始 JSON + `x-signet-signature` HMAC 头）与 `feishu`（飞书卡片 + 加签 `timestamp`/`sign` 写入 body）。
+- 管理台「Integrations」页可增删 webhook 并查看最近投递状态。
+
+### 6.5 SCIM v2 ✅
+
+- `/scim/v2/Users`、`/scim/v2/Groups` 提供企业目录（Okta/Entra 等）用户与组同步，Bearer token 认证。
+- Token 在管理台「Integrations → SCIM v2」生成/轮换/吊销；明文仅展示一次，库中只存哈希（`sha256`）。`SIGNET_SCIM_BEARER_TOKEN` 仅作首次启动的种子。
+
+---
+
+## 7. 密钥与配置
+
+| 配置项 | 默认 | 说明 |
+|--------|------|------|
+| `SIGNET_JWT_PRIVATE_KEY_PATH` | `./data/jwt_private.pem` | RS256 私钥，首启生成；`signet keys rotate` 轮换 |
+| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签，JWKS 同时发布） |
+| `SIGNET_ENCRYPTION_KEY_PATH` | `./data/encryption.key` | AES-256-GCM 密钥，首启生成 |
+| `SIGNET_COOKIE_SECURE` | `false` | issuer 为 https 时自动生效；显式配置仅用于覆盖 |
+| `SIGNET_TRUSTED_PROXIES` | — | 可信反向代理 IP/CIDR 列表；未配置时忽略转发头，取 peer 地址 |
+| `SIGNET_MAX_LOGIN_ATTEMPTS` | `5` | 登录锁定阈值 |
+| `SIGNET_LOCKOUT_MINUTES` | `15` | 锁定时长 |
+| `SIGNET_PASSWORD_MIN_LENGTH` | `10` | 密码最小长度 |
+| `SIGNET_PASSWORD_HISTORY_SIZE` | `3` | 密码历史复用检查数 |
+| `SIGNET_AUDIT_RETENTION_DAYS` | `180` | 审计保留天数 |
+| `SIGNET_RATE_LIMIT_PER_MINUTE` | `300` | 每 IP 每分钟请求上限 |
+| `SIGNET_PUBLIC_BASE_URL` | — | 邮件/重置链接的公开基址 |
+| `SIGNET_SMTP_HOST` / `_PORT` | — | SMTP 服务器（未配置时密码重置返回 503）。可在后台 Settings → Email relay 配置（**DB > 环境变量**，密码加密落库，支持发送测试邮件），环境变量仅作后备 |
+| `SIGNET_SMTP_USERNAME` / `_PASSWORD` | — | SMTP AUTH（可信中继可省略） |
+| `SIGNET_METRICS_BIND` | `127.0.0.1:9464` | 指标监听地址；`off` 关闭 |
+| `SIGNET_JWT_RETIRED_KEY_DIR` | `./data/retired_keys` | 轮换后的旧公钥（继续验签） |
+| `SIGNET_OTEL_ENDPOINT` | — | OTLP/HTTP trace 导出地址（如 `http://collector:4318/v1/traces`）；未设置时**零开销关闭** |
+| `SIGNET_OTEL_SERVICE_NAME` | `signet` | trace 的 `service.name` 资源属性 |
+| `SIGNET_OTEL_SAMPLE_RATIO` | `1.0` | 采样比例 0.0–1.0（对 root span 按 trace id 取样，上游已决定的跟随上游） |
+| `SIGNET_EMAIL_FROM` | — | 邮件发件人 |
+| `SIGNET_SCIM_BEARER_TOKEN` | — | SCIM API 认证 token（可选，仅作首次启动种子；后续由后台 UI 管理） |
+| `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |
+| `SIGNET_CAPTCHA_PROVIDER` / `_SITE_KEY` / `_SECRET_KEY` | — | 登录/重置页 CAPTCHA（Turnstile 或 hCaptcha）；可在后台 Settings → CAPTCHA 配置（**DB > 环境变量**，secret 加密落库），三要素齐备才启用 |
+| `SIGNET_CAPTCHA_VERIFY_URL` | — | siteverify 端点覆盖（自托管兼容服务/测试用） |
+| `SIGNET_BRAND_NAME` | `Signet` | 产品名（登录页/侧栏/标题）；后台 Settings → Branding 可覆盖（DB > 环境变量）。同页可上传 logo：仅 PNG/JPEG/WebP（**拒绝 SVG**，防同源脚本执行）、校验魔数、≤256 KiB，经公开只读端点 `GET /api/v1/branding/logo` 提供（`nosniff` + 版本化 URL 的 immutable 缓存） |
+
+生产容器将 volume `signet_data` 挂到 `/app/data`（JWT / 加密密钥）；`build/` 与 `deploy/` 的 compose 分工见 [deploy.md](./deploy.md)。
+
+---
+
+## 8. 规划中的安全增强
+
+| 优先级 | 功能 | 说明 |
+|--------|------|------|
+| P0 | 手机号短信验证绑定 | 短信网关；当前 `phone` 未验证（见 §2.3），为唯一未实施的高优先级项 |
+| P2 | 告警对接 | 基于 Prometheus 指标接入 Alertmanager |
