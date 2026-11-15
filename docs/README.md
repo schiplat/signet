@@ -39,6 +39,23 @@ These English documents are the source of truth. Chinese translations live in
 | [Security design](./security.md) | Credential storage, authentication, sessions, MFA, OIDC hardening, audit, keys and configuration |
 | [Groups and departments](./groups.md) | The organisation tree, ownership by source, the `groups` claim, API and permissions |
 
+## Not implemented yet
+
+The documents describe the shipped behaviour; these items are not implemented
+yet and are listed here so no page promises them:
+
+| Item | Detail |
+|---|---|
+| SMS-verified phone binding | `phone` is unverified contact information; binding needs an SMS gateway plus sending rate limits and replay protection |
+| Alertmanager integration | Metrics are exposed on `/metrics`; feeding them into Alertmanager is not built |
+| SCIM `PATCH /Users` writing `userName` / `emails` | Requires deciding what a uniqueness conflict means for a pushing client (409 or merge); `active` and `displayName` are supported |
+| SCIM `filter` | Requests carrying `filter` are rejected with 400 rather than silently returning the whole directory |
+| SCIM groups in `directory_groups` | SCIM group membership still writes the local `users.groups` column |
+| Upstream sample probe | The mapping preview takes a pasted sample; fetching one from the directory (which would make the LDAP group column exact) is not built |
+
+Deliberately out of scope: SAML, DingTalk/WeCom connectors, horizontal scaling
+with multiple active instances, and hierarchical department-prefix matching.
+
 ## Conventions in these documents
 
 - `$ISSUER` (or `{issuer}`) is the public origin of the deployment, e.g.

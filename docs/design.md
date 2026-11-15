@@ -10,7 +10,6 @@
 | Development issuer | `http://localhost:8443` (default; a value saved under Dashboard → Settings → Server identity wins, and `SIGNET_ISSUER` only seeds/falls back) |
 | Protocol | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
 | First client | Cella (intranet deployment with outbound access) |
-| Status | Phase 1 MVP implemented |
 
 ---
 
@@ -395,35 +394,39 @@ bind implementation details.
 - External IdP federation (WeCom, …)
 - Multi-tenant / multi-environment isolation
 
-### Phase 4 — security hardening (implemented except SMS verification)
+### Phase 4 — security hardening
 
 Ordered by priority:
 
-| Priority | Feature | Status | Notes |
-|--------|------|------|------|
-| P0 | Password reset/recovery | ✅ | `/api/v1/password-reset/*`; 30-minute single-use token; real SMTP delivery (503 without one) |
-| P0 | **SMS-verified phone binding** | ⏳ | The only unimplemented item: needs an SMS gateway; `phone` is currently unverified contact information |
-| P0 | RFC 7009 revocation endpoint | ✅ | Dedicated `/oauth/revoke` |
-| P0 | WebAuthn/passkey + recovery codes | ✅ | Register/sign-in/manage; challenges in memory |
-| P1 | New device/IP sign-in alerts | ✅ | `login_devices` + `auth.new_device` audit/alert mail |
-| P1 | Global API rate limiting | ✅ | Per-IP sliding window, 429 on excess |
+| Priority | Feature | Notes |
+|--------|------|------|
+| P0 | Password reset/recovery | `/api/v1/password-reset/*`; 30-minute single-use token; real SMTP delivery (503 without one) |
+| P0 | **SMS-verified phone binding** | Needs an SMS gateway; `phone` is currently unverified contact information |
+| P0 | RFC 7009 revocation endpoint | Dedicated `/oauth/revoke` |
+| P0 | WebAuthn/passkey + recovery codes | Register/sign-in/manage; challenges in memory |
+| P1 | New device/IP sign-in alerts | `login_devices` + `auth.new_device` audit/alert mail |
+| P1 | Global API rate limiting | Per-IP sliding window, 429 on excess |
 
-### Phase 5 — integrations and operations (implemented)
+### Phase 5 — integrations and operations
 
-| Priority | Feature | Status | Notes |
-|--------|------|------|------|
-| P1 | OAuth dynamic client registration | ✅ | RFC 7591 `/oauth/register` + single-use registration token |
-| P2 | SCIM v2 user/group sync | ✅ | `/scim/v2/Users`, `/scim/v2/Groups` |
-| P2 | Webhook event delivery | ✅ | Async audit delivery with HMAC signatures |
+| Priority | Feature | Notes |
+|--------|------|------|
+| P1 | OAuth dynamic client registration | RFC 7591 `/oauth/register` + single-use registration token |
+| P2 | SCIM v2 user/group sync | `/scim/v2/Users`, `/scim/v2/Groups` |
+| P2 | Webhook event delivery | Async audit delivery with HMAC signatures |
 
-### Phase 6 — monitoring and observability (partially implemented)
+### Phase 6 — monitoring and observability
 
-| Priority | Feature | Status | Notes |
-|--------|------|------|------|
-| P1 | HTTP metrics | ✅ | Request counts (by class) / in-flight / latency histograms on `/metrics` |
-| P1 | Health-check hardening | ✅ | `/health` probes Postgres, 503 on failure |
-| P2 | Alerting integration | ⏳ | Feed Prometheus metrics into Alertmanager |
-| P2 | Tracing / request id | ✅ | `x-request-id` generation/passthrough/echo + tracing span correlation |
+| Priority | Feature | Notes |
+|--------|------|------|
+| P1 | HTTP metrics | Request counts (by class) / in-flight / latency histograms on `/metrics` |
+| P1 | Health-check hardening | `/health` probes Postgres, 503 on failure |
+| P2 | Alerting integration | Feed Prometheus metrics into Alertmanager |
+| P2 | Tracing / request id | `x-request-id` generation/passthrough/echo + tracing span correlation |
+
+Not implemented today: **SMS-verified phone binding** and the
+**Alertmanager integration**. Everything else in the phases above shipped; the
+documentation index keeps the canonical list.
 
 ### Connectors and SAML (reviewed against peers; scope unchanged, with triggers)
 
@@ -450,7 +453,7 @@ conclusion is to **keep the original scope decision**:
 - Trigger: a downstream SP that cannot move to OIDC and must be connected;
   separate project, including a dedicated XMLDsig security review.
 
-### Group identity and the organisation tree (implemented in 0.6.0)
+### Group identity and the organisation tree
 
 - `users.groups` / `users.directory_groups` store `UUID[]` (migration `043`);
   reads resolve names through `signet_group_names()`, writes go through

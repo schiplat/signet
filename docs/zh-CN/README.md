@@ -37,6 +37,21 @@ Signet 是面向内部系统的统一身份认证服务（OIDC IdP）。本页�
 | [安全设计](../security.md) | 凭证存储、认证、会话、MFA、OIDC 加固、审计、密钥与配置 |
 | [组与部门](../groups.md) | 组织树、按来源归属、`groups` claim、API 与权限 |
 
+## 尚未实现
+
+文档描述的是已发布行为；下列功能尚未实现，集中列在这里，避免各页出现"已支持"的误解：
+
+| 项目 | 说明 |
+|---|---|
+| 手机号短信验证绑定 | `phone` 目前是未验证的联系信息；绑定需要短信网关与发送限流/防重放 |
+| Alertmanager 告警对接 | 指标已在 `/metrics` 暴露，尚未接入 Alertmanager |
+| SCIM `PATCH /Users` 写 `userName` / `emails` | 需先定义唯一冲突对推送客户端的语义（409 还是合并）；目前已支持 `active` 与 `displayName` |
+| SCIM `filter` | 带 `filter` 的请求返回 400，而不是静默返回整个目录 |
+| SCIM 组写入 `directory_groups` | SCIM 的组成员关系目前仍写本地 `users.groups` 列 |
+| 从上游拉取样例（probe） | 映射预览依赖手工粘贴样例；从目录抓取样例（使 LDAP 组列变精确）尚未实现 |
+
+有意不做：SAML、钉钉/企微连接器、多活动实例水平扩展、部门层级前缀匹配。
+
 ## 文档约定
 
 - `$ISSUER`（或 `{issuer}`）是部署的公开 origin，例如 `https://sso.example.com`；

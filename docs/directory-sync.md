@@ -4,7 +4,6 @@
 
 | Item | Detail |
 |---|---|
-| Status | **P0 + P1 + P2 + P3 + P4 implemented** (foundation + LDAP pull engine + bind-through sign-in + scheduler + generic HTTP JSON source + the mapping UI shared by both pull kinds, see §13.1); P5 SCIM push pending |
 | Role | Sync an external directory into the local Signet user store as a **read-only data source**; LDAP users may sign in with their directory password |
 | First target | LDAP (pull) |
 | Related | [Design overview](./design.md) · [Security design](./security.md) · [Integrations](./integrations.md) · [Dashboard API](./api-v1.md) · [MFA](./mfa.md) |
@@ -1033,7 +1032,7 @@ passwords, service-account credentials or bind passwords.
 
 ---
 
-## 13. Generic HTTP JSON source (P4) — implemented
+## 13. Generic HTTP JSON source (P4)
 
 Configuration (`kind = 'http_json'`; `config` uses explicit dotted paths and
 `deny_unknown_fields`):
@@ -1241,18 +1240,20 @@ so neither "preview passes but save fails" nor the reverse can occur.
 The existing `/scim/v2` is a SCIM **server**, on the right track, but needs
 hardening to really take Okta / Entra pushes:
 
-| Problem | Location | To do | Status |
-|---|---|---|---|
-| `role = 'user'` violates the CHECK (only admin/manager/member), so **user creation always 500s** | `scim.rs` create_user | Use `'member'` | ✅ Fixed (same place as §15 #1) |
-| The PATCH body's operation list is named `operations`, while RFC 7644 and IdPs send `Operations`; serde is case-sensitive + `#[serde(default)]` ⇒ an empty list, **the whole body discarded**, yet 200 with an unchanged resource | `scim.rs` `PatchUserBody` / `PatchGroupBody` | Accept both spellings | ✅ Fixed (`rename = "Operations"`, `alias = "operations"`) |
-| Operations ignored `op`/`path` and treated everything as a write ⇒ on the group route `remove` **added** members; `{"op":"remove","path":"active"}` without `value` ⇒ silently ineffective; Entra's `{"op":"Replace","path":"active","value":false}` (scalar) ⇒ accepted and ignored | `scim.rs` `patch_user` / `patch_group` | Parse `op`/`path` per RFC 7644 §3.5.2, supporting `active`/`displayName`/`members` | ✅ Fixed (semantics extracted into `user_attrs_from_patch` / `group_member_changes` pure functions) |
-| `PATCH /Groups` could only add, never remove | `scim.rs` `patch_group` | Support add/remove/replace | ✅ Fixed (including Okta's `members[value eq "<id>"]` filter form) |
-| `delete_group` bound an unused `$1` | `scim.rs` `delete_group` | Fix the binding | ✅ Fixed (same place as §15 #4) |
-| DELETE returned 200 + an Error schema | `scim.rs` `delete_user` / `delete_group` | Return `204` | ✅ Fixed |
-| `PATCH /Users` cannot write `userName` / `emails` | `scim.rs` `patch_user` | Parse by op/path, supporting `userName`/`emails`/`active` | ⏳ Pending: `emails`/`username` are UNIQUE columns, so writing them first requires deciding what a uniqueness conflict means for a pushing client (409 or merge) — a P5 feature, not a defect |
-| No filter support | `scim.rs:100` | Implement if an upstream requires it | ⏳ Pending |
-| Missing audits (no `scim.group.*`) | — | Add them | ✅ Fixed: see §14.1 and the event table in §11.1 |
-| Group model | — | Migrate from `users.groups` to `directory_groups`, aligning with §6.5 | ⏳ Pending |
+| Problem | Location | Fix |
+|---|---|---|
+| `role = 'user'` violates the CHECK (only admin/manager/member), so **user creation always 500s** | `scim.rs` create_user | Use `'member'` |
+| The PATCH body's operation list is named `operations`, while RFC 7644 and IdPs send `Operations`; serde is case-sensitive + `#[serde(default)]` ⇒ an empty list, **the whole body discarded**, yet 200 with an unchanged resource | `scim.rs` `PatchUserBody` / `PatchGroupBody` | Accept both spellings |
+| Operations ignored `op`/`path` and treated everything as a write ⇒ on the group route `remove` **added** members; `{"op":"remove","path":"active"}` without `value` ⇒ silently ineffective; Entra's `{"op":"Replace","path":"active","value":false}` (scalar) ⇒ accepted and ignored | `scim.rs` `patch_user` / `patch_group` | Parse `op`/`path` per RFC 7644 §3.5.2, supporting `active`/`displayName`/`members` |
+| `PATCH /Groups` could only add, never remove | `scim.rs` `patch_group` | Support add/remove/replace |
+| `delete_group` bound an unused `$1` | `scim.rs` `delete_group` | Fix the binding |
+| DELETE returned 200 + an Error schema | `scim.rs` `delete_user` / `delete_group` | Return `204` |
+| Missing audits (no `scim.group.*`) | — | Add them |
+
+Not implemented today: `PATCH /Users` writing `userName` / `emails` (a
+uniqueness conflict needs a defined policy for pushing clients), SCIM `filter`
+support, and moving SCIM group storage onto `directory_groups`. The
+[documentation index](./README.md#not-implemented-yet) keeps the canonical list.
 
 > **The `Operations` item deserves its own note**: it made every PATCH defect above
 > unobservable — a real client's body became an empty list during
@@ -1303,15 +1304,15 @@ in §4.2 exist for this):
 These were **already broken** in the code and sit on the paths this design
 reuses:
 
-| # | Location | Problem | Fix | Status |
-|---|---|---|---|---|
-| 1 | `scim.rs:228` | Inserts `role = 'user'`, violating `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` always 500s | Use `'member'` | ✅ Fixed |
-| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'` violates `CHECK (purpose IN ('login','enroll'))` → forced password change broken | Extend the CHECK or reuse an existing value | ✅ Fixed (migration `022`; constraint looked up by definition, not auto-name) |
-| 3 | `auth/routes.rs:90` | Users with `password_hash = ''` (SSO JIT / SCIM) make `PasswordHash::new("")` fail, turning into **500** rather than 401 | Branch per §8.1; unmanaged users with an empty hash return 401 | ✅ Fixed (empty hash → 401; the §8.1 LDAP branch landed in P2) |
-| 4 | `scim.rs:684` | `delete_group`'s UPDATE references only `$2` but binds `group.id` first | Fix the binding | ✅ Fixed |
-| 5 | `webhooks.rs:80` | Outbound URLs only checked for an `http(s)://` prefix; no SSRF protection | Adopt §12's unified outbound validation | ✅ Fixed (new `outbound` module; checked at creation **and on every delivery**; redirects disabled) |
-| 6 | `webhooks.rs:87` | `webhooks.secret` stored in plaintext, inconsistent with other secrets | Encrypt with `Encryptor` | ✅ Fixed (migration `023` adds `secret_enc`; `audit::record` now takes `&AppState` with 53 call sites updated; `bootstrap::encrypt_webhook_secrets` migrates existing plaintext at startup) |
-| 7 | `federation/provider.rs` | Outbound HTTP had no timeout (only webhooks had 10s) | Unify on the outbound module | ✅ Fixed (one client: connect 5s / total 10s, no redirects, 1 MiB response cap) |
+| # | Location | Problem | Fix |
+|---|---|---|---|
+| 1 | `scim.rs:228` | Inserts `role = 'user'`, violating `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` always 500s | Use `'member'` |
+| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'` violates `CHECK (purpose IN ('login','enroll'))` → forced password change broken | Extend the CHECK or reuse an existing value |
+| 3 | `auth/routes.rs:90` | Users with `password_hash = ''` (SSO JIT / SCIM) make `PasswordHash::new("")` fail, turning into **500** rather than 401 | Branch per §8.1; unmanaged users with an empty hash return 401 |
+| 4 | `scim.rs:684` | `delete_group`'s UPDATE references only `$2` but binds `group.id` first | Fix the binding |
+| 5 | `webhooks.rs:80` | Outbound URLs only checked for an `http(s)://` prefix; no SSRF protection | Adopt §12's unified outbound validation |
+| 6 | `webhooks.rs:87` | `webhooks.secret` stored in plaintext, inconsistent with other secrets | Encrypt with `Encryptor` |
+| 7 | `federation/provider.rs` | Outbound HTTP had no timeout (only webhooks had 10s) | Unify on the outbound module |
 
 > **Where item 6 landed**: `audit::record(pool, event)` became
 > `audit::record(state, event)`, and `webhooks::dispatch` / `deliver_one` take
@@ -1336,17 +1337,19 @@ reuses:
 
 ## 16. Phasing and acceptance
 
-| Phase | Content | Acceptance | Status |
-|---|---|---|---|
-| **P0 foundation** | All §15 defects; `is_managed`/read-only semantics; the three tables + `users` changes in §4; audit events; unified outbound module; credential encryption | Existing tests pass; SCIM user creation no longer 500s; forced password change works; empty-password users return 401; an admin editing a directory user is refused | ✅ Done: migration `024` (three tables + two `users` columns); `directory` module + `tests/directory_policy.rs`; refusals audited. The sync engine's own `directory.sync.*` events slipped to P1 — there was no sync to audit yet |
-| **P1 LDAP sync engine** | Connect/LDAPS; full paged pull; fingerprint comparison; create/update; missing means disable; groups into `directory_groups`; CLI (`--dry-run`, `--json`); manual trigger API; run history | `--dry-run` diff matches a real run; a full run against the target directory succeeds; an upstream deletion disables the user with an audit trail; a second run reports `updated = 0` | ✅ Implemented: `directory/{source,plan,model,ldap,engine,api,cli}.rs`; migration `025` enforces one run per source; CLI `signet sync`; the `/admin/directory/sources` endpoints. Tests: `tests/directory_plan.rs` (10 pure plans), `tests/directory_engine.rs` (7 against a real DB, including "second run updated = 0"). **Not yet exercised against a real directory** — needs Q1 (AD vs OpenLDAP) |
-| **P2 LDAP bind-through** | Branch sign-in per §8; LDAPS bind; fail closed; metrics | Directory users sign in with their directory password and pass MFA normally; a changed password takes effect; LDAP down returns 503 with no fallback | ✅ Implemented: `directory::auth` (three-state) + `ldap::bind_as` (one bind, always unbind) + handler dispatch + two metrics + `set_user_password` choke point. Tests: `tests/directory_login.rs` (18 cases, including "unreachable → 503 not 401", "multiple sources follow priority", "disabled/deleted source falls back to local", "managed account refuses a local password", and two empty-password cases that neither bind nor become 503). **Not verified against a real directory**: "changed password takes effect" and "MFA works" need Q1 |
-| **P3 scheduling** | §10 scheduler + advisory lock; run-history UI entry | Runs on time; two replicas starting together run once; failures audited and metered | ✅ Done: scheduler (`directory::scheduler` + `model::due_sources`, including recovery of crashed runs), run-history UI (the History panel in `DirectoryView.vue` + `/admin/directory/sources/{code}/runs`), scheduler/sync metrics (`signet_directory_sync_runs_total` / `_failures_total` / `_partial_total` / `_conflicts_total` / `_last_success_timestamp_seconds`). Tests: `tests/directory_scheduler.rs` 8 cases. **Not done**: advisory lock (see §10 — migration `025`'s partial unique index provides the mutex instead) |
-| **P4 HTTP JSON source** | §13 | One full sync; SSRF cases (private address, redirect, oversized response) all refused | ✅ Done: `directory/http_json.rs` (dotted-path mapping + `none`/`page`/`cursor` pagination + Bearer/Basic auth + per-page `outbound` validation); `SourceConfig` dispatches by kind, planner/apply fully reused; API and dashboard support `kind = http_json`. Tests: `tests/http_json_source.rs` 21 cases, including a **real-database end-to-end** full sync with zero changes on the second run, and "a private address is refused at fetch time under the strict policy, before any request is sent" |
-| **P4.5 Shared mapping UI** | §13.1 | Paste a sample once and click mappings; preview matches real writes after normalisation; the sample is never stored or logged | ✅ Done: backend `directory/{ldif,mapping}.rs` + `POST /admin/directory/sources/preview-mapping` (pure, sharing `upstream_from_entry` / `to_upstream` / planner normalisation with sync); LDAP's entry→`UpstreamUser` extracted into `ldap::upstream_from_entry` for both paths. Frontend `lib/directoryMapping.ts` + `components/directory/{MappingPanel,MappingTable,FieldPicker}.vue` + `lib/valueShape.ts` (the interaction spec is `docs/directory-mapping-ux.md`); the LDAP form hands mapping keys to the panel (connection/auth/pagination stay in the form). **Validate all, page the display**: `fields`/`targets` count over all sample entries (`total == entry_count`), `rows` page 25 per `offset`. Tests: `tests/directory_mapping_preview.rs` 52 cases (LDIF folding/`::` base64/binary `objectGUID`→GUID/comments and `version`/malformed lines reporting line numbers/URL values refused, per-row verdicts and normalised rows for both kinds, sample-size cap, request contract, paging and full-count consistency, the scope row). **Not done**: fetching a sample from the upstream (probe), so the LDAP group column stays best effort (§13.1.4) |
-| **P4.6 Upstream sample probe** | §13.1.2 | No manual paste; the LDAP group column becomes exact | Pending (independently deliverable; needs an admin-only probe endpoint reusing `outbound::ensure_allowed`) |
-| **P4.7 Source scope: email domains / departments** | §7.2.1 | Sync only the configured domains/departments; a misconfiguration (0 matches) fails the preview instead of silently emptying; run history distinguishes "left" from "transferred" | ✅ Done: `plan::ScopeFilter` (pure predicate; domains by label boundary, no wildcards) + `UpstreamUser.department` + `PlanOptions.scope`; the planner emits `Disable` for linked users out of scope with `reason = out_of_scope` (distinct from `absent_upstream` and carried into audit detail); `apply_disables` follows the planner's reason; both kinds' config fields and save-time validation (empty entries, wildcards, address-as-domain, `department_values` without `department_attribute`/`department_path` refused); the preview's `scope` row is now decidable (0 matched ⇒ `ok: false`, counted over the **full** sample); the dashboard adds domain/department inputs on the scope row (a single string in the form, split into an array on submit). Tests: `tests/directory_scope.rs` 29 cases (predicate boundaries, including `evilcorp.example` not matching; the two planner reasons and no disable under `--limit`; config validation) plus 11 new cases in `tests/directory_mapping_preview.rs`. **Deliberately not done**: aborting a run when the disabled count exceeds a threshold (this phase only required distinguishability; see the safety-valve discussion in §7.2.1) |
-| **P5 SCIM push hardening** | §14 | Real Okta/Entra pushes can create/update/delete; group add/remove correct; audits complete | ✅ Implemented (except the remainder below): §14's defects fixed (`Operations` spelling, `op`/`path` semantics, group member remove/replace, DELETE `204`); upstream semantics in place (delete disables, group tombstones, `scim_managed` ownership, the full event set in §11.1). Tests: `tests/scim_patch.rs` (including "changing `displayName` must not be read as clearing members"), `tests/scim_audit.rs`, `tests/scim_ownership.rs`, `tests/scim_group_retention.rs`, `tests/scim_delete_guard.rs`. **Remaining are features**: `userName`/`emails` writes, filter, moving the group model to `directory_groups` |
+| Phase | Content | Acceptance |
+|---|---|---|
+| **P0 foundation** | All §15 defects; `is_managed`/read-only semantics; the three tables + `users` changes in §4; audit events; unified outbound module; credential encryption | Existing tests pass; SCIM user creation no longer 500s; forced password change works; empty-password users return 401; an admin editing a directory user is refused |
+| **P1 LDAP sync engine** | Connect/LDAPS; full paged pull; fingerprint comparison; create/update; missing means disable; groups into `directory_groups`; CLI (`--dry-run`, `--json`); manual trigger API; run history | `--dry-run` diff matches a real run; a full run against the target directory succeeds; an upstream deletion disables the user with an audit trail; a second run reports `updated = 0` |
+| **P2 LDAP bind-through** | Branch sign-in per §8; LDAPS bind; fail closed; metrics | Directory users sign in with their directory password and pass MFA normally; a changed password takes effect; LDAP down returns 503 with no fallback |
+| **P3 scheduling** | §10 scheduler + advisory lock; run-history UI entry | Runs on time; two replicas starting together run once; failures audited and metered |
+| **P4 HTTP JSON source** | §13 | One full sync; SSRF cases (private address, redirect, oversized response) all refused |
+| **P4.5 Shared mapping UI** | §13.1 | Paste a sample once and click mappings; preview matches real writes after normalisation; the sample is never stored or logged |
+| **P4.7 Source scope: email domains / departments** | §7.2.1 | Sync only the configured domains/departments; a misconfiguration (0 matches) fails the preview instead of silently emptying; run history distinguishes "left" from "transferred" |
+| **P5 SCIM push hardening** | §14 | Real Okta/Entra pushes can create/update/delete; group add/remove correct; audits complete |
+
+Not implemented today: the upstream sample probe (P4.6). The mapping
+preview takes a pasted sample, so the LDAP group column stays best effort.
 
 > **P1 and P2 must ship together**: syncing users without bind-through means
 > directory users are imported but cannot sign in — the feature is not delivered.

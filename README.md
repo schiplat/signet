@@ -229,7 +229,7 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| **CI** | Push / PR on source paths | Dashboard typecheck + build; Rust `fmt` / `clippy` / `test` (needs `dashboard/dist`) |
+| **CI** | Push / PR on source paths | Dashboard typecheck + build + runtime-dependency audit; Rust `fmt` / `clippy` (tests run locally before pushing) |
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 

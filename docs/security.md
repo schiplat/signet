@@ -2,12 +2,10 @@
 
 > English · [简体中文](./zh-CN/security.md)
 
-This document summarises Signet's security mechanisms and their implementation
-status, expanding the security requirements in [design.md](./design.md).
+This document summarises Signet's security mechanisms, expanding the security requirements in [design.md](./design.md).
 
 | Item | Detail |
 |---|---|
-| Status | ✅ implemented / ⏳ planned |
 | Related | [design.md](./design.md) · [api-v1.md](./api-v1.md) · [mfa.md](./mfa.md) · [client-integration.md](./client-integration.md) · [integrations.md](./integrations.md) |
 
 ---
@@ -17,17 +15,17 @@ status, expanding the security requirements in [design.md](./design.md).
 **Principle: any verifiable credential is stored as a hash or ciphertext, never
 as plaintext.**
 
-| Data | Stored in | Method | Status |
-|------|---------|------|------|
-| User password | `users.password_hash` | Argon2 (random salt) | ✅ |
-| Password history | `password_history.password_hash` | Argon2 | ✅ |
-| MFA recovery codes | `totp_recovery_codes.code_hash` | Argon2 (normalised before hashing) | ✅ |
-| OAuth client secret | `client_apps.client_secret_hash` | HMAC-SHA256 (application pepper, constant-time comparison; legacy Argon2 rows upgrade on match) | ✅ |
-| Session token | `sessions.token_hash` | SHA-256 | ✅ |
-| Authorization code | `auth_codes.code_hash` | SHA-256 | ✅ |
-| Refresh token | `refresh_tokens.token_hash` | SHA-256 | ✅ |
-| MFA challenge token | `mfa_challenges.token_hash` | SHA-256 | ✅ |
-| **TOTP secret** | `users.totp_secret` | **AES-256-GCM application-layer encryption** | ✅ |
+| Data | Stored in | Method |
+|------|---------|------|
+| User password | `users.password_hash` | Argon2 (random salt) |
+| Password history | `password_history.password_hash` | Argon2 |
+| MFA recovery codes | `totp_recovery_codes.code_hash` | Argon2 (normalised before hashing) |
+| OAuth client secret | `client_apps.client_secret_hash` | HMAC-SHA256 (application pepper, constant-time comparison; legacy Argon2 rows upgrade on match) |
+| Session token | `sessions.token_hash` | SHA-256 |
+| Authorization code | `auth_codes.code_hash` | SHA-256 |
+| Refresh token | `refresh_tokens.token_hash` | SHA-256 |
+| MFA challenge token | `mfa_challenges.token_hash` | SHA-256 |
+| **TOTP secret** | `users.totp_secret` | **AES-256-GCM application-layer encryption** |
 
 ### 1.1 Application-layer encryption of TOTP secrets
 
@@ -62,8 +60,7 @@ application layer** rather than stored in plaintext:
 
 ## 2. Authentication security
 
-### 2.1 Login brute-force protection ✅
-
+### 2.1 Login brute-force protection
 - After `SIGNET_MAX_LOGIN_ATTEMPTS` consecutive wrong passwords (default 5) the
   account locks for `SIGNET_LOCKOUT_MINUTES` (default 15).
 - Fields: `users.failed_login_attempts`, `users.locked_until`.
@@ -71,8 +68,7 @@ application layer** rather than stored in plaintext:
   message.
 - A successful login resets the counter.
 
-### 2.2 Password policy ✅
-
+### 2.2 Password policy
 - Minimum length `SIGNET_PASSWORD_MIN_LENGTH` (default 10).
 - Complexity: must contain uppercase, lowercase and a digit.
 - History: a new password may not match the most recent
@@ -80,8 +76,7 @@ application layer** rather than stored in plaintext:
 - Implementation: `crates/signet/src/auth/password.rs` (`set_user_password`
   centralises the checks).
 
-### 2.3 Email and phone uniqueness ✅
-
+### 2.3 Email and phone uniqueness
 - `users.email` carries a database unique constraint (`users_email_key`);
   `users.phone` has a partial unique index (`users_phone_key`, non-null values
   only).
@@ -92,14 +87,13 @@ application layer** rather than stored in plaintext:
 - Self-service profile edit (`PATCH /api/v1/me`) accepts `phone` and performs the
   same check (excluding self).
 
-> ⏳ **Phone verification is planned, not implemented**: `phone` is stored as
+> **Phone verification is not implemented**: `phone` is stored as
 > **unverified contact information** only. Full binding requires an SMS OTP
 > before the number can be used for password recovery, account recovery or
 > SMS sign-in; that needs an SMS gateway (e.g. Alibaba Cloud SMS) plus sending
 > rate limits and replay protection. See [design.md](./design.md) Phase 4.
 
-### 2.4 Login auditing ✅
-
+### 2.4 Login auditing
 - Both successful and failed sign-ins are audited with the client IP and
   browser/OS (parsed from `User-Agent`, see §6).
 - **Client IP trusts proxies only when configured** (`SIGNET_TRUSTED_PROXIES`):
@@ -108,8 +102,7 @@ application layer** rather than stored in plaintext:
   the leftmost entry is client-controlled. Without the setting the peer address
   is used, so a forged header cannot affect IP allowlists, rate limits or audit.
 
-### 2.5 Password reset ✅
-
+### 2.5 Password reset
 - `POST /api/v1/password-reset/request` mints a 30-minute, single-use reset
   token (SHA-256 hashed at rest).
 - The link is delivered over SMTP; without SMTP the request returns 503 (dev can
@@ -118,8 +111,7 @@ application layer** rather than stored in plaintext:
 - `POST /api/v1/password-reset/confirm` validates the token, applies the password
   policy, consumes it and revokes every session.
 
-### 2.6 WebAuthn / passkeys ✅
-
+### 2.6 WebAuthn / passkeys
 - Passwordless, phishing-resistant second factor; the passkey public key is
   stored as the `webauthn-rs` `Passkey` JSON, and the signature counter is
   updated after a successful sign-in.
@@ -128,15 +120,13 @@ application layer** rather than stored in plaintext:
   (`mfa: passkey`).
 - Challenge state lives in server memory (single instance, 5 minutes, single use).
 
-### 2.7 New device/IP alerts ✅
-
+### 2.7 New device/IP alerts
 - A previously unseen (user, IP) pair writes `auth.new_device` and sends an alert
   email; without SMTP the alert only reaches the log and never blocks the
   sign-in.
 - Sources are recorded in `login_devices` for later anomaly detection.
 
-### 2.8 Sign-in allowlist (email domains) ✅
-
+### 2.8 Sign-in allowlist (email domains)
 - Only addresses in the configured domains may sign in, be provisioned or be
   synced; configuration is in `docs/api-v1.md` §14.
 - The semantics are **admission**, not **ownership**: an address outside the list
@@ -152,8 +142,7 @@ application layer** rather than stored in plaintext:
 
 ---
 
-## 3. Session management ✅
-
+## 3. Session management
 | Capability | Detail |
 |------|------|
 | Session records | `sessions` stores `ip`, `user_agent`, `last_seen_at` |
@@ -169,8 +158,7 @@ takes effect immediately (`SIGNET_COOKIE_SECURE` only forces the flag for http
 deployments, where the dashboard refuses to save an http issuer in that
 configuration).
 
-### 3.1 Third-party sign-in passes the same local gates ✅
-
+### 3.1 Third-party sign-in passes the same local gates
 Federated sign-in (GitHub / Google / Feishu / WeChat / generic OIDC) proves the
 upstream identity only; local account policy still applies before a session is
 created (`finish_sign_in`): forced password change (`must_change_password`), the
@@ -182,8 +170,7 @@ profile page) is not challenged again.
 
 ---
 
-## 4. MFA (TOTP + recovery codes) ✅
-
+## 4. MFA (TOTP + recovery codes)
 See [mfa.md](./mfa.md). Security highlights:
 
 - TOTP secrets are encrypted at the application layer (§1.1).
@@ -198,31 +185,29 @@ See [mfa.md](./mfa.md). Security highlights:
 
 ## 5. OIDC / OAuth security
 
-| Mechanism | Status |
-|------|------|
-| Authorization Code + **PKCE S256** | ✅ |
-| `redirect_uri` **exact allowlist** (prevents open redirects) | ✅ |
-| `state` **mandatory** (login CSRF) | ✅ |
-| `nonce` replay protection | ✅ |
-| **Scope allowlist**: requested scopes must be a subset of the client's registered scopes (no claim escalation) | ✅ |
-| **`prompt`** parameter: `none` / `login` / `consent` (no silent authorization) | ✅ |
-| **No client load before authentication** (prevents client enumeration) | ✅ |
-| Authorize/consent redirects always **303** (no caching or method conversion) | ✅ |
-| Short token TTLs (access/id 1h, auth code 5min) | ✅ |
-| Refresh token **rotation** (each refresh invalidates the old token) | ✅ |
-| Refresh token **reuse detection** (a rotated token reappearing means theft: the whole family is revoked and `oauth.refresh_reuse` is audited) | ✅ |
-| RFC 7009 revocation endpoint `/oauth/revoke` | ✅ |
-| RFC 7591 dynamic client registration `/oauth/register` (single-use registration token) | ✅ |
-| Client Source IP allowlist (on by default for new clients) | ✅ |
-| OIDC consent (first authorization + remembered) | ✅ |
-| Consent with optional scopes: request scopes are granted or refused as a whole; unrequested scopes inside the client's allowlist can be granted individually (GitHub-style) | ✅ |
-| User-side consent revocation (`/me/consents`, which also revokes refresh tokens) | ✅ |
-| `groups` claim (id_token / userinfo, trimmed by scope) | ✅ |
-| `phone` scope emits `phone_number` / `phone_number_verified` (trimmed by scope) | ✅ |
-| `end_session` unified logout; GET requires a valid `id_token_hint` (its `sub` must match the session), POST needs no hint but cross-site forms carry no cookie (logout CSRF) | ✅ |
-| Registered `grant_types` enforced on both authorize and token | ✅ |
-| `at_hash` in the id_token (binds the access token minted with it) | ✅ |
-| Signing key ring: after rotation old public keys still verify; JWKS publishes both | ✅ |
+- Authorization Code + **PKCE S256**
+- `redirect_uri` **exact allowlist** (prevents open redirects)
+- `state` **mandatory** (login CSRF)
+- `nonce` replay protection
+- **Scope allowlist**: requested scopes must be a subset of the client's registered scopes (no claim escalation)
+- **`prompt`** parameter: `none` / `login` / `consent` (no silent authorization)
+- **No client load before authentication** (prevents client enumeration)
+- Authorize/consent redirects always **303** (no caching or method conversion)
+- Short token TTLs (access/id 1h, auth code 5min)
+- Refresh token **rotation** (each refresh invalidates the old token)
+- Refresh token **reuse detection** (a rotated token reappearing means theft: the whole family is revoked and `oauth.refresh_reuse` is audited)
+- RFC 7009 revocation endpoint `/oauth/revoke`
+- RFC 7591 dynamic client registration `/oauth/register` (single-use registration token)
+- Client Source IP allowlist (on by default for new clients)
+- OIDC consent (first authorization + remembered)
+- Consent with optional scopes: request scopes are granted or refused as a whole; unrequested scopes inside the client's allowlist can be granted individually (GitHub-style)
+- User-side consent revocation (`/me/consents`, which also revokes refresh tokens)
+- `groups` claim (id_token / userinfo, trimmed by scope)
+- `phone` scope emits `phone_number` / `phone_number_verified` (trimmed by scope)
+- `end_session` unified logout; GET requires a valid `id_token_hint` (its `sub` must match the session), POST needs no hint but cross-site forms carry no cookie (logout CSRF)
+- Registered `grant_types` enforced on both authorize and token
+- `at_hash` in the id_token (binds the access token minted with it)
+- Signing key ring: after rotation old public keys still verify; JWKS publishes both
 
 Client secrets are stored as HMAC-SHA256 with an application pepper (constant-time
 comparison; legacy Argon2 rows upgrade automatically); authorization codes and
@@ -232,8 +217,7 @@ refresh tokens are SHA-256 hashed.
 
 ## 6. Audit and observability
 
-### 6.1 Audit ✅
-
+### 6.1 Audit
 - Records: actor (email/role), action, resource, detail JSON, **IP**,
   **user_agent / browser / os**, timestamp.
 - Browser/OS is parsed lightly from `User-Agent`
@@ -245,14 +229,12 @@ refresh tokens are SHA-256 hashed.
 - CSV export respects the permission filter; clicking a row opens the full detail
   (including the detail JSON).
 
-### 6.2 Retention ✅
-
+### 6.2 Retention
 - An hourly sweep removes records older than the retention window
   (`SIGNET_AUDIT_RETENTION_DAYS`, default 180; startup refuses values below 1;
   changeable at runtime).
 
-### 6.3 Observability ✅
-
+### 6.3 Observability
 - `/metrics` is exposed on a **separate listener** (default `127.0.0.1:9464`,
   `SIGNET_METRICS_BIND`) and never on the public port:
   - Business counters: logins/failures, token issuance, MFA verifications
@@ -267,8 +249,7 @@ refresh tokens are SHA-256 hashed.
   otherwise a UUID is generated; it is echoed, written into the tracing span, and
   links access logs to business logs.
 
-### 6.4 Webhook event delivery ✅
-
+### 6.4 Webhook event delivery
 - Each audit event is asynchronously POSTed to every enabled webhook; delivery
   outcomes are stored in `webhook_deliveries`.
 - Two types: `generic` (raw JSON plus an `x-signet-signature` HMAC header) and
@@ -276,8 +257,7 @@ refresh tokens are SHA-256 hashed.
 - The dashboard's Integrations page creates, deletes and inspects recent
   deliveries.
 
-### 6.5 SCIM v2 ✅
-
+### 6.5 SCIM v2
 - `/scim/v2/Users` and `/scim/v2/Groups` provide enterprise directory (Okta/Entra,
   …) user and group sync behind a bearer token.
 - The token is generated / rotated / revoked under Integrations → SCIM v2; the

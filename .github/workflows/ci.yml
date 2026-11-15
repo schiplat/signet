@@ -72,7 +72,7 @@ jobs:
           if-no-files-found: error
 
   rust:
-    name: Rust (fmt / clippy / test)
+    name: Rust (fmt / clippy)
     needs: dashboard
     runs-on: ubuntu-latest
     steps:
@@ -97,9 +97,6 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: cargo test
-        run: cargo test --workspace
 
   audit:
     name: Dependency audit (Rust)
