@@ -36,6 +36,8 @@ documentation cleanup.
   asset URL, and the release example uses 0.6.2.
 - **Dashboard toolchain** moves to Vite 6.4.6 and vue-tsc 3.3.14 (development
   only); `pnpm audit` is clean for both runtime and dev dependencies.
+- **Docker images** are published as one multi-arch manifest for `linux/amd64`
+  and `linux/arm64`, built from the matching release binaries.
 
 ## [0.6.1] - 2026-11-15
 

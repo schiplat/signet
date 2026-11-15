@@ -34,7 +34,7 @@ docker run -d --name signet-db -p 5433:5432 \
 
 **B. Docker image**
 
-Each release also publishes a runtime image (Docker Hub + ACR). The pull-only production stack lives in [`deploy/`](./deploy/):
+Each release also publishes a multi-arch runtime image (`linux/amd64`, `linux/arm64`) to Docker Hub + ACR. The pull-only production stack lives in [`deploy/`](./deploy/):
 
 ```bash
 cd deploy
@@ -164,7 +164,7 @@ Signet exposes four surfaces; the full references live in `docs/`:
 |----------|---------|--------------|
 | **CI** | Push / PR on source paths | Dashboard typecheck + build + runtime-dependency audit; Rust `fmt` / `clippy` (tests run locally before pushing) |
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
-| **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
+| **Build Signet Image** | After binary release succeeds | Multi-arch runtime image (`linux/amd64`, `linux/arm64`) from prebuilt binaries → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 
 Tag a release (example): `git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`.
 
