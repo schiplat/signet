@@ -16,11 +16,11 @@ Three ways to get a server running. **The release binary is the recommended way*
 
 **A. Release binary (recommended)**
 
+Download the asset for your platform from the [Releases page](https://github.com/schiplat/signet/releases) (`linux-amd64`, `linux-arm64` or `macos-arm64`), then:
+
 ```bash
-# 1. Download the asset for your platform from GitHub Releases (grab the
-#    latest tag there), e.g.:
-curl -fLO https://github.com/schiplat/signet/releases/latest/download/signet-macos-arm64
-chmod +x signet-macos-arm64 && mv signet-macos-arm64 signet
+# 1. Rename the downloaded asset to `signet`
+chmod +x signet-<platform> && mv signet-<platform> signet
 
 # 2. Start a PostgreSQL matching the built-in default connection string
 #    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
@@ -98,7 +98,7 @@ cargo run
 # open http://127.0.0.1:3000 → Sign in → signed in through SSO
 ```
 
-For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development](#local-development) below. Client integration guide: [docs/client-integration.md](./docs/client-integration.md).
+For the hot-reload dev server (`:5173` proxying `:8443`), see [docs/local-development.md](./docs/local-development.md). Client integration guide: [docs/client-integration.md](./docs/client-integration.md).
 
 ## Features
 
@@ -108,6 +108,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 - **Self-service OAuth clients**: any signed-in user can register and manage their own app (name + redirect URIs) under Dashboard → My apps — owner-scoped, secret shown once, admins keep global control (Name / Owner columns)
 - **Web-managed issuer**: the public issuer is set in Dashboard → Settings → Server identity (DB > `SIGNET_ISSUER`, audited, locked after the first change; **Reset override** restores the environment/default). **Settings is split into a left sub-nav** (General / Access / Operations / Developer) with the active section in `?section=`, so reloads and shared links land on the same pane
 - **Branding**: product name + **logo upload** (PNG/JPEG/WebP ≤256 KiB, SVG rejected), applied to the sidebar, sign-in, setup, reset and consent pages — no redeploy
+- **Public sign-up (opt-in)**: Settings → Public sign-up, off by default and only enabled with SMTP + CAPTCHA ready. A request creates no account until a 30-minute single-use email link is confirmed; new accounts are plain `member`s with no groups. Sign-in shows **Create account** only when the switch is on
 - **First-run setup guide**: Overview shows administrators a live check panel (issuer reachability/HTTPS, SMTP completeness, first enabled client) until the required steps pass
 - **Runtime policies** (token/session lifetimes, lockout, password policy, audit retention, rate limit) edited in the dashboard — DB-backed, no redeploy
 - **Signing-key rotation** (`signet keys rotate` / `keys prune`) with a JWKS key ring that keeps outstanding tokens verifiable
@@ -132,98 +133,30 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 | [docs/directory-sync.md](./docs/directory-sync.md) | **Directory sync** (LDAP / HTTP JSON pull, bind-through login, scheduler, `signet sync` CLI) |
 | [docs/deploy.md](./docs/deploy.md) | **build/ vs deploy/** (Dockerfiles, local & production compose, `/app/data` keys) |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes and breaking changes |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | Development workflow, commit rules and local checks |
+| [SECURITY.md](./SECURITY.md) | Vulnerability reporting and the security model |
 
 These English documents are the source of truth. Chinese translations live in [docs/zh-CN](./docs/zh-CN/) and may lag behind a release.
 
 ## Local development
 
-### 1. Configuration
+The full development setup — configuration, backend, dashboard hot-reload, the
+account model and observability — is in
+**[docs/local-development.md](./docs/local-development.md)**.
 
-```bash
-cp .env.example .env
-# Edit SIGNET_DATABASE_URL, etc.
-```
+Short version: start Postgres, build the dashboard (`cd dashboard && pnpm build`;
+it is embedded at compile time), then `cargo run -p signet` on `:8443`.
 
-On first run with no admin, open the dashboard in a browser. It redirects to
-**`/setup`**, where you create the first administrator account (email, optional
-display name, and password).
+## Interfaces
 
-### 2. Backend
+Signet exposes four surfaces; the full references live in `docs/`:
 
-```bash
-cargo run -p signet
-```
-
-> Note: the binary embeds `dashboard/dist` at compile time (rust-embed); a missing folder fails the build. Build the dashboard first (Quick Start option C, step 2), or just follow [Quick Start](#quick-start) in order.
-
-Health check: `GET http://localhost:8443/health`
-
-Before committing Rust changes:
-
-```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-### 3. Dashboard (Vue)
-
-```bash
-cd dashboard
-pnpm install
-pnpm dev          # http://localhost:5173, proxied to :8443
-# or build and embed into the binary:
-pnpm build
-cd .. && cargo build -p signet
-```
-
-In production/staging, Rust serves `dashboard/dist` via `rust-embed` (the folder must exist before `cargo build`).
-
-### 4. Account model
-
-- **No public registration**; staff accounts are provisioned under **Dashboard → Directory** (frontend route `/directory`, API `/api/v1/admin/users`)  
-- Roles: `admin` / `manager` / `member` (see design doc)  
-- First-run **`/setup`** page creates the initial `admin`  
-- Optional **MFA** (global or per-user enforced); users may self-enroll from the account menu  
-- Optional **third-party providers** under **Integrations**; users manage linked accounts from the account menu  
-
-### 5. Observability
-
-- Every request/response carries **`x-request-id`** (passed through or auto-generated UUIDv4) for trace linking
-- Access logs are emitted uniformly by `crates/signet/src/access_log.rs`: single line, structured fields (`request_id` / `method` / `path` / `query` / `ip` / `status` / `latency_ms`), with `2xx/3xx` at `INFO`, `4xx` at `WARN`, `5xx` at `ERROR`
-- Logging goes through `tracing`; see [.cursor/rules/logging.mdc](./.cursor/rules/logging.mdc): static messages + structured fields, errors in an `error` field, single-line JSON in production (`APP_ENV=production`)
-- `GET /metrics` exposes Prometheus metrics on a **separate listener** (loopback by default; `SIGNET_METRICS_BIND`) — never on the public API port
-
-## Main endpoints
-
-| Path | Description |
-|------|-------------|
-| `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics — separate listener, loopback by default (`SIGNET_METRICS_BIND`); not served on the public port |
-| `GET /.well-known/openid-configuration` | OIDC Discovery |
-| `GET /oauth/authorize` | Authorization (redirects to `/login` if not signed in, `/consent` if not consented) |
-| `POST /oauth/token` | Token exchange (code + PKCE / refresh) |
-| `POST /oauth/consent` | Consent submission |
-| `GET /oauth/jwks` | JWKS |
-| `GET /oauth/userinfo` | UserInfo (includes `groups`) |
-| `GET/POST /oauth/end_session` | Single logout |
-| `POST /oauth/revoke` | RFC 7009 revocation |
-| `POST /oauth/register` | RFC 7591 dynamic client registration |
-| `GET/POST /api/v1/me/clients` | Self-service client registration (`PUT`/`rotate-secret`/`DELETE` on `/me/clients/{id}`) |
-| `GET/PATCH /api/v1/admin/settings/server` | Web-managed issuer (Server identity) |
-| `GET /api/v1/branding` | Public product name + logo URL (sign-in/setup/reset/consent) |
-| `GET /api/v1/branding/logo` | Public logo image (404 when unset) |
-| `GET /api/v1/setup/status` | First-run setup probe (`needs_setup`) |
-| `POST /api/v1/setup` | Create the first admin on first run |
-| `POST /api/v1/password-reset/*` | Password reset (request/confirm) |
-| `GET/POST/DELETE /api/v1/me/passkeys/*` | Passkey (WebAuthn) register/sign-in/manage |
-| `GET /api/v1/auth/sso/{provider}/start` | Start third-party SSO |
-| `GET /api/v1/auth/sso/{provider}/callback` | SSO callback (bind / pending link / session) |
-| `GET /api/v1/auth/sso/providers` | Public list of enabled SSO providers |
-| `GET/DELETE /api/v1/auth/sso/identities/*` | List / unlink linked third-party accounts |
-| `/scim/v2/*` | SCIM v2 user/group sync (Bearer auth) |
-| `/api/v1/*` | Dashboard / session / admin API (**unified prefix**, see [api-v1.md](./docs/api-v1.md)) |
-
-Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/stats`.
+| Surface | Prefix | Reference |
+|---|---|---|
+| OIDC protocol | `/oauth/*`, `/.well-known/openid-configuration` | [docs/client-integration.md](./docs/client-integration.md) |
+| Dashboard & admin API | `/api/v1/*` — session cookie, or `Authorization: Bearer` admin API token for automation | [docs/api-v1.md](./docs/api-v1.md) |
+| SCIM v2 | `/scim/v2/*` — bearer token | [docs/integrations.md](./docs/integrations.md) |
+| Operations | `GET /health`; `GET /metrics` on a separate loopback listener | [docs/security.md](./docs/security.md#63-observability) |
 
 ## CI & release
 
@@ -233,10 +166,31 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 
-Tag a release (example): `git tag -a v0.6.1 -m v0.6.1 && git push origin v0.6.1`.
+Tag a release (example): `git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`.
 
 Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).
+
+
+## Contributing
+
+Contributions are welcome. [CONTRIBUTING.md](./CONTRIBUTING.md) covers
+prerequisites, the branch/PR workflow, commit-message rules and the checks CI
+runs.
+
+- Local setup: [docs/local-development.md](./docs/local-development.md).
+- Run the checks locally before pushing: `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test`, and in
+  `dashboard/`: `pnpm typecheck && pnpm build`.
+- Update the relevant page under `docs/` when behaviour changes, keeping the
+  English book (source of truth) and `docs/zh-CN/` in sync.
+
+## Security
+
+Please **do not open a public issue** for a vulnerability. Report it privately
+as described in [SECURITY.md](./SECURITY.md) (email
+**info@open.schiplat.com**); we acknowledge within 3 business days. The security
+model and implementation notes are in [docs/security.md](./docs/security.md).
 
 ## Repository structure
 

@@ -12,6 +12,7 @@ These English documents are the source of truth. Chinese translations live in
 
 | Document | What it covers |
 |---|---|
+| [Local development](./local-development.md) | Source setup, dashboard hot-reload, account model, observability |
 | [Design overview](./design.md) | Goals and non-goals, deployment topology, protocol and endpoints, data model, flows |
 | [Client integration](./client-integration.md) | Connecting a business system: discovery, authorize, token, id_token validation, userinfo, logout, M2M, troubleshooting |
 | [Deploy layout](./deploy.md) | `build/` vs `deploy/`, Dockerfiles and compose, `/app/data` keys, key rotation, the single-active-instance topology |

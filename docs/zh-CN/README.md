@@ -10,6 +10,7 @@ Signet 是面向内部系统的统一身份认证服务（OIDC IdP）。本页�
 
 | 文档 | 内容 |
 |---|---|
+| [本地开发](../local-development.md) | 源码搭建、Dashboard 热更新、账号模型、可观测性 |
 | [设计总览](../design.md) | 目标与非目标、部署拓扑、协议与端点、数据模型、核心流程 |
 | [客户端对接](../client-integration.md) | 业务系统接入：Discovery、authorize、token、id_token 校验、userinfo、登出、M2M、排错 |
 | [部署布局](../deploy.md) | `build/` 与 `deploy/`、Dockerfile 与 compose、`/app/data` 密钥、密钥轮换、单活动实例拓扑 |
