@@ -28,6 +28,7 @@ import HBarRank from "@/components/ui/HBarRank.vue";
 import LoginTrendChart from "@/components/ui/LoginTrendChart.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useBrandingStore } from "@/stores/branding";
 import {
   fetchAdminStats,
   fetchServerSettings,
@@ -41,6 +42,7 @@ import {
 } from "@/lib/api";
 import { useAuthStore } from "@/stores/auth";
 
+const branding = useBrandingStore();
 const loading = ref(true);
 const error = ref("");
 const stats = ref<AdminStats | null>(null);
@@ -348,7 +350,7 @@ const clientFilter = ref(""); // "" = all apps; "(direct)" = unattributed sign-i
 
 const clientOptions = computed(() => [
   { value: "", label: "All apps" },
-  { value: "(direct)", label: "Signet (direct)" },
+  { value: "(direct)", label: `${branding.name} (direct)` },
   ...clients.value.map((c) => ({
     value: c.client_id,
     label: c.client_id + (c.enabled ? "" : " (disabled)"),
@@ -527,7 +529,7 @@ function osColors(items: NameCount[] | undefined): Record<string, string> {
 
 function clientLabel(id: string | null): string {
   if (!id) return "";
-  return id === "(direct)" ? "Signet (direct)" : id;
+  return id === "(direct)" ? `${branding.name} (direct)` : id;
 }
 
 function formatShortTime(iso: string) {
@@ -822,7 +824,7 @@ function formatShortTime(iso: string) {
         <div v-if="loading" class="flex h-[240px] items-center justify-center text-sm text-muted-foreground">
           Loading…
         </div>
-        <HBarRank v-else :items="stats?.by_client ?? []" />
+        <HBarRank v-else :items="stats?.by_client ?? []" :direct-label="`${branding.name} (direct)`" />
       </div>
 
       <div class="surface-card flex flex-col overflow-hidden lg:col-span-2">

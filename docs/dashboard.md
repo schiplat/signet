@@ -79,10 +79,17 @@ Users 与组织树合并为一页（`/directory`），左侧组织、右侧当�
 
 ### Settings（admin only）
 
-- Security：全局 **Require MFA for all users**
-- **Server identity**：issuer（默认值 / 环境变量 / 本页保存 三种来源会标注）。环境变量存在时只读；首次保存后锁定，需显式 **Unlock to change** 才能再次修改（风险确认 + 审计）。保存即时生效；旧 token 失效、客户端与第三方 SSO 回调需同步更新
+左侧子导航按 General / Access / Operations / Developer 分区，一次显示一个分区（窄屏为横向滚动标签）；当前分区记录在 `?section=`，刷新或分享链接会停留在同一分区：
+
+- **Server identity**：issuer（来源标注 `default` / `environment` / `saved here`）。优先级 **数据库 > `SIGNET_ISSUER` > 默认**：本页保存的值覆盖环境变量并即时生效（对端副本 30s 内收敛），首次保存后锁定，需显式 **Unlock to change**（风险确认 + 审计）才能再次修改；**Reset override** 清除保存值、回退到环境变量/默认（审计 `settings.issuer_reset`）。**每次保存前都会弹确认框**，列出影响（旧 token 失效、客户端与第三方 SSO 回调需同步更新）
+- **Branding**：产品名（控制台、标题与邮件）+ **Logo 上传**（PNG/JPEG/WebP，≤256 KB，拒绝 SVG；显示于侧栏与所有登录/重置/初始化/同意页，未设置时回退为名称首字母）。替换后 URL 带版本号，立即生效无需强刷
+- **Security**：全局 **Require MFA for all users**
+- **Email domains**：登录/开户域名白名单；保存前提示是否会锁死当前管理员
+- **SSO / federation**：**JIT provision on SSO**（首次第三方登录且已验证邮箱无本地用户时是否自动开户）
+- **CAPTCHA**：Turnstile / hCaptcha，作用于登录与密码重置
 - **Runtime policies**：会话/token 有效期、登录尝试与锁定、密码长度/历史、审计保留、全局限流；保存即生效，未保存的字段沿用环境变量
-- SSO / federation：**JIT provision on SSO**（首次第三方登录且已验证邮箱无本地用户时是否自动开户）
+- **Email relay (SMTP)**：主机/端口/账号/From，保存后可发送测试邮件；密码只写不回显
+- **API tokens**：admin API 机器凭据（PAT），明文仅展示一次
 
 ### Integrations（admin only）
 

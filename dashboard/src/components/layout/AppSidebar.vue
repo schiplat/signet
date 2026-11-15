@@ -2,6 +2,7 @@
 import { AppWindow, Blocks, BookUser, History, LayoutDashboard, PanelLeft, Plug, ScrollText, Settings, UserRound, Waypoints } from "@lucide/vue";
 import { computed } from "vue";
 import { useRoute, useRouter } from "vue-router";
+import BrandLogo from "@/components/ui/BrandLogo.vue";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth";
 import { useUiStore } from "@/stores/ui";
@@ -162,11 +163,7 @@ function onLogoClick(e: MouseEvent) {
         :title="ui.isCollapsed ? branding.name : undefined"
         @click="onLogoClick"
       >
-        <span
-          class="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary text-xs font-semibold tracking-wide text-primary-foreground"
-        >
-          Sg
-        </span>
+        <BrandLogo size-class="h-8 w-8 shrink-0" />
         <span v-if="!ui.isCollapsed" class="min-w-0">
           <span class="block truncate text-sm font-semibold tracking-tight">{{ branding.name }}</span>
           <span class="block truncate text-xs text-muted-foreground">Identity</span>

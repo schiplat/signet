@@ -6,6 +6,8 @@ const props = defineProps<{
   items: NameCount[];
   /** Tailwind-friendly palette (hsl triplets) cycled per bar. */
   colors?: string[];
+  /** Label for the "(direct)" bucket; follows the configured brand name. */
+  directLabel?: string;
 }>();
 
 const PALETTE = [
@@ -31,7 +33,7 @@ const rows = computed(() => {
 });
 
 function display(name: string) {
-  return name === "(direct)" ? "Signet (direct)" : name;
+  return name === "(direct)" ? (props.directLabel ?? "Signet (direct)") : name;
 }
 </script>
 

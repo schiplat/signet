@@ -1,10 +1,12 @@
 //! The issuer as a dashboard setting.
 //!
 //! What these tests pin down is the contract that makes a web-editable issuer
-//! safe enough: the environment always wins (and locks the UI), the first save
-//! locks further edits until repeated changes are explicitly allowed, a change
-//! applies to this process immediately (discovery and token validation both
-//! read the runtime value), and every change is audited.
+//! safe enough: the database wins over the environment (so the dashboard stays
+//! editable even when `SIGNET_ISSUER` is set; the variable is the fallback),
+//! the first save locks further edits until repeated changes are explicitly
+//! allowed, clearing the override (DELETE) falls back to the environment, a
+//! change applies to this process immediately (discovery and token validation
+//! both read the runtime value), and every change is audited.
 //!
 //! Test code never lives in `src/` — see `.cursor/rules/test-directory.mdc`.
 
@@ -74,6 +76,10 @@ async fn oidc_get(state: &signet::state::AppState, uri: &str) -> Value {
     serde_json::from_slice(&bytes).unwrap_or(Value::Null)
 }
 
+/// `server.issuer` is a singleton row in a shared database, so the tests in
+/// this binary must not interleave: each one would see the other's save.
+static ISSUER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Leaves no `server.*` override behind for the next run.
 async fn clear_server_rows(pool: &sqlx::PgPool) {
     sqlx::query("DELETE FROM app_settings WHERE key LIKE 'server.%'")
@@ -84,6 +90,7 @@ async fn clear_server_rows(pool: &sqlx::PgPool) {
 
 #[tokio::test]
 async fn the_issuer_is_saved_once_then_locked_until_unlocked() {
+    let _guard = ISSUER_LOCK.lock().await;
     let Some(state) = common::state_with(|cfg| {
         cfg.issuer_from_env = false;
         cfg.cookie_secure_forced = false;
@@ -103,7 +110,7 @@ async fn the_issuer_is_saved_once_then_locked_until_unlocked() {
             call(&state, "GET", "/admin/settings/server", Some(&cookie), None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["source"], json!("default"));
-        assert_eq!(body["env_locked"], json!(false));
+        assert_eq!(body["env_fallback"], json!(false));
         assert_eq!(body["locked"], json!(false));
 
         // 2. First save through the dashboard: persisted, applied immediately,
@@ -205,7 +212,11 @@ async fn the_issuer_is_saved_once_then_locked_until_unlocked() {
 }
 
 #[tokio::test]
-async fn the_environment_wins_and_disables_dashboard_edits() {
+async fn the_database_overrides_the_environment_and_reset_falls_back() {
+    let _guard = ISSUER_LOCK.lock().await;
+    // The operator's requirement: with SIGNET_ISSUER present the dashboard is
+    // still authoritative. The variable seeds the value, the first save
+    // overrides it, and DELETE restores it.
     let Some(state) = common::state_with(|cfg| {
         cfg.issuer_from_env = true;
         cfg.issuer = "https://env.example".into();
@@ -215,20 +226,22 @@ async fn the_environment_wins_and_disables_dashboard_edits() {
     else {
         return;
     };
+    clear_server_rows(&state.pool).await;
 
     let (admin, cookie) = common::admin_cookie(&state).await;
     common::with_user(state.clone(), admin, move |state, _| async move {
+        // 1. No saved value: the environment is the effective fallback.
         let (status, body) =
             call(&state, "GET", "/admin/settings/server", Some(&cookie), None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["source"], json!("environment"));
-        assert_eq!(body["env_locked"], json!(true));
+        assert_eq!(body["env_fallback"], json!(true));
         assert_eq!(body["issuer"], json!("https://env.example"));
+        assert_eq!(body["locked"], json!(false));
         assert_eq!(state.issuer(), "https://env.example");
 
-        // Neither the value nor the lock policy is editable while the variable
-        // is set: the environment is the recovery path and must stay decisive.
-        let (status, _) = call(
+        // 2. A dashboard save wins over the environment and applies immediately.
+        let (status, body) = call(
             &state,
             "PATCH",
             "/admin/settings/server",
@@ -236,19 +249,45 @@ async fn the_environment_wins_and_disables_dashboard_edits() {
             Some(json!({ "issuer": "https://db.example" })),
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["source"], json!("database"));
+        assert_eq!(body["issuer"], json!("https://db.example"));
+        assert_eq!(
+            state.issuer(),
+            "https://db.example",
+            "the database value is the effective issuer, even with the env var set"
+        );
 
-        let (status, _) = call(
+        // 3. Clearing the override returns to the environment value.
+        let (status, body) = call(
             &state,
-            "PATCH",
+            "DELETE",
             "/admin/settings/server",
             Some(&cookie),
-            Some(json!({ "allow_repeat_changes": true })),
+            None,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["source"], json!("environment"));
+        assert_eq!(body["issuer"], json!("https://env.example"));
         assert_eq!(state.issuer(), "https://env.example");
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM app_settings WHERE key LIKE 'server.%'")
+                .fetch_one(&state.pool)
+                .await
+                .expect("count server rows");
+        assert_eq!(remaining, 0, "both issuer rows are cleared");
+
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs \
+             WHERE action = 'settings.issuer_reset' AND resource_id = 'issuer'",
+        )
+        .fetch_one(&state.pool)
+        .await
+        .expect("count reset events");
+        assert!(audited >= 1, "the reset is audited");
+
+        clear_server_rows(&state.pool).await;
     })
     .await;
 }

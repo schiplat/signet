@@ -487,14 +487,38 @@ export async function resetCaptchaSettings() {
 /** Public: the product name the unauthenticated pages display. */
 export async function fetchBranding() {
   const res = await fetch("/api/v1/branding");
-  return parseJson<{ name: string }>(res);
+  return parseJson<{ name: string; logo_url: string | null }>(res);
 }
 
 export async function fetchBrandingSettings() {
   const res = await fetch("/api/v1/admin/settings/branding", {
     credentials: "include",
   });
-  return parseJson<{ name: string; overridden: boolean; env_fallback: string | null }>(res);
+  return parseJson<{
+    name: string;
+    overridden: boolean;
+    env_fallback: string | null;
+    logo_set: boolean;
+    logo_url: string | null;
+  }>(res);
+}
+
+export async function uploadBrandingLogo(dataUrl: string) {
+  const res = await fetch("/api/v1/admin/settings/branding/logo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ data_url: dataUrl }),
+  });
+  return parseJson<{ logo_set: boolean; logo_url: string | null }>(res);
+}
+
+export async function removeBrandingLogo() {
+  const res = await fetch("/api/v1/admin/settings/branding/logo", {
+    method: "DELETE",
+    credentials: "include",
+  });
+  return parseJson<{ logo_set: boolean; logo_url: string | null }>(res);
 }
 
 export async function updateBrandingSettings(name: string) {
@@ -629,8 +653,8 @@ export type ServerSettings = {
   issuer: string;
   /** Where the effective value came from. */
   source: "environment" | "database" | "default";
-  /** SIGNET_ISSUER is set: the dashboard field is read-only. */
-  env_locked: boolean;
+  /** SIGNET_ISSUER is set: it is the fallback until a value is saved here. */
+  env_fallback: boolean;
   /** Whether a saved issuer may be changed again without unlocking. */
   allow_repeat_changes: boolean;
   /** A value is saved and repeated changes are not allowed. */
@@ -655,6 +679,14 @@ export async function updateServerSettings(body: {
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(body),
+  });
+  return parseJson<ServerSettings>(res);
+}
+
+export async function resetServerSettings() {
+  const res = await fetch("/api/v1/admin/settings/server", {
+    method: "DELETE",
+    credentials: "include",
   });
   return parseJson<ServerSettings>(res);
 }

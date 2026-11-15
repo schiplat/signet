@@ -14,6 +14,7 @@ import ResetPasswordView from "@/views/ResetPasswordView.vue";
 import SettingsView from "@/views/SettingsView.vue";
 import SetupView from "@/views/SetupView.vue";
 import { useAuthStore } from "@/stores/auth";
+import { useBrandingStore } from "@/stores/branding";
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -157,6 +158,7 @@ router.beforeEach(async (to) => {
 });
 
 router.afterEach((to) => {
+  const branding = useBrandingStore();
   const pageTitle = typeof to.meta.title === "string" ? to.meta.title : "";
-  document.title = pageTitle ? `${pageTitle} · Signet` : "Signet · Identity";
+  document.title = pageTitle ? `${pageTitle} · ${branding.name}` : branding.name;
 });

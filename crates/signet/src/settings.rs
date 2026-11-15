@@ -12,14 +12,18 @@
 //! rather than policy. See `Config` for their rationale.
 //!
 //! The issuer is the one exception with a stricter contract (see the "Server
-//! identity" section below): it can be set from the dashboard, but the
-//! environment always wins when present (recovery path), and the first save
-//! locks the field until an administrator explicitly allows repeated changes.
+//! identity" section below): a value saved from the dashboard wins over the
+//! environment, the first save locks the field until an administrator
+//! explicitly allows repeated changes, and DELETE restores the environment/
+//! default value.
 //!
 //! Changes apply live. The one exception would be something baked into a
 //! long-lived object at boot; today nothing in [`RuntimeSettings`] is, and the
 //! rate limiter reads its limit per request (see
 //! [`crate::http::ratelimit::RateLimiter::set_limit`]).
+
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 
 use crate::audit::{record, AuditEvent};
 use crate::config::Config;
@@ -28,7 +32,8 @@ use crate::http::extract::AuditIp;
 use crate::roles::require_admin_role;
 use crate::state::AppState;
 use axum::extract::{Extension, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{header, HeaderMap, HeaderValue};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -247,8 +252,12 @@ pub fn router() -> Router<AppState> {
                 .delete(reset_branding),
         )
         .route(
+            "/admin/settings/branding/logo",
+            post(put_branding_logo).delete(delete_branding_logo),
+        )
+        .route(
             "/admin/settings/server",
-            get(get_server).patch(patch_server),
+            get(get_server).patch(patch_server).delete(reset_server),
         )
 }
 
@@ -479,9 +488,11 @@ async fn patch_runtime(
 // and third-party SSO callbacks are composed from it. It therefore gets a
 // stricter contract than runtime policy:
 //
-//   * The environment always wins. `SIGNET_ISSUER` being set makes the
-//     dashboard field read-only, and also means a value saved by mistake can
-//     always be repaired from outside the database.
+//   * The database wins over the environment, so the setting stays editable
+//     from the web even when `SIGNET_ISSUER` is present: the variable only
+//     seeds the value until the first dashboard save and remains the fallback
+//     afterwards. A value saved by mistake is repaired by clearing the
+//     override (DELETE below) or from outside the database.
 //   * The first save locks the field. Further edits need
 //     `server.issuer_allow_repeat` switched on explicitly (an audited action),
 //     so a stray click cannot silently rotate the identity of the deployment.
@@ -500,9 +511,10 @@ const ISSUER_ALLOW_REPEAT_KEY: &str = "server.issuer_allow_repeat";
 struct ServerSettings {
     issuer: String,
     /// Where the effective value came from: `environment`, `database` or
-    /// `default`. The UI uses it for the badge and to disable editing.
+    /// `default`. The UI uses it for the badge.
     source: &'static str,
-    env_locked: bool,
+    /// `SIGNET_ISSUER` is present: it is used only until a value is saved here.
+    env_fallback: bool,
     allow_repeat_changes: bool,
     /// A value is stored and repeated changes are not allowed: editing needs
     /// `allow_repeat_changes` turned on first.
@@ -534,37 +546,37 @@ async fn issuer_allow_repeat(pool: &PgPool) -> Result<bool, sqlx::Error> {
     Ok(stored.unwrap_or(false))
 }
 
-/// Precedence: environment > database > built-in default.
+/// Precedence: database > environment > built-in default.
+///
+/// A value saved in the dashboard is authoritative — the environment variable
+/// only seeds the value until that first save, and becomes effective again
+/// when the override is cleared, so the web stays editable even when
+/// `SIGNET_ISSUER` is present.
 ///
 /// Also used by the boot path and the refresher; propagation to peer replicas
 /// is bounded by the refresh interval, exactly like runtime policy.
 pub async fn effective_issuer(pool: &PgPool, cfg: &Config) -> Result<String, sqlx::Error> {
-    if cfg.issuer_from_env {
-        return Ok(cfg.issuer.clone());
+    if let Some(stored) = stored_issuer(pool).await? {
+        return Ok(stored);
     }
-    Ok(stored_issuer(pool)
-        .await?
-        .unwrap_or_else(|| cfg.issuer.clone()))
+    Ok(cfg.issuer.clone())
 }
 
 async fn server_settings(state: &AppState) -> AppResult<ServerSettings> {
-    let env_locked = state.config.issuer_from_env;
+    let env_fallback = state.config.issuer_from_env;
     let stored = stored_issuer(&state.pool).await?;
     let allow_repeat = issuer_allow_repeat(&state.pool).await?;
-    let (issuer, source) = if env_locked {
-        (state.config.issuer.clone(), "environment")
-    } else {
-        match &stored {
-            Some(v) => (v.clone(), "database"),
-            None => (state.config.issuer.clone(), "default"),
-        }
+    let (issuer, source) = match &stored {
+        Some(v) => (v.clone(), "database"),
+        None if env_fallback => (state.config.issuer.clone(), "environment"),
+        None => (state.config.issuer.clone(), "default"),
     };
     Ok(ServerSettings {
         issuer,
         source,
-        env_locked,
+        env_fallback,
         allow_repeat_changes: allow_repeat,
-        locked: !env_locked && stored.is_some() && !allow_repeat,
+        locked: stored.is_some() && !allow_repeat,
         public_base_url: state.config.public_base_url.clone(),
     })
 }
@@ -634,22 +646,8 @@ async fn patch_server(
     let ip = crate::http::extract::audit_ip(audit_ip);
     let before = server_settings(&state).await?;
 
-    // A signal from the environment disables this whole section: the variable
-    // is the recovery path, and silently letting the database disagree with it
-    // would make the effective issuer depend on which instance answered.
-    if before.env_locked && (body.issuer.is_some() || body.allow_repeat_changes.is_some()) {
-        return Err(AppError::conflict(
-            "issuer is managed by SIGNET_ISSUER; change the environment variable instead",
-        ));
-    }
-
     let mut issuer_change: Option<(String, String)> = None;
     if let Some(raw) = body.issuer.as_deref() {
-        if before.env_locked {
-            return Err(AppError::conflict(
-                "issuer is managed by SIGNET_ISSUER; change the environment variable instead",
-            ));
-        }
         if before.locked {
             return Err(AppError::conflict(
                 "issuer is locked; enable allow_repeat_changes first",
@@ -699,6 +697,55 @@ async fn patch_server(
         )
         .await;
     }
+
+    Ok(Json(json!(server_settings(&state).await?)))
+}
+
+/// Clears the dashboard override, falling back to `SIGNET_ISSUER` (when set)
+/// or the built-in default.
+///
+/// This is the recovery path that replaces "the environment always wins": a
+/// saved value can be wrong enough to break sign-in (an https issuer while the
+/// dashboard is served over http turns on Secure cookies), and the operator
+/// must be able to undo it. The same effect is reachable from SQL:
+/// `DELETE FROM app_settings WHERE key = 'server.issuer';`.
+async fn reset_server(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let before = server_settings(&state).await?;
+
+    if before.source != "database" {
+        return Ok(Json(json!(before)));
+    }
+
+    sqlx::query("DELETE FROM app_settings WHERE key IN ($1, $2)")
+        .bind(ISSUER_KEY)
+        .bind(ISSUER_ALLOW_REPEAT_KEY)
+        .execute(&state.pool)
+        .await?;
+
+    let effective = effective_issuer(&state.pool, &state.config).await?;
+    state.publish_issuer(effective.clone());
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.issuer_reset",
+            resource_type: "settings",
+            resource_id: Some("issuer".into()),
+            detail: json!({ "before": before.issuer, "after": effective }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
 
     Ok(Json(json!(server_settings(&state).await?)))
 }
@@ -1407,9 +1454,78 @@ pub async fn brand_name(pool: &PgPool) -> String {
     }
 }
 
+const LOGO_KEY: &str = "branding.logo";
+
 /// The unauthenticated read the sign-in/reset/setup pages mount on.
 pub async fn public_branding(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "name": brand_name(&state.pool).await }))
+    Json(json!({
+        "name": brand_name(&state.pool).await,
+        "logo_url": logo_url(&state.pool).await.ok().flatten(),
+    }))
+}
+
+/// A versioned URL for the logo, or `None` when no image is stored.
+///
+/// The version (row `updated_at` in milliseconds) makes the immutable cache
+/// header safe: replacing the logo changes the URL, so no client keeps the
+/// old image after an upload.
+async fn logo_url(pool: &PgPool) -> Result<Option<String>, sqlx::Error> {
+    let version: Option<i64> = sqlx::query_scalar(
+        "SELECT (EXTRACT(EPOCH FROM updated_at) * 1000)::bigint \
+         FROM app_settings WHERE key = 'branding.logo'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(version.map(|v| format!("/api/v1/branding/logo?v={v}")))
+}
+
+/// The stored logo as `(mime, bytes)`, validated again on the way out.
+async fn stored_logo(pool: &PgPool) -> AppResult<Option<(String, Vec<u8>)>> {
+    let stored: Option<Value> = sqlx::query_scalar("SELECT value FROM app_settings WHERE key = $1")
+        .bind(LOGO_KEY)
+        .fetch_optional(pool)
+        .await?;
+    let Some(value) = stored else {
+        return Ok(None);
+    };
+    let mime = value
+        .get("mime")
+        .and_then(Value::as_str)
+        .unwrap_or("image/png")
+        .to_string();
+    let data = value
+        .get("data")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let bytes = STANDARD
+        .decode(data)
+        .map_err(|_| anyhow::anyhow!("stored logo is not valid base64"))?;
+    Ok(Some((mime, bytes)))
+}
+
+/// Public image endpoint for the configured logo (404 when unset).
+pub async fn public_branding_logo(State(state): State<AppState>) -> AppResult<Response> {
+    let Some((mime, bytes)) = stored_logo(&state.pool).await? else {
+        return Err(AppError::NotFound("no logo configured".into()));
+    };
+    let content_type = match mime.as_str() {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/webp" => "image/webp",
+        _ => return Err(AppError::NotFound("no logo configured".into())),
+    };
+    let mut response = bytes.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
 }
 
 async fn get_branding(State(state): State<AppState>, headers: HeaderMap) -> AppResult<Json<Value>> {
@@ -1424,6 +1540,8 @@ async fn get_branding(State(state): State<AppState>, headers: HeaderMap) -> AppR
         "name": brand_name(&state.pool).await,
         "overridden": overridden,
         "env_fallback": std::env::var(BRANDING_ENV).ok(),
+        "logo_set": stored_logo(&state.pool).await?.is_some(),
+        "logo_url": logo_url(&state.pool).await?,
     })))
 }
 
@@ -1491,7 +1609,11 @@ async fn reset_branding(
     require_admin_role(&actor)?;
     let ip = crate::http::extract::audit_ip(audit_ip);
     let before = brand_name(&state.pool).await;
-    sqlx::query("DELETE FROM app_settings WHERE key = 'branding.name'")
+    let logo_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM app_settings WHERE key = $1")
+        .bind(LOGO_KEY)
+        .fetch_one(&state.pool)
+        .await?;
+    sqlx::query("DELETE FROM app_settings WHERE key IN ('branding.name', 'branding.logo')")
         .execute(&state.pool)
         .await?;
     let after = brand_name(&state.pool).await;
@@ -1502,12 +1624,154 @@ async fn reset_branding(
             action: "settings.branding_reset",
             resource_type: "settings",
             resource_id: Some("branding".into()),
-            detail: json!({ "before": before, "after": after }),
+            detail: json!({
+                "before": before,
+                "after": after,
+                "logo_removed": logo_before > 0,
+            }),
             ip,
             user_agent: crate::http::extract::user_agent(&headers),
             client_id: None,
         },
     )
     .await;
-    Ok(Json(json!({ "name": after, "overridden": false })))
+    Ok(Json(json!({
+        "name": after,
+        "overridden": false,
+        "logo_set": false,
+        "logo_url": null,
+    })))
+}
+
+/// Logo upload payload: a base64 data URL produced by the browser file input.
+#[derive(Debug, Deserialize)]
+pub struct BrandingLogoPatch {
+    data_url: String,
+}
+
+/// 256 KiB decoded. Logos are shown at 32–40 px; anything larger is a mistake
+/// and only bloats every settings read.
+const LOGO_MAX_BYTES: usize = 256 * 1024;
+
+/// Parses and validates an uploaded logo.
+///
+/// SVG is deliberately not accepted: served from this origin, a navigated-to
+/// SVG can execute script (stored XSS), and `<img>` is not a sufficient
+/// sandbox for every browser. Raster formats are checked against their magic
+/// bytes so a mislabeled payload cannot be stored under an image MIME.
+fn decode_logo(data_url: &str) -> AppResult<(String, Vec<u8>)> {
+    let (meta, payload) = data_url
+        .split_once(',')
+        .ok_or_else(|| AppError::bad_request("logo must be a base64 data URL"))?;
+    let mime = meta
+        .strip_prefix("data:")
+        .and_then(|m| m.strip_suffix(";base64"))
+        .ok_or_else(|| AppError::bad_request("logo must be a base64 data URL"))?;
+    if !matches!(mime, "image/png" | "image/jpeg" | "image/webp") {
+        return Err(AppError::bad_request(
+            "logo must be PNG, JPEG or WebP (SVG is not accepted)",
+        ));
+    }
+    let bytes = STANDARD
+        .decode(payload)
+        .map_err(|_| AppError::bad_request("logo is not valid base64"))?;
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("logo is empty"));
+    }
+    if bytes.len() > LOGO_MAX_BYTES {
+        return Err(AppError::bad_request(format!(
+            "logo must be at most {} KB",
+            LOGO_MAX_BYTES / 1024
+        )));
+    }
+    let magic_ok = match mime {
+        "image/png" => bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]),
+        "image/jpeg" => bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+        "image/webp" => bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
+        _ => false,
+    };
+    if !magic_ok {
+        return Err(AppError::bad_request(
+            "logo does not look like a PNG, JPEG or WebP image",
+        ));
+    }
+    Ok((mime.to_string(), bytes))
+}
+
+async fn put_branding_logo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+    Json(body): Json<BrandingLogoPatch>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let (mime, bytes) = decode_logo(&body.data_url)?;
+    let encoded = STANDARD.encode(&bytes);
+
+    sqlx::query(
+        r#"
+        INSERT INTO app_settings (key, value, updated_at)
+        VALUES ($1, $2, NOW())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        "#,
+    )
+    .bind(LOGO_KEY)
+    .bind(json!({ "mime": mime, "data": encoded }))
+    .execute(&state.pool)
+    .await?;
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.branding_logo_update",
+            resource_type: "settings",
+            resource_id: Some("branding".into()),
+            detail: json!({ "mime": mime, "bytes": bytes.len() }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({
+        "logo_set": true,
+        "logo_url": logo_url(&state.pool).await?,
+    })))
+}
+
+async fn delete_branding_logo(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    audit_ip: Option<Extension<AuditIp>>,
+) -> AppResult<Json<Value>> {
+    let actor = crate::auth::current_user(&state, &headers).await?;
+    require_admin_role(&actor)?;
+    let ip = crate::http::extract::audit_ip(audit_ip);
+    let removed = sqlx::query("DELETE FROM app_settings WHERE key = $1")
+        .bind(LOGO_KEY)
+        .execute(&state.pool)
+        .await?
+        .rows_affected()
+        > 0;
+
+    record(
+        &state,
+        AuditEvent {
+            actor: Some(actor),
+            action: "settings.branding_logo_remove",
+            resource_type: "settings",
+            resource_id: Some("branding".into()),
+            detail: json!({ "removed": removed }),
+            ip,
+            user_agent: crate::http::extract::user_agent(&headers),
+            client_id: None,
+        },
+    )
+    .await;
+
+    Ok(Json(json!({ "logo_set": false, "logo_url": null })))
 }

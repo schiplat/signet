@@ -224,7 +224,7 @@
 | `SIGNET_WEBAUTHN_RP_ID` / `_ORIGIN` | 自动 | 依赖方 ID/来源（生产须为真实域名） |
 | `SIGNET_CAPTCHA_PROVIDER` / `_SITE_KEY` / `_SECRET_KEY` | — | 登录/重置页 CAPTCHA（Turnstile 或 hCaptcha）；可在后台 Settings → CAPTCHA 配置（**DB > 环境变量**，secret 加密落库），三要素齐备才启用 |
 | `SIGNET_CAPTCHA_VERIFY_URL` | — | siteverify 端点覆盖（自托管兼容服务/测试用） |
-| `SIGNET_BRAND_NAME` | `Signet` | 产品名（登录页/侧栏/标题）；后台 Settings → Branding 可覆盖（DB > 环境变量） |
+| `SIGNET_BRAND_NAME` | `Signet` | 产品名（登录页/侧栏/标题）；后台 Settings → Branding 可覆盖（DB > 环境变量）。同页可上传 logo：仅 PNG/JPEG/WebP（**拒绝 SVG**，防同源脚本执行）、校验魔数、≤256 KiB，经公开只读端点 `GET /api/v1/branding/logo` 提供（`nosniff` + 版本化 URL 的 immutable 缓存） |
 
 生产容器将 volume `signet_data` 挂到 `/app/data`（JWT / 加密密钥）；`build/` 与 `deploy/` 的 compose 分工见 [deploy.md](./deploy.md)。
 

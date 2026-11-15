@@ -12,6 +12,8 @@ import type { ClientUsage } from "@/lib/api";
 const props = defineProps<{
   items: ClientUsage[];
   max?: number;
+  /** Label for the "(direct)" bucket; follows the configured brand name. */
+  directLabel?: string;
 }>();
 
 const rows = computed(() => {
@@ -29,7 +31,7 @@ const rows = computed(() => {
 const hoverIdx = ref<number | null>(null);
 
 function display(name: string) {
-  return name === "(direct)" ? "Signet (direct)" : name;
+  return name === "(direct)" ? (props.directLabel ?? "Signet (direct)") : name;
 }
 </script>
 

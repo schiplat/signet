@@ -5,8 +5,8 @@
 > 语言：简体中文 · [English](./README.md)
 
 - **生产入口（未来）**：`https://sso.example.com`
-- **开发默认 Issuer**：`http://localhost:8443`（`SIGNET_ISSUER` 可配）
-- **首个接入方**：Cella（内网子系统）；客户端统一走通用申请渠道（Dashboard → Clients 或 RFC 7591 动态注册），无内置预置
+- **Issuer**：默认 `http://localhost:8443`；公开值在首次登录后于 **Dashboard → Settings → Server identity** 配置。`SIGNET_ISSUER` 可选：仅作为首次保存前的初始值，保存后以数据库值为准
+- **首个接入方**：Cella（内网子系统）；客户端统一走通用申请渠道（Dashboard → Clients、自助 **My apps** 或 RFC 7591 动态注册），无内置预置
 
 > 命名说明：本项目为 SSO，**不是**阿里云 Object Storage（OSS）。
 
@@ -18,8 +18,8 @@
 
 ```bash
 # 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.0/signet-0.6.0-macos-arm64
-chmod +x signet-0.6.0-macos-arm64 && mv signet-0.6.0-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.1/signet-0.6.1-macos-arm64
+chmod +x signet-0.6.1-macos-arm64 && mv signet-0.6.1-macos-arm64 signet
 
 # 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
 docker run -d --name signet-db -p 5433:5432 \
@@ -59,17 +59,18 @@ cargo run -p signet
 
 ### 配置文件
 
-三种方式读的是同一套环境变量：二进制从工作目录加载 `.env`，compose 注入同名变量。下面两行即可启动；完整带注释的参考见 [.env.example](./.env.example)。
+三种方式读的是同一套环境变量：二进制从工作目录加载 `.env`，compose 注入同名变量。只有数据库连接串是启动所需——issuer 可以留空，首次登录后再在 Web 端配置。完整带注释的参考见 [.env.example](./.env.example)。
 
 ```dotenv
 SIGNET_DATABASE_URL=postgres://signet:signet@127.0.0.1:5433/signet
-SIGNET_ISSUER=http://localhost:8443
+# 可选覆盖项——留空则在 Dashboard 中配置 issuer：
+# SIGNET_ISSUER=https://sso.example.com
 ```
 
 | 配置 | 说明 |
 |------|------|
 | `SIGNET_DATABASE_URL` | PostgreSQL 连接串（上面的值即内置默认值，与本地 dev `db` 容器一致） |
-| `SIGNET_ISSUER` | 客户端访问本服务的公开 origin；不能以 `/` 结尾。生产必须设为真实 HTTPS 域名（issuer 为 https 时自动启用 `Secure` Cookie）。设置后优先级高于 **Dashboard → Settings → Server identity** 并使该字段只读（作为改错后的恢复通道）；不设置则可在 Web 端配置 |
+| `SIGNET_ISSUER` | **可选。** 客户端访问本服务的公开 origin；不能以 `/` 结尾。优先级为 **数据库 > 环境变量 > 内置默认**：在 **Dashboard → Settings → Server identity** 保存的值优先生效（即时应用、首次保存后锁定），环境变量只在首次保存前作为初始值。同页的 **Reset override**（或 `DELETE /api/v1/admin/settings/server`）会清除已保存值并回退到环境变量。生效 issuer 为 https 时自动启用 `Secure` Cookie |
 | `SIGNET_HTTP_BIND` | HTTP 监听地址；默认 `0.0.0.0:8443` |
 | `SIGNET_TRUSTED_PROXIES` | 仅反向代理后需要：允许断言 `X-Forwarded-For` 的代理 IP/CIDR，逗号分隔 |
 | 密钥 | `./data/jwt_private.pem` 与 `./data/encryption.key` 首次启动自动生成——**务必备份**：丢失或轮换会使已签发 token 失效、已存 TOTP 无法解密 |
@@ -82,7 +83,7 @@ SIGNET_ISSUER=http://localhost:8443
 
 打开 **http://localhost:8443** —— 首次访问自动跳转 **`/setup`**，创建第一个管理员并登录。
 
-**体验 SSO：** **Dashboard → Clients** 注册一个客户端（secret 只展示一次，弹窗里就是可直接复制给子系统的 `.env` / `config.toml` 片段），然后在列表里点 **Test drive** —— 新标签页走完真实的 authorize → 登录 → consent → 回调，验证整条链路。
+**体验 SSO：** 在 **Dashboard → Clients**（staff）注册一个客户端（secret 只展示一次，弹窗里就是可直接复制给子系统的 `.env` / `config.toml` 片段；任何登录用户也可在 **Dashboard → My apps** 自助注册）。然后在 Clients 列表里点 **Test drive**：新标签页走完真实的 authorize → 登录 → consent → 回调，验证整条链路。
 
 **（可选）示例客户端**，五分钟跑通端到端登录：
 
@@ -101,7 +102,8 @@ cargo run
 - Dashboard：合并的 **Directory**（用户 + 组织树）、客户端、审计、总览统计（可按 client 过滤）、MFA、Passkey、Webhook、SCIM
 - **组/部门组织树**：Dashboard → Directory 管理一棵 `department` / `group` 树，含成员、移动、改名与防环校验；OIDC `groups` claim 只下发直接组名。SCIM/目录同步的节点会出现在树里，但名称与成员仍归来源管理
 - **客户端自助注册**：任何登录用户可在 Dashboard → My apps 注册并管理自己的应用（应用名 + 回调地址），按 owner 隔离、secret 只显示一次；管理员仍可全局管理（Name / Owner 列）
-- **Issuer 可在 Web 端配置**：Dashboard → Settings → Server identity（审计 + 首次保存后锁定）；`SIGNET_ISSUER` 环境变量优先，作为改错后的恢复通道
+- **Issuer 可在 Web 端配置**：Dashboard → Settings → Server identity（**DB > `SIGNET_ISSUER`**，审计 + 首次保存后锁定；**Reset override** 回退到环境变量/默认）。**Settings 改为左侧子导航**（General / Access / Operations / Developer），当前分区记录在 `?section=`，刷新与分享链接保持同一分区
+- **品牌定制**：产品名 + **Logo 上传**（PNG/JPEG/WebP ≤256 KB，拒绝 SVG），应用于侧栏、登录、初始化、重置与同意页，无需重新部署
 - **首次使用引导**：Overview 为管理员展示实时检查面板（issuer 可达性/HTTPS、SMTP 完整性、首个启用客户端），必填步骤未通过前不可关闭
 - **运行时策略**（token/会话有效期、登录锁定、密码策略、审计保留、限流）在后台修改，落库即生效，无需重新部署
 - **签名密钥轮换**（`signet keys rotate` / `keys prune`），JWKS 同时发布新旧公钥，已签发 token 不受影响
@@ -136,7 +138,7 @@ cp .env.example .env
 # 编辑 SIGNET_DATABASE_URL 等
 ```
 
-首次启动且库中无管理员时，在浏览器打开 Dashboard，会自动跳转到 **`/setup`** 页面，创建首位管理员账户（邮箱、可选显示名）与密码。
+首次启动且库中无管理员时，在浏览器打开 Dashboard，会自动跳转到 **`/setup`** 页面，创建首位管理员账户（邮箱、可选显示名）与密码。正式部署请在登录后到 **Dashboard → Settings → Server identity** 设置公开 issuer（HTTPS origin、末尾不带 `/`）：值存数据库、优先于 `SIGNET_ISSUER`、即时生效、首次保存后锁定；Overview 的初始化检查面板会持续提示 issuer / SMTP / 首个客户端等未完成项。
 
 ### 2. 后端
 
@@ -198,6 +200,8 @@ cd .. && cargo build -p signet
 | `GET/POST /oauth/end_session` | 统一登出 |
 | `POST /oauth/revoke` | RFC 7009 吊销 |
 | `POST /oauth/register` | RFC 7591 动态客户端注册 |
+| `GET/POST /api/v1/me/clients` | 自助客户端注册（`/me/clients/{id}` 支持 `PUT` / `rotate-secret` / `DELETE`） |
+| `GET/PATCH /api/v1/admin/settings/server` | Web 端管理的 issuer（Server identity） |
 | `GET /api/v1/setup/status` | 首次部署探测（`needs_setup`） |
 | `POST /api/v1/setup` | 首次运行创建首位 admin |
 | `POST /api/v1/password-reset/*` | 密码重置（请求/确认） |
@@ -219,7 +223,7 @@ cd .. && cargo build -p signet
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 
-发版示例：`git tag -a v0.6.0 -m v0.6.0 && git push origin v0.6.0`。
+发版示例：`git tag -a v0.6.1 -m v0.6.1 && git push origin v0.6.1`。
 
 构建与部署布局见 [`docs/deploy.md`](./docs/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。

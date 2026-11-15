@@ -27,6 +27,9 @@ SIGNET_POSTGRES_DB=signet
 
 # ── Issuer / HTTP ──
 # MUST be the public HTTPS origin clients use to reach this IdP.
+# Seeds the value until an administrator saves one in the dashboard; after
+# that the saved value wins (Dashboard -> Settings -> Server identity, with
+# "Reset override" falling back to this). Keep it as the production default.
 SIGNET_ISSUER=${vars.SIGNET_ISSUER}
 SIGNET_COOKIE_SECURE=true
 
