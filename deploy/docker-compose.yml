@@ -4,8 +4,9 @@
 #   docker compose pull
 #   docker compose up -d
 #
-# In the Buz pipeline, `env.tpl` (the render template) is delivered from OSS
-# and rendered to `.env` — see env.tpl for the ${secrets.*} / ${vars.*} syntax.
+# The deployment environment provides `.env`: copy the example for a local
+# trial, or have Buz / any other pipeline render it from its own secret store.
+# No config bundle is downloaded from OSS.
 #
 # First run (no admin yet): open https://<issuer>/ in a browser — the dashboard
 # redirects to /setup where you create the first administrator (email, optional
@@ -43,7 +44,7 @@ services:
     ports:
       # Host firewall / reverse proxy restricts access — do NOT expose to the
       # public internet without TLS termination in front (SSO issuer requires
-      # HTTPS; see SIGNET_ISSUER / SIGNET_COOKIE_SECURE in env.tpl).
+      # HTTPS; see SIGNET_ISSUER / SIGNET_COOKIE_SECURE in .env.example).
       # Set SIGNET_PORT_BIND=127.0.0.1 when the reverse proxy runs on the same
       # host: then the port is unreachable from the network even if the
       # firewall rule is lost. The default keeps the old behavior so an

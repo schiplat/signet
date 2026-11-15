@@ -7,7 +7,7 @@ Signet 把「造镜像」和「跑生产」拆在两个目录，避免根目录�
 | 目录 | 职责 |
 |------|------|
 | [`build/`](../../build/) | Dockerfile + **本地** compose（可选 Postgres） |
-| [`deploy/`](../../deploy/) | **生产** compose（只拉镜像）+ `env.tpl`（Buz / OSS 配置包） |
+| [`deploy/`](../../deploy/) | **生产** compose（只拉镜像）；`.env` 由部署环境提供 |
 
 日常开发仍以 `cargo run` + `pnpm dev` 为主；下面两套 compose 面向容器化联调与上线。
 
@@ -42,26 +42,18 @@ docker compose -f build/docker-compose.yml up -d --build
 | 文件 | 作用 |
 |------|------|
 | `docker-compose.yml` | **只 pull** 镜像，不 build；加入外部网络 `manager-net` |
-| `env.tpl` | Buz 渲染成 `deploy/.env` 的模板（`${secrets.*}` / `${vars.*}`） |
 
 生产不在本 stack 内起数据库：连接已有 Postgres（由 `SIGNET_POSTGRES_*` 拼出 URL，主机名为 `manager-net` 上的 `postgres`）。
 
 ```bash
 cd deploy
-# 本地试跑可用 .env.example 拷贝；线上由 Buz 从 OSS 下发 env.tpl 再渲染
-cp ../.env.example .env   # 仅临时
+# 仅本地试跑；线上由部署环境注入 .env
+cp ../.env.example .env
 docker compose pull
 docker compose up -d
 ```
 
-CI 打包配置：
-
-```text
-tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
-→ OSS config_tpl/signet/<tag>/configs.tar.gz
-```
-
-因此 **`deploy/docker-compose.yml` 与 `env.tpl` 的路径/文件名不要随意改名**，否则 Buz 解包约定会断。
+`.env` 由部署环境提供：Buz 或其他流水线用自己的 secret store 渲染即可。镜像 workflow 只发布镜像，不再上传任何配置包。
 
 首次部署：打开 Issuer URL，Dashboard 跳转 `/setup` 创建首位管理员。
 

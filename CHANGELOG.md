@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Removed
+
+- **OSS config-bundle publishing** — the image workflow now only builds and
+  pushes the multi-arch image; `deploy/env.tpl` is gone. Deployment systems
+  provide `.env` / environment variables through their own pipeline.
+
 ## [0.6.2] - 2026-11-15
 
 Public self-registration with an explicit readiness gate, plus release and

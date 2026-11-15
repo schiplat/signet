@@ -2,8 +2,9 @@ name: Build Signet Image
 
 # Runs only after Release Signet Binary succeeds (or on manual dispatch).
 # Packages the already-built linux/amd64 and linux/arm64 binaries into a
-# multi-arch image, pushes to ACR and Docker Hub, then uploads the deploy config
-# bundle to OSS. Does not compile Rust or the dashboard.
+# multi-arch image and pushes it to ACR and Docker Hub. Does not compile Rust or
+# the dashboard, and does not publish deployment configuration — consumers
+# provide `.env` / environment variables through their own pipeline.
 #
 # Required secrets / vars:
 #   ACR: ACR_REGISTRY, ACR_NAMESPACE, ACR_USERNAME, ACR_PASSWORD (secrets)
@@ -175,39 +176,3 @@ jobs:
           sbom: false
           cache-from: type=gha
           cache-to: type=gha,mode=min,ignore-error=true
-
-      # ── Config bundle → OSS (config-as-code for the Buz deploy pipeline) ──
-      - name: Install ossutil
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL https://gosspublic.alicdn.com/ossutil/install.sh | sudo bash
-          ossutil --version
-
-      - name: Package and upload config bundle to OSS
-        shell: bash
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-          OSS_AK: ${{ secrets.OSS_AK }}
-          OSS_SK: ${{ secrets.OSS_SK }}
-          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
-          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
-        run: |
-          set -euo pipefail
-
-          : "${OSS_AK:?OSS_AK secret missing — add Actions secret OSS_AK}"
-          : "${OSS_SK:?OSS_SK secret missing — add Actions secret OSS_SK}"
-          : "${OSS_BUCKET:?OSS_BUCKET secret missing}"
-          : "${OSS_ENDPOINT:?OSS_ENDPOINT secret missing}"
-
-          tar czf configs.tar.gz -C deploy docker-compose.yml env.tpl
-          echo "==> Bundle contents:"
-          tar tzf configs.tar.gz
-          echo "==> OSS target: oss://${OSS_BUCKET}/config_tpl/signet/${VERSION}/configs.tar.gz"
-
-          ossutil cp -f configs.tar.gz \
-            "oss://${OSS_BUCKET}/config_tpl/signet/${VERSION}/configs.tar.gz" \
-            --access-key-id "${OSS_AK}" --access-key-secret "${OSS_SK}" \
-            --endpoint "${OSS_ENDPOINT}" --meta "x-oss-meta-buz-tag:${VERSION}"
-
-          echo "==> Uploaded tag bundle: config_tpl/signet/${VERSION}/configs.tar.gz"
