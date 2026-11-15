@@ -37,11 +37,14 @@ docker run -d --name signet-db -p 5433:5432 \
 
 ```bash
 cd deploy
-cp ../.env.example .env   # 编辑 SIGNET_*；并设置 SIGNET_IMAGE=<registry>/signet:<tag>
+export SIGNET_IMAGE=<registry>/signet:<tag>
+export SIGNET_DATABASE_URL=postgres://<user>:<password>@<host>:5432/signet
 docker compose up -d
 ```
 
-生产布局（外部 Postgres、密钥卷）详见 [docs/deploy.md](./docs/zh-CN/deploy.md)。
+仍可使用 dotenv 文件：把 `../.env.example` 复制为 `.env`，并在 compose 命令中加
+`-f docker-compose.env-file.yml`。生产布局（外部 Postgres、密钥卷）详见
+[docs/deploy.md](./docs/zh-CN/deploy.md)。
 
 **方式 C：源码构建（开发）**
 

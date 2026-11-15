@@ -38,11 +38,14 @@ Each release also publishes a multi-arch runtime image (`linux/amd64`, `linux/ar
 
 ```bash
 cd deploy
-cp ../.env.example .env   # edit SIGNET_*; set SIGNET_IMAGE=<registry>/signet:<tag>
+export SIGNET_IMAGE=<registry>/signet:<tag>
+export SIGNET_DATABASE_URL=postgres://<user>:<password>@<host>:5432/signet
 docker compose up -d
 ```
 
-Production layout (external Postgres, keys volume): [docs/deploy.md](./docs/deploy.md).
+Prefer a dotenv file? Copy `../.env.example` to `.env` and add
+`-f docker-compose.env-file.yml` to the compose command. Production layout
+(external Postgres, keys volume): [docs/deploy.md](./docs/deploy.md).
 
 **C. Build from source (development)**
 

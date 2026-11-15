@@ -42,18 +42,29 @@ docker compose -f build/docker-compose.yml up -d --build
 | 文件 | 作用 |
 |------|------|
 | `docker-compose.yml` | **只 pull** 镜像，不 build；加入外部网络 `manager-net` |
+| `docker-compose.env-file.yml` | 可选 overlay：额外把 `deploy/.env` 注入容器 |
 
-生产不在本 stack 内起数据库：连接已有 Postgres（由 `SIGNET_POSTGRES_*` 拼出 URL，主机名为 `manager-net` 上的 `postgres`）。
+生产不在本 stack 内起数据库：通过 `SIGNET_DATABASE_URL` 连接已有 Postgres，主机名为 `manager-net` 上的 `postgres`。
+
+环境变量是主路径：由部署系统注入，且 `SIGNET_DATABASE_URL` 为必填（不再回退到内置 localhost 默认值）：
 
 ```bash
 cd deploy
-# 仅本地试跑；线上由部署环境注入 .env
-cp ../.env.example .env
+export SIGNET_IMAGE="<registry>/<namespace>/signet:<tag>"
+export SIGNET_DATABASE_URL="postgres://signet:<password>@postgres:5432/signet"
 docker compose pull
 docker compose up -d
 ```
 
-`.env` 由部署环境提供：Buz 或其他流水线用自己的 secret store 渲染即可。镜像 workflow 只发布镜像，不再上传任何配置包。
+dotenv 文件仍作为可选的兼容方式支持：
+
+```bash
+cd deploy
+cp ../.env.example .env   # 设置 SIGNET_IMAGE 与 SIGNET_DATABASE_URL
+docker compose -f docker-compose.yml -f docker-compose.env-file.yml up -d
+```
+
+base 文件 `environment:` 中的值优先于 `.env` 同名项；需要从文件加载更完整的配置（SMTP、metrics、可选集成）时使用 overlay。Buz 或其他流水线可以用自己的 secret store 提供任意一种形式。镜像 workflow 只发布镜像，不再上传任何配置包。
 
 首次部署：打开 Issuer URL，Dashboard 跳转 `/setup` 创建首位管理员。
 

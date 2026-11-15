@@ -49,21 +49,35 @@ selects the matching architecture automatically.
 | File | Purpose |
 |------|------|
 | `docker-compose.yml` | **Pull-only**, no build; joins the external `manager-net` network |
+| `docker-compose.env-file.yml` | Optional overlay: also loads `deploy/.env` into the container |
 
 Production does not start a database in this stack: it connects to an existing
-Postgres (the URL is composed from `SIGNET_POSTGRES_*`, with `postgres` as the
-host on `manager-net`).
+Postgres via `SIGNET_DATABASE_URL`, with `postgres` as the host on `manager-net`.
+
+Environment variables are the primary path — the deployment system injects
+them, and `SIGNET_DATABASE_URL` is required (no fallback to the built-in
+localhost default):
 
 ```bash
 cd deploy
-# Local trial only; production injects .env from its secret store
-cp ../.env.example .env
+export SIGNET_IMAGE="<registry>/<namespace>/signet:<tag>"
+export SIGNET_DATABASE_URL="postgres://signet:<password>@postgres:5432/signet"
 docker compose pull
 docker compose up -d
 ```
 
-`.env` is supplied by the deployment environment — Buz or any other pipeline can
-render it from its own secrets. The image workflow publishes only the image; no
+A dotenv file is still supported as an optional compatibility layer:
+
+```bash
+cd deploy
+cp ../.env.example .env   # set SIGNET_IMAGE and SIGNET_DATABASE_URL
+docker compose -f docker-compose.yml -f docker-compose.env-file.yml up -d
+```
+
+The base file's `environment:` values win over the same keys in `.env`; use the
+overlay when you want the wider settings surface (SMTP, metrics, optional
+integrations) from the file. Buz or any other pipeline can provide either form
+from its own secret store. The image workflow publishes only the image; no
 configuration bundle is uploaded anywhere.
 
 First deployment: open the issuer URL; the dashboard redirects to `/setup` to
