@@ -16,6 +16,14 @@ pub enum AppError {
     NotFound(String),
     #[error("{0}")]
     Conflict(String),
+    /// A one-time link or request has expired or was already used. 410 rather
+    /// than 404: the endpoint exists, the thing it addressed no longer does.
+    #[error("{0}")]
+    Gone(String),
+    /// A deliberately narrow, endpoint-level throttle (public signup), as
+    /// opposed to the global per-IP request limiter.
+    #[error("{0}")]
+    TooManyRequests(String),
     /// A dependency the server talks to (an upstream directory, an IdP) failed or
     /// is unreachable. Distinct from `Anyhow` so the message reaches the client
     /// and the status is 502 rather than a generic 500.
@@ -59,6 +67,14 @@ impl AppError {
 
     pub fn conflict(msg: impl Into<String>) -> Self {
         Self::Conflict(msg.into())
+    }
+
+    pub fn gone(msg: impl Into<String>) -> Self {
+        Self::Gone(msg.into())
+    }
+
+    pub fn too_many_requests(msg: impl Into<String>) -> Self {
+        Self::TooManyRequests(msg.into())
     }
 
     pub fn not_found(msg: impl Into<String>) -> Self {
@@ -122,6 +138,8 @@ impl IntoResponse for AppError {
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::Gone(m) => (StatusCode::GONE, m.clone()),
+            AppError::TooManyRequests(m) => (StatusCode::TOO_MANY_REQUESTS, m.clone()),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m.clone()),
             // Handled above; this arm exists so the match stays exhaustive

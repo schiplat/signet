@@ -27,6 +27,7 @@ pub mod roles;
 pub mod scim;
 pub mod settings;
 pub mod setup;
+pub mod signup;
 pub mod state;
 pub mod webhooks;
 
@@ -138,6 +139,7 @@ pub async fn build_app(cfg: Config) -> anyhow::Result<Router> {
         .merge(directory::api::router())
         .merge(admission::router())
         .merge(settings::router())
+        .merge(signup::router())
         .merge(setup::router());
 
     let api = Router::new()

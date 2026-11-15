@@ -232,6 +232,7 @@ pub mod via {
     pub const ADMIN: &str = "admin";
     pub const SCIM: &str = "scim";
     pub const SSO_JIT: &str = "sso_jit";
+    pub const SIGNUP: &str = "signup";
 }
 
 /// Refuses a sign-in for an address the allowlist excludes, and records it.

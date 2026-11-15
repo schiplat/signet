@@ -8,16 +8,16 @@ Prerequisites: Rust (stable), Node.js ≥ 18 + pnpm, PostgreSQL ≥ 14.
 
 ```bash
 cp .env.example .env          # configure SIGNET_DATABASE_URL, etc.
-docker compose --profile dev up db   # optional: local Postgres
+docker compose -f build/docker-compose.yml --profile dev up -d db   # optional: local Postgres
 cargo run -p signet           # backend on :8443
 cd dashboard && pnpm install && pnpm dev   # dashboard on :5173
 ```
 
-See [README.md](./README.md) for full setup instructions.
+See [docs/local-development.md](./docs/local-development.md) for the full setup.
 
 ## Workflow
 
-1. Fork the repository and create a feature branch from `main`.
+1. Fork the repository and create a feature branch from `master`.
 2. Make focused, self-contained changes.
 3. Keep commits small and reviewable; one logical change per commit.
 4. Open a pull request with a clear description of the "why".
@@ -69,6 +69,8 @@ pnpm build
 ## Documentation
 
 - Update the relevant files under `docs/` when behavior changes.
+- `docs/` is the English source of truth; `docs/zh-CN/` holds the Chinese
+  translations. Keep both in sync.
 - `README.md` is the English default; `README.zh-CN.md` is the Chinese
   translation. Keep both in sync.
 

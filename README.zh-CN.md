@@ -16,10 +16,11 @@
 
 **方式 A：release 二进制（推荐）**
 
+从 [Releases 页面](https://github.com/schiplat/signet/releases) 下载对应平台产物（`linux-amd64`、`linux-arm64` 或 `macos-arm64`），然后：
+
 ```bash
-# 1. 到 GitHub Releases 下载对应平台产物（以页面上最新 tag 为准），例如：
-curl -fLO https://github.com/schiplat/signet/releases/latest/download/signet-macos-arm64
-chmod +x signet-macos-arm64 && mv signet-macos-arm64 signet
+# 1. 将下载的产物重命名为 `signet`
+chmod +x signet-<platform> && mv signet-<platform> signet
 
 # 2. 起一个与内置默认连接串一致的 PostgreSQL（signet/signet@127.0.0.1:5433/signet）；已有可跳过
 docker run -d --name signet-db -p 5433:5432 \
@@ -94,7 +95,7 @@ cargo run
 # 打开 http://127.0.0.1:3000 → Sign in → SSO 登录成功
 ```
 
-前端热更新开发（`:5173` 代理 `:8443`）见下方[本地开发](#本地开发)。业务系统接入文档见 [docs/client-integration.md](./docs/zh-CN/client-integration.md)。
+前端热更新开发（`:5173` 代理 `:8443`）见 [docs/local-development.md](./docs/zh-CN/local-development.md)。业务系统接入文档见 [docs/client-integration.md](./docs/zh-CN/client-integration.md)。
 
 ## 功能概览
 
@@ -104,6 +105,7 @@ cargo run
 - **客户端自助注册**：任何登录用户可在 Dashboard → My apps 注册并管理自己的应用（应用名 + 回调地址），按 owner 隔离、secret 只显示一次；管理员仍可全局管理（Name / Owner 列）
 - **Issuer 可在 Web 端配置**：Dashboard → Settings → Server identity（**DB > `SIGNET_ISSUER`**，审计 + 首次保存后锁定；**Reset override** 回退到环境变量/默认）。**Settings 改为左侧子导航**（General / Access / Operations / Developer），当前分区记录在 `?section=`，刷新与分享链接保持同一分区
 - **品牌定制**：产品名 + **Logo 上传**（PNG/JPEG/WebP ≤256 KB，拒绝 SVG），应用于侧栏、登录、初始化、重置与同意页，无需重新部署
+- **公开注册（默认关闭）**：Settings → Public sign-up，需先配置 SMTP 与 CAPTCHA 才能开启。提交申请不建号，点击 30 分钟单次邮件链接后才创建普通 `member`（无分组）；只有开启后登录页才显示 **Create account**
 - **首次使用引导**：Overview 为管理员展示实时检查面板（issuer 可达性/HTTPS、SMTP 完整性、首个启用客户端），必填步骤未通过前不可关闭
 - **运行时策略**（token/会话有效期、登录锁定、密码策略、审计保留、限流）在后台修改，落库即生效，无需重新部署
 - **签名密钥轮换**（`signet keys rotate` / `keys prune`），JWKS 同时发布新旧公钥，已签发 token 不受影响
@@ -129,94 +131,28 @@ cargo run
 | [docs/directory-mapping-ux.md](./docs/directory-mapping-ux.md) | 目录同步字段映射交互设计（含实现记录） |
 | [docs/deploy.md](./docs/zh-CN/deploy.md) | **build/ 与 deploy/**（Dockerfile、本地与生产 compose、`/app/data` 密钥） |
 | [CHANGELOG.md](./CHANGELOG.md) | 版本变更与破坏性改动 |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | 开发流程、提交规范与本地检查 |
+| [SECURITY.md](./SECURITY.md) | 漏洞报告与安全模型 |
 
 英文文档在 [docs/](./docs/)（源版本）；本目录的中文版随版本更新可能滞后。
 
 ## 本地开发
 
-### 1. 配置
+完整开发环境说明——配置、后端、Dashboard 热更新、账号模型与可观测性——见
+**[docs/local-development.md](./docs/zh-CN/local-development.md)**。
 
-```bash
-cp .env.example .env
-# 编辑 SIGNET_DATABASE_URL 等
-```
+最短流程：启动 Postgres，构建 Dashboard（`cd dashboard && pnpm build`，编译期会嵌入二进制），然后 `cargo run -p signet`，监听 `:8443`。
 
-首次启动且库中无管理员时，在浏览器打开 Dashboard，会自动跳转到 **`/setup`** 页面，创建首位管理员账户（邮箱、可选显示名）与密码。正式部署请在登录后到 **Dashboard → Settings → Server identity** 设置公开 issuer（HTTPS origin、末尾不带 `/`）：值存数据库、优先于 `SIGNET_ISSUER`、即时生效、首次保存后锁定；Overview 的初始化检查面板会持续提示 issuer / SMTP / 首个客户端等未完成项。
+## 接口
 
-### 2. 后端
+Signet 对外有四个接口面，完整说明见 `docs/`：
 
-```bash
-cargo run -p signet
-```
-
-> 注意：二进制在编译期嵌入 `dashboard/dist`（rust-embed），该目录不存在会编译失败。首次请先构建前端（Quick Start 方式 C 的第 2 步），或直接按 [Quick Start](#quick-start) 顺序操作。
-
-探活：`GET http://localhost:8443/health`
-
-提交 Rust 改动前请执行：
-
-```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-```
-
-### 3. Dashboard（Vue）
-
-```bash
-cd dashboard
-pnpm install
-pnpm dev          # http://localhost:5173 ，代理到 :8443
-# 或构建并嵌入二进制：
-pnpm build
-cd .. && cargo build -p signet
-```
-
-生产/联调时由 Rust 通过 `rust-embed` 托管 `dashboard/dist`（`cargo build` 前需先有该目录）。
-
-### 4. 账号模型
-
-- **无公开注册**；staff 在 **Dashboard → Directory**（前端路由 `/directory`，API `/api/v1/admin/users`）开户  
-- 角色：`admin` / `manager` / `member`（见设计文档）  
-- 首次运行经 **`/setup`** 页面创建首位 `admin`  
-- 可选 **MFA**（全局或按用户强制）；账户菜单可自愿绑定  
-- 可选在 **Integrations** 配置第三方登录；用户可在账户菜单管理已绑定账号  
-
-### 5. 可观测性
-
-- 所有请求响应带 **`x-request-id`**（透传 / 自动生成 UUIDv4），用于链路关联
-- 访问日志由 `crates/signet/src/access_log.rs` 统一输出：单行、结构化字段（`request_id` / `method` / `path` / `query` / `ip` / `status` / `latency_ms`），`2xx/3xx` 为 `INFO`，`4xx` 为 `WARN`，`5xx` 为 `ERROR`
-- 日志走 `tracing`，规范见 [.cursor/rules/logging.mdc](./.cursor/rules/logging.mdc)：静态消息 + 结构化字段，错误用 `error` 字段，生产（`APP_ENV=production`）输出单行 JSON
-- `GET /metrics` 在**独立监听**上暴露 Prometheus 指标（默认仅回环，`SIGNET_METRICS_BIND` 可改/关），不在公开 API 端口
-
-## 主要端点
-
-| 路径 | 说明 |
-|------|------|
-| `GET /health` | 探活 |
-| `GET /metrics` | Prometheus 指标——独立监听，默认仅 `127.0.0.1:9464`（`SIGNET_METRICS_BIND`），不在公开端口 |
-| `GET /.well-known/openid-configuration` | OIDC Discovery |
-| `GET /oauth/authorize` | 授权（未登录跳转 `/login`，未同意跳转 `/consent`） |
-| `POST /oauth/token` | 换票（code + PKCE / refresh） |
-| `POST /oauth/consent` | 同意页提交 |
-| `GET /oauth/jwks` | JWKS |
-| `GET /oauth/userinfo` | UserInfo（含 `groups`） |
-| `GET/POST /oauth/end_session` | 统一登出 |
-| `POST /oauth/revoke` | RFC 7009 吊销 |
-| `POST /oauth/register` | RFC 7591 动态客户端注册 |
-| `GET/POST /api/v1/me/clients` | 自助客户端注册（`/me/clients/{id}` 支持 `PUT` / `rotate-secret` / `DELETE`） |
-| `GET/PATCH /api/v1/admin/settings/server` | Web 端管理的 issuer（Server identity） |
-| `GET /api/v1/setup/status` | 首次部署探测（`needs_setup`） |
-| `POST /api/v1/setup` | 首次运行创建首位 admin |
-| `POST /api/v1/password-reset/*` | 密码重置（请求/确认） |
-| `GET/POST/DELETE /api/v1/me/passkeys/*` | Passkey（WebAuthn）注册/登录/管理 |
-| `GET /api/v1/auth/sso/{provider}/start` | 发起第三方登录 |
-| `GET /api/v1/auth/sso/{provider}/callback` | 第三方回调（绑定 / 暂存待绑定 / 签发会话） |
-| `GET /api/v1/auth/sso/providers` | 公开：已启用的 SSO provider 列表 |
-| `GET/DELETE /api/v1/auth/sso/identities/*` | 已绑定第三方账号列表 / 解绑 |
-| `/scim/v2/*` | SCIM v2 用户/组同步（Bearer 认证） |
-| `/api/v1/*` | Dashboard / 会话 / 管理 API（**统一前缀**，见 [api-v1.md](./docs/zh-CN/api-v1.md)） |
-
-示例：`POST /api/v1/login`、`GET /api/v1/admin/users`、`GET /api/v1/admin/stats`。
+| 接口面 | 前缀 | 参考 |
+|---|---|---|
+| OIDC 协议 | `/oauth/*`、`/.well-known/openid-configuration` | [docs/client-integration.md](./docs/zh-CN/client-integration.md) |
+| Dashboard / 管理 API | `/api/v1/*`——会话 Cookie；自动化可用 `Authorization: Bearer` admin API token | [docs/api-v1.md](./docs/zh-CN/api-v1.md) |
+| SCIM v2 | `/scim/v2/*`——bearer token | [docs/integrations.md](./docs/zh-CN/integrations.md) |
+| 运维 | `GET /health`；`GET /metrics`（独立 loopback 监听） | [docs/security.md](./docs/zh-CN/security.md#63-可观测) |
 
 ## CI 与发布
 
@@ -226,10 +162,29 @@ cd .. && cargo build -p signet
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 
-发版示例：`git tag -a v0.6.1 -m v0.6.1 && git push origin v0.6.1`。
+发版示例：`git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`。
 
 构建与部署布局见 [`docs/deploy.md`](./docs/zh-CN/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`、`env.tpl`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。
+
+
+## 贡献
+
+欢迎贡献。前置条件、分支与 PR 流程、提交信息规范以及 CI 会跑的检查见
+[CONTRIBUTING.md](./CONTRIBUTING.md)。
+
+- 本地环境搭建见 [docs/local-development.md](./docs/zh-CN/local-development.md)。
+- 推送前请在本地跑完检查：`cargo fmt --all -- --check`、
+  `cargo clippy --workspace --all-targets -- -D warnings`、`cargo test`；
+  `dashboard/` 下执行 `pnpm typecheck && pnpm build`。
+- 行为变化时同步更新 `docs/` 下对应页面：英文册是源版本，需与
+  `docs/zh-CN/` 中文册保持一致。
+
+## 安全
+
+**请勿为安全漏洞开公开 issue**。按 [SECURITY.md](./SECURITY.md) 私下报告
+（邮箱 **info@open.schiplat.com**），我们会在 3 个工作日内确认。安全模型与
+实现说明见 [docs/zh-CN/security.md](./docs/zh-CN/security.md)。
 
 ## 仓库结构
 

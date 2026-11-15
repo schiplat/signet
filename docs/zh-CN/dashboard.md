@@ -32,6 +32,14 @@ Vue 3 + Vite + Tailwind CSS v4，构建产物嵌入 Rust（`rust-embed`）。
 - 分页浏览，含 IP / 浏览器 / 系统与时间；空状态给出提示
 - 定位为「个人视角」，与 Overview 的「全局运营视角」区分
 
+### 注册（公开，`/signup`）
+
+无需登录即可访问，但只有 **Settings → Public sign-up** 已开启且 SMTP / CAPTCHA 都已配置时才显示表单；否则页面提示注册未开放并返回登录，登录页也不会显示 **Create account**。
+
+- 表单包含可选显示名、邮箱、密码 + 确认密码与 CAPTCHA。提交后统一进入“请查收邮件”，不暴露邮箱是否已注册。
+- 邮件链接打开 `/signup/confirm#token=…`（token 放在 fragment，浏览器不会发给服务端，也不会进访问日志），页面需要点击 **Activate account** 才真正建号（避免邮件扫描器预取链接直接消费 token）。激活后回到 `/login?signup=verified`，仍需用刚设置的密码登录。
+- 新账号是普通 `member`、无分组；过期/已用链接提供 **Start over**，已注册地址引导回登录。
+
 ### My apps（通用，`/my-apps`）
 
 GitHub「Developer settings」式自助注册：**任何登录用户**都可申请 OAuth 客户端并成为其 owner，无需管理员审批。
@@ -87,6 +95,7 @@ Users 与组织树合并为一页（`/directory`），左侧组织、右侧当�
 - **Branding**：产品名（控制台、标题与邮件）+ **Logo 上传**（PNG/JPEG/WebP，≤256 KB，拒绝 SVG；显示于侧栏与所有登录/重置/初始化/同意页，未设置时回退为名称首字母）。替换后 URL 带版本号，立即生效无需强刷
 - **Security**：全局 **Require MFA for all users**
 - **Email domains**：登录/开户域名白名单；保存前提示是否会锁死当前管理员
+- **Public sign-up**：默认关闭。单张 **Preflight** 清单展示全部检查：**Email relay**（host、port、可解析的 From）、**CAPTCHA**（provider、site key、secret），以及空域名白名单、验证链接指向 localhost/http 等提醒；每项标注 **Ready** / **Action needed** / **Advisory**，并只给一个去往对应配置分区的链接。存在阻塞项时无法保存为开启。**Re-check** 只重新读取当前配置，不改变开关。开启只会让登录页出现 **Create account** 与注册表单，不改变域名白名单或新账号的角色
 - **SSO / federation**：**JIT provision on SSO**（首次第三方登录且已验证邮箱无本地用户时是否自动开户）
 - **CAPTCHA**：Turnstile / hCaptcha，作用于登录与密码重置
 - **Runtime policies**：会话/token 有效期、登录尝试与锁定、密码长度/历史、审计保留、全局限流；保存即生效，未保存的字段沿用环境变量
@@ -125,6 +134,7 @@ Users 与组织树合并为一页（`/directory`），左侧组织、右侧当�
 6. OIDC `return_to`（`/oauth/...`）完成后回跳授权  
 7. 其他第三方失败同样回登录页并显示 `?sso_error=` 对应文案（`unknown_provider` / `provider_disabled` / `state_mismatch` / `upstream_error` / `access_denied` / `missing_code` / `email_required` 等）。用户在飞书等授权页拒绝时为 `access_denied`（友好提示，非系统故障）。`email_required`：飞书等未返回邮箱时拒绝首次绑定/登录，并提示开通邮箱权限（微信除外；已绑定身份可继续登录）。  
 8. 忘记密码：登录页链接 → `/reset-password` 两步重置（请求 → 确认）
+9. **Create account**：仅当管理员开启公开注册且 SMTP / CAPTCHA 就绪时，显示在 **Forgot password?** 旁 → `/signup`（见 §2）；激活后回登录页并提示已验证
 
 详情与防接管规则见 [api-v1.md §12](./api-v1.md#12-第三方登录身份联邦)。
 

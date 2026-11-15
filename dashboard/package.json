@@ -1,7 +1,7 @@
 {
   "name": "signet-dashboard",
   "private": true,
-  "version": "0.6.1",
+  "version": "0.6.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -29,7 +29,7 @@
     "@vue/tsconfig": "^0.7.0",
     "tailwindcss": "~4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^6.3.5",
-    "vue-tsc": "^2.2.12"
+    "vite": "^6.4.6",
+    "vue-tsc": "^3.3.14"
   }
 }

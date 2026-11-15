@@ -46,9 +46,9 @@ Key points:
 
 | Version | Supported |
 |---------|-----------|
-| `0.x` (main) | ✅ |
+| `0.x` (master) | ✅ |
 
-Only the latest commit on `main` receives security fixes. There is no
+Only the latest commit on `master` receives security fixes. There is no
 long-term-support branch at this time.
 
 ## Disclosure process

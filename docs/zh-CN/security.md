@@ -88,6 +88,12 @@
 - 域按标签边界比较、无通配符；保存时校验（空条目 / 把地址当域 / 通配符一律拒绝）；保存一个把当前操作者排除在外的名单会被服务端拒绝，避免自锁；启动时若名单排除了全部 admin 会记 `warn`。
 - 首次部署 `/setup` 不受限制（否则新部署建不出第一个管理员）。
 
+### 2.9 公开注册
+- **默认关闭**。开关是 `app_settings.auth.public_signup`，没有环境变量回退，避免运维以为没开却被环境变量打开。开启前必须同时具备 SMTP 中继（验证链接是邮箱所有权的唯一证明）和 CAPTCHA（端点无需登录）。保存时会基于当前配置做前置检查——中继的 host、非零 port、可解析为邮箱的 From，以及 CAPTCHA 的 provider / site key / secret——不通过则拒绝并一次列出全部阻塞问题；后台展示同一份清单，并额外提示空域名白名单、链接指向 localhost/http 等非阻塞风险。每次请求都会复查，任一前置项后续被移除或不可用时返回 503，公开状态也显示 `enabled: false`。
+- **验证前不建号**：申请只写 `signup_requests`，`users` 不变。验证 token 随机生成，库中只存 SHA-256，单次消费（确认时删除整行），30 分钟过期；重新申请会轮换 token，旧链接立即失效。确认后创建 `member`（无分组）、`email_verified=TRUE`、`provisioned_via='signup'`，且不建立会话（邮件链接无法造成登录 CSRF）。链接把 token 放在 URL fragment（`#token=…`），浏览器不会发给服务端，因此不会进入访问日志或代理日志；确认页也只在用户点击后才 POST。
+- **防枚举**：`POST /signup` 对新地址、已有待确认申请、已有账号统一返回 `{ "status": "ok" }`；密码哈希在查重之前完成，响应时间也不暴露账号是否存在。已有账号只会收到“账号已存在”提示邮件（仅邮箱主人可见），一分钟内不重复发送。
+- **防滥用**：单地址 3 次/小时，单 IP 5 次/小时、20 次/天，计数在 `signup_attempts`（多副本共享）；CAPTCHA 在一切与地址相关的处理之前校验；沿用 §2.2 密码策略；§2.8 域名白名单在申请和确认两个时点都生效。审计动作：`auth.signup_requested`、`auth.signup_confirmed`、`auth.signup_blocked`（限流）、`user.provision_blocked`（域名）、`settings.signup_update`。密码与链接 token 都不会进入审计或日志。
+
 ---
 
 ## 3. 会话管理

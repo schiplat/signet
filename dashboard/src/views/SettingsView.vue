@@ -13,6 +13,7 @@ import {
   fetchRuntimeSettings,
   fetchServerSettings,
   fetchSignInSettings,
+  fetchSignupSettings,
   fetchSmtpSettings,
   fetchSsoSettings,
   me,
@@ -29,12 +30,14 @@ import {
   updateRuntimeSettings,
   updateServerSettings,
   updateSignInSettings,
+  updateSignupSettings,
   uploadBrandingLogo,
   updateSmtpSettings,
   updateSsoSettings,
   type ApiToken,
   type RuntimeSettings,
   type ServerSettings,
+  type SignupSettings,
 } from "@/lib/api";
 import { confirm } from "@/lib/confirm";
 import { useBrandingStore } from "@/stores/branding";
@@ -50,6 +53,18 @@ const requiredGlobally = ref(false);
 const ssoSaving = ref(false);
 const ssoSaved = ref(false);
 const jitProvision = ref(false);
+
+const signup = ref<SignupSettings | null>(null);
+const signupEnabled = ref(false);
+const signupSaving = ref(false);
+const signupSaved = ref(false);
+const signupChecking = ref(false);
+const signupChecked = ref(false);
+let signupCheckedTimer: ReturnType<typeof setTimeout> | null = null;
+/** Enabling is refused while any blocking prerequisite is missing (server-side too). */
+const signupPrereqMissing = computed(
+  () => signupEnabled.value && signup.value !== null && !signup.value.ready,
+);
 
 /**
  * Operational policy. Values here take effect on the next request — no
@@ -237,15 +252,18 @@ async function onToggleRepeat(allow: boolean) {
 
 onMounted(async () => {
   try {
-    const [mfa, sso, signIn, who, runtimeRes] = await Promise.all([
+    const [mfa, sso, signIn, signupRes, who, runtimeRes] = await Promise.all([
       fetchMfaSettings(),
       fetchSsoSettings(),
       fetchSignInSettings(),
+      fetchSignupSettings(),
       me(),
       fetchRuntimeSettings(),
     ]);
     requiredGlobally.value = mfa.required_globally;
     jitProvision.value = sso.jit_provision;
+    signup.value = signupRes;
+    signupEnabled.value = signupRes.enabled;
     allowlistInput.value = joinList(signIn.allowed_email_domains);
     allowlistOrigin.value = signIn.origin;
     ownEmail.value = who.user.email;
@@ -349,6 +367,48 @@ async function onSaveSso() {
     error.value = e instanceof Error ? e.message : "Save failed";
   } finally {
     ssoSaving.value = false;
+  }
+}
+
+async function onSaveSignup() {
+  error.value = "";
+  signupSaved.value = false;
+  signupSaving.value = true;
+  try {
+    const res = await updateSignupSettings(signupEnabled.value);
+    signup.value = res;
+    signupEnabled.value = res.enabled;
+    signupSaved.value = true;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Save failed";
+    // The checkbox shows the last state the server accepted; refresh the
+    // checklist too, in case the configuration changed since this page loaded.
+    try {
+      signup.value = await fetchSignupSettings();
+    } catch {
+      /* the error above already says what happened */
+    }
+    signupEnabled.value = signup.value?.enabled ?? false;
+  } finally {
+    signupSaving.value = false;
+  }
+}
+
+/// Re-reads the server's preflight result without changing the unsaved toggle.
+async function recheckSignup() {
+  signupChecking.value = true;
+  signupChecked.value = false;
+  try {
+    signup.value = await fetchSignupSettings();
+    if (signupCheckedTimer) clearTimeout(signupCheckedTimer);
+    signupChecked.value = true;
+    signupCheckedTimer = setTimeout(() => {
+      signupChecked.value = false;
+    }, 2000);
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Prerequisite check failed";
+  } finally {
+    signupChecking.value = false;
   }
 }
 
@@ -698,7 +758,7 @@ async function onResetBranding() {
 }
 // --- Section navigation ----------------------------------------------------
 //
-// Nine settings sections do not fit one scroll column; the left sub-nav keeps
+// Ten settings sections do not fit one scroll column; the left sub-nav keeps
 // one section visible at a time and groups them by intent. State only — the
 // route stays /settings.
 
@@ -707,6 +767,7 @@ type SettingsSection =
   | "branding"
   | "security"
   | "domains"
+  | "signup"
   | "sso"
   | "captcha"
   | "policies"
@@ -723,6 +784,7 @@ const SECTION_KEYS = [
   "branding",
   "security",
   "domains",
+  "signup",
   "sso",
   "captcha",
   "policies",
@@ -784,6 +846,15 @@ const settingsNav = computed<NavGroup[]>(() => [
           : null,
       },
       {
+        key: "signup",
+        label: "Public sign-up",
+        badge: signup.value?.enabled
+          ? signup.value.smtp_configured && signup.value.captcha_configured
+            ? "on"
+            : "blocked"
+          : null,
+      },
+      {
         key: "sso",
         label: "SSO / federation",
         badge: jitProvision.value ? "JIT" : null,
@@ -825,6 +896,120 @@ function selectSection(key: SettingsSection) {
   else query.section = key;
   // replace, not push: switching panes should not grow the history stack.
   void router.replace({ query });
+  document.querySelector("main")?.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+/// One row per check. Blocking and advisory findings share this shape, so the
+/// pane has a single list instead of a status table plus two message blocks.
+type SignupCheckStatus = "ready" | "blocked" | "advisory";
+type SignupCheck = {
+  key: string;
+  label: string;
+  status: SignupCheckStatus;
+  detail: string;
+  link: { label: string; section: SettingsSection } | null;
+};
+
+const SMTP_PREFIX = "Email relay: ";
+const CAPTCHA_PREFIX = "CAPTCHA: ";
+
+function problemDetail(prefix: string): string | null {
+  const text = signup.value?.problems.find((problem) => problem.startsWith(prefix));
+  return text ? text.slice(prefix.length).trim() : null;
+}
+
+const signupChecks = computed<SignupCheck[]>(() => {
+  const s = signup.value;
+  if (!s) return [];
+  const checks: SignupCheck[] = [
+    {
+      key: "smtp",
+      label: "Email relay",
+      status: s.smtp_configured ? "ready" : "blocked",
+      detail: s.smtp_configured ? "" : (problemDetail(SMTP_PREFIX) ?? "Not configured."),
+      link: s.smtp_configured ? null : { label: "Configure", section: "smtp" },
+    },
+    {
+      key: "captcha",
+      label: "CAPTCHA",
+      status: s.captcha_configured ? "ready" : "blocked",
+      detail: s.captcha_configured ? "" : (problemDetail(CAPTCHA_PREFIX) ?? "Not configured."),
+      link: s.captcha_configured ? null : { label: "Configure", section: "captcha" },
+    },
+  ];
+
+  for (const warning of s.warnings) {
+    if (warning.startsWith("No email-domain allowlist")) {
+      checks.push({
+        key: "domains",
+        label: "Email domains",
+        status: "advisory",
+        detail: warning,
+        link: { label: "Review", section: "domains" },
+      });
+    } else if (warning.startsWith("Verification links")) {
+      checks.push({
+        key: "links",
+        label: "Public links",
+        status: "advisory",
+        detail: warning,
+        link: { label: "Configure", section: "server" },
+      });
+    } else {
+      checks.push({
+        key: `warning-${checks.length}`,
+        label: "Advisory",
+        status: "advisory",
+        detail: warning,
+        link: null,
+      });
+    }
+  }
+
+  // A future blocking check outside the two known prefixes is still shown,
+  // rather than leaving "N issues" with no matching row.
+  for (const problem of s.problems) {
+    if (problem.startsWith(SMTP_PREFIX) || problem.startsWith(CAPTCHA_PREFIX)) continue;
+    checks.push({
+      key: `problem-${checks.length}`,
+      label: "Other",
+      status: "blocked",
+      detail: problem,
+      link: null,
+    });
+  }
+  return checks;
+});
+
+const signupBlockingCount = computed(() => signup.value?.problems.length ?? 0);
+
+const signupSummary = computed(() => {
+  const count = signupBlockingCount.value;
+  if (count === 0) return "Required checks pass";
+  return `${count} blocking issue${count === 1 ? "" : "s"}`;
+});
+
+function checkDotClass(status: SignupCheckStatus): string {
+  if (status === "ready") return "bg-emerald-500";
+  if (status === "blocked") return "bg-amber-500";
+  return "bg-muted-foreground/40";
+}
+
+function checkStatusClass(status: SignupCheckStatus): string {
+  if (status === "ready") return "text-emerald-700 dark:text-emerald-400";
+  if (status === "blocked") return "text-amber-700 dark:text-amber-400";
+  return "text-muted-foreground";
+}
+
+function checkStatusLabel(status: SignupCheckStatus): string {
+  if (status === "ready") return "Ready";
+  if (status === "blocked") return "Action needed";
+  return "Advisory";
+}
+
+/// Follows the in-page links without leaving the reader halfway down the
+/// target pane; the link itself still supports opening in a new tab.
+function scrollSettingsTop() {
   document.querySelector("main")?.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -1093,6 +1278,108 @@ function selectSection(key: SettingsSection) {
             {{ runtimeSaving ? "Saving…" : "Save" }}
           </UiButton>
           <span v-if="runtimeSaved" class="text-xs text-muted-foreground">Saved</span>
+        </div>
+      </section>
+
+      <section v-if="section === 'signup' && signup" class="surface-card space-y-5 p-6">
+        <div>
+          <h2 class="text-sm font-semibold tracking-tight">Public sign-up</h2>
+          <p class="mt-1 text-xs text-muted-foreground">
+            Let people create their own account. Nothing is created until the email link is
+            confirmed (30 minutes, single use); new accounts are
+            <code class="text-[11px]">member</code> accounts with no groups. Off by default.
+          </p>
+        </div>
+
+        <!-- One place for every check, blocking and advisory, each with a single
+             link to the section that fixes it. -->
+        <div
+          class="overflow-hidden rounded-lg border"
+          :class="signupBlockingCount ? 'border-amber-600/20' : 'border-border/40'"
+        >
+          <div
+            class="flex items-center justify-between gap-3 border-b border-border/40 bg-muted/20 px-4 py-2.5"
+          >
+            <span class="type-label">Preflight</span>
+            <span
+              class="text-[11px] font-medium"
+              :class="
+                signupBlockingCount
+                  ? 'text-amber-700 dark:text-amber-400'
+                  : 'text-emerald-700 dark:text-emerald-400'
+              "
+            >
+              {{ signupSummary }}
+            </span>
+          </div>
+          <ul class="divide-y divide-border/40">
+            <li v-for="check in signupChecks" :key="check.key" class="flex gap-3 px-4 py-3">
+              <span
+                class="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full"
+                :class="checkDotClass(check.status)"
+              />
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[13px] font-medium">{{ check.label }}</span>
+                    <span
+                      class="text-[10px] uppercase tracking-wide"
+                      :class="checkStatusClass(check.status)"
+                    >
+                      {{ checkStatusLabel(check.status) }}
+                    </span>
+                  </div>
+                  <RouterLink
+                    v-if="check.link"
+                    :to="{ name: 'settings', query: { section: check.link.section } }"
+                    class="text-[11px] font-medium underline underline-offset-2 hover:no-underline"
+                    @click="scrollSettingsTop"
+                  >
+                    {{ check.link.label }} →
+                  </RouterLink>
+                </div>
+                <p
+                  v-if="check.detail"
+                  class="mt-0.5 text-[11px] leading-relaxed text-muted-foreground"
+                >
+                  {{ check.detail }}
+                </p>
+              </div>
+            </li>
+          </ul>
+        </div>
+
+        <label class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3">
+          <input v-model="signupEnabled" type="checkbox" class="mt-0.5 rounded" />
+          <span>
+            <span class="block text-sm font-medium">Allow public sign-up</span>
+            <span class="mt-0.5 block text-xs text-muted-foreground">
+              Shows “Create account” on the sign-in page. Turning it off stops new requests;
+              links already sent stay valid for their remaining 30 minutes.
+            </span>
+          </span>
+        </label>
+
+        <div class="flex flex-wrap items-center gap-3">
+          <UiButton
+            size="sm"
+            :disabled="signupSaving || signupChecking || signupPrereqMissing"
+            @click="onSaveSignup"
+          >
+            {{ signupSaving ? "Saving…" : "Save" }}
+          </UiButton>
+          <UiButton
+            size="sm"
+            variant="secondary"
+            :disabled="signupSaving || signupChecking"
+            @click="recheckSignup"
+          >
+            {{ signupChecking ? "Checking…" : "Re-check" }}
+          </UiButton>
+          <span v-if="signupSaved" class="text-xs text-muted-foreground">Saved</span>
+          <span v-else-if="signupChecked" class="text-xs text-muted-foreground">
+            Checklist updated
+          </span>
         </div>
       </section>
 
