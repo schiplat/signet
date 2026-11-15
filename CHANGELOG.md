@@ -6,6 +6,13 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Deploy compose** takes `SIGNET_DATABASE_URL` and the startup-only
+  `SIGNET_*` settings from the environment, with the database URL required
+  rather than falling back to the localhost default. `deploy/docker-compose.env-file.yml`
+  keeps dotenv compatibility as an optional overlay, not the primary path.
+
 ### Removed
 
 - **OSS config-bundle publishing** — the image workflow now only builds and

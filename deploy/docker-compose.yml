@@ -1,46 +1,49 @@
 # Signet production deploy stack (image pull, no build).
 #
-#   cp ../.env.example .env   # local / temporary testing (plain placeholder values)
-#   docker compose pull
-#   docker compose up -d
+# Primary path: inject the startup-critical variables from the shell / Buz:
+#   SIGNET_IMAGE=... SIGNET_DATABASE_URL=... docker compose up -d
 #
-# The deployment environment provides `.env`: copy the example for a local
-# trial, or have Buz / any other pipeline render it from its own secret store.
-# No config bundle is downloaded from OSS.
+# A dotenv file is still supported as an optional compatibility layer:
+#   cp ../.env.example .env
+#   docker compose -f docker-compose.yml -f docker-compose.env-file.yml up -d
 #
 # First run (no admin yet): open https://<issuer>/ in a browser — the dashboard
 # redirects to /setup where you create the first administrator (email, optional
 # display name, password).
 #
-# signet connects to an EXISTING PostgreSQL via SIGNET_DATABASE_URL (from .env).
-# No database is started here — the `db` service in
-# build/docker-compose.yml is a local-dev convenience only.
+# signet connects to an EXISTING PostgreSQL via SIGNET_DATABASE_URL. No
+# database is started here — the `db` service in build/docker-compose.yml is a
+# local-dev convenience only.
 #
 # On gz4, signet joins the `manager-net` Docker network created by the
-# super-manager stack. The DB URL is composed here (see `environment:`) from
-# the SIGNET_POSTGRES_* vars rendered into .env, reaching Postgres by its service
-# name (`postgres`) on manager-net:
+# super-manager stack, so the database host is `postgres`:
 #   postgres://<user>:<password>@postgres:5432/signet
 # Signet connects as a dedicated, least-privilege `signet` role — NOT the
 # cluster superuser. One-time setup (run as the cluster superuser):
 #   docker exec -it manager-postgres psql -U postgres -c "CREATE ROLE signet LOGIN PASSWORD '<app-password>';"
 #   docker exec -it manager-postgres psql -U postgres -c "CREATE DATABASE signet OWNER signet;"
 #
-# .env lives NEXT TO this file (deploy/.env). `docker compose` reads it for
-# ${VAR} substitution AND as env_file for signet.
+# Compose still reads deploy/.env for ${VAR} substitution when present; that is
+# interpolation, not a requirement. The env_file compatibility overlay is
+# documented in docker-compose.env-file.yml.
 
 services:
   signet:
     image: ${SIGNET_IMAGE:?SIGNET_IMAGE must be set (e.g. <registry>/<namespace>/signet:<tag>)}
     container_name: signet
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      # Compose the DB URL from the SIGNET_POSTGRES_* vars in .env; host =
-      # super-manager's `postgres` service name on manager-net. Signet connects
-      # as its own least-privilege role, never the cluster superuser.
-      SIGNET_DATABASE_URL: postgres://${SIGNET_POSTGRES_USER:-signet}:${SIGNET_POSTGRES_PASSWORD}@postgres:5432/${SIGNET_POSTGRES_DB:-signet}
+      # Required: fail closed instead of falling back to the built-in
+      # localhost/signet default. Buz supplies this from a Secret.
+      SIGNET_DATABASE_URL: ${SIGNET_DATABASE_URL:?SIGNET_DATABASE_URL must be set}
+      # Startup-only settings that cannot be changed from the dashboard. They
+      # default to the application's own defaults; production deployments
+      # should set the real issuer, proxy range and WebAuthn origin.
+      SIGNET_ISSUER: ${SIGNET_ISSUER:-http://localhost:8443}
+      SIGNET_COOKIE_SECURE: ${SIGNET_COOKIE_SECURE:-false}
+      SIGNET_TRUSTED_PROXIES: ${SIGNET_TRUSTED_PROXIES:-}
+      SIGNET_WEBAUTHN_RP_ID: ${SIGNET_WEBAUTHN_RP_ID:-localhost}
+      SIGNET_WEBAUTHN_RP_ORIGIN: ${SIGNET_WEBAUTHN_RP_ORIGIN:-http://localhost:8443}
     ports:
       # Host firewall / reverse proxy restricts access — do NOT expose to the
       # public internet without TLS termination in front (SSO issuer requires
