@@ -1,9 +1,9 @@
 name: Build Signet Image
 
 # Runs only after Release Signet Binary succeeds (or on manual dispatch).
-# Packages the already-built linux/amd64 binary into an image, pushes to ACR
-# and Docker Hub, then uploads the deploy config bundle to OSS. Does not
-# compile Rust or the dashboard.
+# Packages the already-built linux/amd64 and linux/arm64 binaries into a
+# multi-arch image, pushes to ACR and Docker Hub, then uploads the deploy config
+# bundle to OSS. Does not compile Rust or the dashboard.
 #
 # Required secrets / vars:
 #   ACR: ACR_REGISTRY, ACR_NAMESPACE, ACR_USERNAME, ACR_PASSWORD (secrets)
@@ -89,16 +89,17 @@ jobs:
           DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Download linux-amd64 from binary workflow
+      - name: Download Linux binaries from binary workflow
         if: github.event_name == 'workflow_run'
         uses: actions/download-artifact@v4
         with:
-          name: linux-amd64
+          pattern: linux-*
           path: image-context
+          merge-multiple: true
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download linux-amd64 from GitHub Release
+      - name: Download Linux binaries from GitHub Release
         if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -109,16 +110,29 @@ jobs:
           gh release download "${TAG}" \
             --pattern "signet-*-linux-amd64" \
             --dir image-context
+          gh release download "${TAG}" \
+            --pattern "signet-*-linux-arm64" \
+            --dir image-context
 
-      - name: Stage binary for Docker context
+      - name: Stage binaries for the multi-arch build
         shell: bash
         run: |
           set -euo pipefail
-          cd image-context
-          bin="$(ls -1 signet-*-linux-amd64 | head -1)"
-          mv "${bin}" signet
-          chmod +x signet
-          ls -la
+          for arch in amd64 arm64; do
+            mkdir -p "image-context/linux/${arch}"
+            bin="$(ls -1 image-context/signet-*-linux-${arch} | head -1)"
+            mv "${bin}" "image-context/linux/${arch}/signet"
+            chmod +x "image-context/linux/${arch}/signet"
+          done
+          # The Dockerfile copies linux/<TARGETARCH>/signet; drop the
+          # versioned duplicates so the build context stays small.
+          rm -f image-context/signet-*-linux-*
+          find image-context -maxdepth 3 -type f -ls
+
+      # The runtime stage runs apt-get and useradd for each target platform;
+      # QEMU lets the amd64 runner execute those arm64 instructions.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -148,12 +162,12 @@ jobs:
             type=raw,value=${{ steps.ver.outputs.version }}
             type=raw,value=latest
 
-      - name: Build and push (linux/amd64, binary-only)
+      - name: Build and push multi-arch image (linux/amd64 + linux/arm64)
         uses: docker/build-push-action@v6
         with:
           context: image-context
           file: build/Dockerfile.runtime
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

@@ -33,7 +33,7 @@ docker run -d --name signet-db -p 5433:5432 \
 
 **方式 B：Docker 镜像**
 
-每个 release 同步发布运行时镜像（Docker Hub + ACR）；只拉不建的生产编排见 [`deploy/`](./deploy/)：
+每个 release 同步发布多架构运行时镜像（`linux/amd64`、`linux/arm64`）到 Docker Hub + ACR；只拉不建的生产编排见 [`deploy/`](./deploy/)：
 
 ```bash
 cd deploy
@@ -160,7 +160,7 @@ Signet 对外有四个接口面，完整说明见 `docs/`：
 |----------|------|------|
 | **CI** | 源码路径的 Push / PR | Dashboard typecheck + build + 运行时依赖审计；Rust `fmt` / `clippy`（测试在本地推送前跑） |
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
-| **Build Signet Image** | 二进制发布成功后 | 用已构建的 `linux-amd64` 打运行时镜像 → **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
+| **Build Signet Image** | 二进制发布成功后 | 用已构建的二进制打多架构运行时镜像（`linux/amd64`、`linux/arm64`）→ **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`），并上传 deploy 配置包到 OSS |
 
 发版示例：`git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`。
 

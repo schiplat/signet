@@ -20,7 +20,7 @@ stacks below are for containerised integration and rollout.
 | File | Purpose |
 |------|------|
 | `Dockerfile` | Multi-stage: build the dashboard → compile `signet` → slim runtime image |
-| `Dockerfile.runtime` | Used by CI: copies a released binary, no compilation in the image |
+| `Dockerfile.runtime` | Used by CI: copies the released per-architecture binaries into a multi-arch image, no compilation |
 | `docker-compose.yml` | Local: builds `signet` from `Dockerfile`; `--profile dev` optionally starts Postgres |
 
 Run from the **repository root**:
@@ -38,8 +38,9 @@ The `signet` service builds from the repository root and points `env_file` at
 keys, see below).
 
 The release pipeline (`build-signet-image.yml`) uses `build/Dockerfile.runtime`
-to bake the `linux-amd64` binary from a GitHub Release into the runtime image and
-push it to ACR / Docker Hub.
+to bake the `linux-amd64` and `linux-arm64` binaries from a GitHub Release into
+one multi-arch manifest, then pushes it to ACR / Docker Hub. `docker pull`
+selects the matching architecture automatically.
 
 ---
 

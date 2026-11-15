@@ -18,7 +18,7 @@ Signet 把「造镜像」和「跑生产」拆在两个目录，避免根目录�
 | 文件 | 作用 |
 |------|------|
 | `Dockerfile` | 多阶段：构建 Dashboard → 编译 `signet` → 精简运行时镜像 |
-| `Dockerfile.runtime` | CI 用：拷贝已发布的二进制，不在镜像里编译 |
+| `Dockerfile.runtime` | CI 用：把已发布的各架构二进制打进多架构镜像，不在镜像里编译 |
 | `docker-compose.yml` | 本地：用 `Dockerfile` 构建 `signet`；`--profile dev` 可选起 Postgres |
 
 在**仓库根目录**执行：
@@ -33,7 +33,7 @@ docker compose -f build/docker-compose.yml up -d --build
 
 `signet` 服务的 build context 是仓库根；`env_file` 指向 `../.env`。数据卷 `signet_data` 挂到容器内 `/app/data`（JWT / 加密密钥，见下）。
 
-发版流水线（`build-signet-image.yml`）使用 `build/Dockerfile.runtime`，把 GitHub Release 里的 `linux-amd64` 二进制打进运行时镜像并推送到 ACR / Docker Hub。
+发版流水线（`build-signet-image.yml`）使用 `build/Dockerfile.runtime`，把 GitHub Release 里的 `linux-amd64` 与 `linux-arm64` 二进制打进同一个多架构 manifest，再推送到 ACR / Docker Hub；`docker pull` 会自动选择匹配架构。
 
 ---
 

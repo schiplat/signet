@@ -4,16 +4,20 @@
 # `.github/workflows/release-binary.yml` and copied in here — no Rust/Node
 # compile in this stage.
 #
-# Build context must contain a single executable named `signet`
-# (see build-signet-image.yml).
+# The build context carries one binary per target architecture:
+#   linux/amd64/signet
+#   linux/arm64/signet
+# (see build-signet-image.yml). Buildx sets TARGETARCH per platform.
 
 FROM debian:bookworm-slim AS runtime
+# Defaults to amd64 so a hand-built single-arch context still works.
+ARG TARGETARCH=amd64
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home signet
 WORKDIR /app
-COPY signet /usr/local/bin/signet
+COPY linux/${TARGETARCH}/signet /usr/local/bin/signet
 RUN chmod +x /usr/local/bin/signet \
     && mkdir -p /app/data \
     && chown -R signet:signet /app
