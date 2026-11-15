@@ -6,7 +6,7 @@ Signet 的组与部门是**同一棵树**：每个节点有 `kind`（`group` | `
 
 ## 1. 数据模型
 
-组的唯一实体表是 `scim_groups`（迁移 `043_group_tree.sql` 扩展）：
+组的唯一实体表是 `scim_groups`：
 
 | 列 | 说明 |
 |----|------|

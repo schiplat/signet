@@ -117,7 +117,7 @@ cargo run
 | 文档 | 内容 |
 |------|------|
 | [docs/zh-CN/README.md](./docs/zh-CN/README.md) | **文档目录**（从这里开始） |
-| [docs/design.md](./docs/zh-CN/design.md) | 总体设计、角色、安全、路线图 |
+| [docs/design.md](./docs/zh-CN/design.md) | 总体设计、角色、安全、部署拓扑 |
 | [docs/security.md](./docs/zh-CN/security.md) | **安全设计汇总**（凭证存储、认证、会话、MFA、OIDC、审计、密钥） |
 | [docs/client-integration.md](./docs/zh-CN/client-integration.md) | **业务客户端 OIDC 对接**（authorize/token/PKCE/IP 白名单） |
 | [docs/integrations.md](./docs/zh-CN/integrations.md) | **集成对接**（RFC 7591 动态注册 · Webhooks/飞书 · SCIM v2） |

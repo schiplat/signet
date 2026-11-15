@@ -50,7 +50,7 @@ GitHub「Developer settings」式自助注册：**任何登录用户**都可申�
 - **登录趋势**：近 30 日一张图叠加 **当日 / 7 日滚动 / 30 日滚动** 登录次数；右上角仍显示当前 24h·7d·30d 合计
 - **Logins by app**：近 30 天各应用登录次数对比图（Top 10 横向条形；`(direct)` 归并展示）
 - **Browsers / OS**：近 30 天登录事件的浏览器与操作系统分布图
-- 登录明细统一在 **Audit logs** 查看（Overview 不再内嵌最近登录列表，避免与 Audit logs / Activity 重复）
+- 登录明细统一在 **Audit logs** 查看（Overview 不内嵌最近登录列表，避免与 Audit logs / Activity 重复）
 
 ### Directory（staff）
 
@@ -91,7 +91,7 @@ Users 与组织树合并为一页（`/directory`），左侧组织、右侧当�
 - **CAPTCHA**：Turnstile / hCaptcha，作用于登录与密码重置
 - **Runtime policies**：会话/token 有效期、登录尝试与锁定、密码长度/历史、审计保留、全局限流；保存即生效，未保存的字段沿用环境变量
 - **Email relay (SMTP)**：主机/端口/账号/From，保存后可发送测试邮件；密码只写不回显
-- **API tokens**：admin API 机器凭据（PAT），明文仅展示一次
+- **API tokens**：admin API 机器凭据（PAT）。在此创建/吊销（或走 `/api/v1/admin/tokens`）；明文仅展示一次，库中只存哈希；列表显示属主、最近使用与过期时间
 
 ### Integrations（admin only）
 

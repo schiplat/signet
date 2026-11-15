@@ -121,7 +121,7 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 | Document | Contents |
 |----------|----------|
 | [docs/README.md](./docs/README.md) | **Documentation index** — start here |
-| [docs/design.md](./docs/design.md) | Overall design, roles, security, roadmap |
+| [docs/design.md](./docs/design.md) | Overall design, roles, security, deployment topology |
 | [docs/security.md](./docs/security.md) | **Security design summary** (credential storage, auth, sessions, MFA, OIDC, audit, keys) |
 | [docs/client-integration.md](./docs/client-integration.md) | **Client OIDC integration** (authorize/token/PKCE/IP allowlist) |
 | [docs/integrations.md](./docs/integrations.md) | **Integrations** (RFC 7591 dynamic registration · Webhooks/Feishu · SCIM v2) |

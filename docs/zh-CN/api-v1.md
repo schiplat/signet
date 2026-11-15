@@ -5,7 +5,7 @@
 Dashboard / 会话相关管理接口统一挂在 **`/api/v1/...`**。  
 OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见 [client-integration.md](./client-integration.md)）。动态注册 / Webhooks / SCIM 对接示例见 [integrations.md](./integrations.md)。
 
-鉴权：浏览器 Cookie `signet_session`（HttpOnly）。未登录返回 `401`；权限不足返回 `403`。
+鉴权：见[认证](#认证)。未登录返回 `401`；权限不足返回 `403`。
 
 错误体（JSON）：
 
@@ -13,9 +13,101 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 { "error": "message" }
 ```
 
+## 认证
+
+### 浏览器会话（管理台）
+
+管理台使用 `signet_session` Cookie：HttpOnly、`SameSite=Lax`；生效 issuer 为
+https 时自动 `Secure`；有效期取运行时会话策略。请求均为 JSON 并携带
+`credentials: include`；**没有 CSRF token**——Lax Cookie 不会随跨站表单提交，
+且接口只接受 JSON body。
+
+- 通过 `POST /api/v1/login` 登录（密码，必要时 MFA，开启 CAPTCHA 时需带
+  `captcha_token`）；成功后下发 Cookie。
+- 缺失或过期会话返回 `401`（`not authenticated` / `session expired or
+  invalid`）。
+- 需要强制改密的账号，除改密路由外一律 `403`（`password change required`）。
+- 角色不足返回 `403`（例如 member 调用 staff 接口）。
+
+### 机器凭据（admin API token / PAT）
+
+无浏览器场景（脚本、CI、监控）使用：
+
+1. 由 admin 在 **Dashboard → Settings → API tokens** 创建，或调
+   `POST /api/v1/admin/tokens`（`{"name": "...", "expires_in_days": N}`，有效期
+   可选）；明文 `sgn_pat_…` **只展示一次**，库中只存 SHA-256 哈希。
+2. 在受 `require_staff_user` / `require_admin_user` 保护的端点（下文的
+   `/api/v1/admin/*` 表）上以 `Authorization: Bearer sgn_pat_…` 携带，无需
+   Cookie。
+3. token 本身不携带权限：每次请求都重新读取**属主当前**的 role、status 与
+   `must_change_password`；属主被降级、冻结或强制改密后立即失效。
+4. 在同一页面或调 `DELETE /api/v1/admin/tokens/{id}` 吊销，立即生效并记审计。过期或不存在的
+   token 返回 `401`（`invalid or expired API token`）。
+
+两者同时存在时，`Authorization: Bearer` 优先于会话 Cookie。**只有 staff/admin
+守卫的端点接受 PAT**——`/api/v1/me/*` 与登录/SSO 回调只读 Cookie，token 不能
+当作某个用户的会话使用。
+
+### 使用样例
+
+浏览器会话：
+
+```bash
+# 登录并保存 Cookie
+curl -sS -c /tmp/signet.cookies -X POST "$ISSUER/api/v1/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"…"}'
+
+# 复用会话
+curl -sS -b /tmp/signet.cookies "$ISSUER/api/v1/me"
+```
+
+机器凭据（PAT）：
+
+```bash
+# 用 admin 会话创建 token；明文只返回一次
+TOKEN=$(curl -sS -b /tmp/signet.cookies -X POST "$ISSUER/api/v1/admin/tokens" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ci-deploy","expires_in_days":30}' | jq -r .token)
+
+# 不带 Cookie 使用
+curl -sS -H "Authorization: Bearer $TOKEN" "$ISSUER/api/v1/admin/users?limit=1"
+
+# 吊销（创建时响应里的 id 与 token 一起返回）
+curl -sS -b /tmp/signet.cookies -X DELETE "$ISSUER/api/v1/admin/tokens/<id>"
+```
+
+缺少凭据返回 `401 {"error":"not authenticated"}`；token 无效或过期返回
+`401 {"error":"invalid or expired API token"}`。Settings 页面列出每个 token 的
+属主、创建时间、最近使用与过期时间，创建与吊销都走与示例相同的接口。
+
+### 公开端点（无需凭据）
+
+`GET /api/v1/branding`、`GET /api/v1/branding/logo`、`GET
+/api/v1/setup/status`、`POST /api/v1/setup`（仅首次创建管理员）、`POST
+/api/v1/login`、`GET /api/v1/captcha`、`POST /api/v1/password-reset/*`、
+`GET /health`，以及 discovery 文档和浏览器驱动的 OIDC 端点
+（`/oauth/authorize`、`/oauth/consent`、`/oauth/end_session`）。`/oauth/token`、
+`/oauth/revoke`、`/oauth/introspect` 需要客户端认证。
+
+### 其他协议面
+
+- OIDC 客户端在 `/oauth/token`、`/oauth/revoke`、`/oauth/introspect` 的认证：
+  `client_secret_basic` 或 `client_secret_post`；userinfo 使用
+  `Authorization: Bearer <access token>`。见
+  [client-integration.md](./client-integration.md)。
+- SCIM（`/scim/v2/*`）：`Authorization: Bearer <SCIM token>`，在 Integrations →
+  SCIM v2 生成。见 [integrations.md](./integrations.md)。
+- RFC 7591 注册（`POST /oauth/register`）：一次性 initial access token，放在
+  `Authorization: Bearer` 或 `initial_access_token` 字段。
+- Webhook 投递是出站且带签名的，Signet 不向接收方认证；接收方按
+  [integrations.md](./integrations.md) 的签名头校验。
+
+上述所有协议面都受全局限流约束，见 §13。
+
 ---
 
-## 1. 认证与当前用户
+## 1. 登录与当前用户
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -106,7 +198,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 | `POST/DELETE` | `/api/v1/admin/settings/branding/logo` | **admin**：上传/移除 logo。POST `{"data_url":"data:image/png;base64,…"}`，仅 PNG/JPEG/WebP（**拒绝 SVG**，避免同源脚本执行），校验 magic bytes，≤256 KiB；返回 `{logo_set, logo_url}`。审计 `settings.branding_logo_update` / `settings.branding_logo_remove` |
 | `GET` | `/api/v1/branding` | **公开**：`{"name": …, "logo_url": …}`，登录/重置/初始化/同意页无需认证读取产品名与 logo |
 | `GET` | `/api/v1/branding/logo` | **公开**：logo 图片（无则 404）；带版本号查询参数，响应 `Cache-Control: immutable` + `nosniff` |
-| `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问本表全部 admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
+| `GET/POST` | `/api/v1/admin/tokens` | **admin**：机器凭据（PAT）列表 / 创建。创建 `{ "name", "expires_in_days"? }` 返回 `{"id","token":"sgn_pat_…（仅此一次）"}`；调用方在 `Authorization: Bearer` 头携带该 token 即可访问所有 staff/admin 端点（无需会话 Cookie）。token 本身不携带权限：每次调用按**属主当前**的 role/status/must_change_password 校验，属主降级/冻结/改密即失效。审计 actor 记为属主 |
 | `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**：吊销（立即生效） |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**：重置他人 MFA |
 
@@ -161,7 +253,7 @@ OIDC 协议端点仍为 `/oauth/*` 与 `/.well-known/openid-configuration`（见
 
 **`POST /admin/users/batch-disable` 语义**：逐行做权限检查（manager 不能冻结 admin，冻结目标排除自己），返回的 `disabled` 计数包含**所有存在的目标 id**——重复冻结已冻结的账号也计入（操作幂等，重复选择不会少报）；仅不存在的 id 不计入。每个目标账号产生一条审计事件；全部成功后一次性吊销其全部会话。
 
-> `phone` 当前仅作**联系信息**，未做短信验证绑定；验证绑定（SMS OTP）为规划项，见 [design.md](./design.md) Phase 4。
+> `phone` 当前仅作**联系信息**，未做短信验证绑定；验证绑定（SMS OTP）尚未实现，见[文档目录](./README.md#尚未实现)。
 
 ---
 
@@ -212,7 +304,7 @@ Query：可选 `client_id`。传入应用标识时，上述登录类字段（合
 ### `GET /api/v1/admin/audit-logs`
 
 Query：`q`、`action`、`client_id`、`browser`、`os`、`page`、`page_size`、`sort`（含 `ip`）、`dir`。  
-每行含 `ip`、`user_agent`、`browser`、`os`、`client_id`（登录/MFA 等事件有值；`browser`/`os` 由 `User-Agent` 解析；`client_id` 为发起登录的 OAuth 应用，从 2026-09 起的新日志开始记录，历史数据为空）。  
+每行含 `ip`、`user_agent`、`browser`、`os`、`client_id`（登录/MFA 等事件有值；`browser`/`os` 由 `User-Agent` 解析；`client_id` 为发起登录的 OAuth 应用，早期日志该列为空）。  
 manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mfa.reset` / `settings.mfa_update` 等仅 admin。
 
 ### `GET /api/v1/admin/audit-logs/facets`
@@ -355,8 +447,8 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
 
 - JIT **不会**在无验证邮箱时开户（微信开放平台通常无邮箱 → 仍需管理员开户或邀请绑定）。
 - 飞书需在应用侧开通邮箱相关权限，且 profile 能返回 `email` / `enterprise_email`，否则走第 5 步。对 `GET /open-apis/authen/v1/user_info`：`email` 需 **获取用户邮箱信息**（`contact:user.email:readonly`）；`enterprise_email` 另需 **获取用户受雇信息**（`contact:user.employee:readonly`）且租户已启用飞书邮箱。权限在开放平台开通并发布后生效（授权 URL 不带 `scope=`）。
-- 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；跑过迁移 `020` 后以 DB / Settings 为准。
-- **Provider 级覆盖**（迁移 `033`）：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。各平台差异速查：
+- 关闭 / 开启 JIT：Dashboard → **Settings → JIT provision on SSO**（`app_settings.sso.jit_provision`），或 `GET/PATCH /api/v1/admin/settings/sso`。环境变量 `SIGNET_SSO_JIT_PROVISION` 仅在该配置行缺失时作为回退（默认 `true`）；保存过值后以 DB / Settings 为准。
+- **Provider 级覆盖**：每个 provider 可配 `jit_mode`（`inherit` 跟随全局 / `on` 全局关也开 / `off` 全局开也关）与 `email_trust`（`inherit` 按 adapter 上报的验证标志 / `any` 有邮箱即视为已验证 / `verified` 要求上游显式验证标志）。各平台差异速查：
 
   ⚠️ **`any` 的前提是租户管控联系邮箱**：它信任"provider 断言了该邮箱"这件事本身。若上游允许用户自改联系邮箱（飞书个人版、自建 OIDC 等），攻击者可在受害者注册前以 `victim@corp.com` 完成自动绑定 / JIT 开户（预创建劫持）。保存 `email_trust=any` 时服务端会在日志输出警告；仅对管理员统一管控联系邮箱的租户启用。
 
@@ -365,10 +457,10 @@ manager 仅见允许的 action 白名单；`user.delete` / `client.delete` / `mf
   | `github` | 上游如实返回（primary + verified） | `inherit` | 验证邮箱才自动绑定 / 开户 |
   | `google` | 上游如实返回（`email_verified`） | `inherit` | 同上 |
   | `oidc` | 取决于上游，标准字段 | `inherit`；上游不可信时 `verified` 收紧 | 同上 |
-  | `feishu` | **无验证标志**（adapter 如实上报「未验证」） | 自有企业租户 `email_trust=any` + `jit_mode=on`；否则保持 `inherit` | 迁移 033 已把存量飞书 provider 置为 `any` 保持行为；新建默认 `inherit`（只允许绑定，需显式选 `any` 才自动开户） |
+  | `feishu` | **无验证标志**（adapter 如实上报「未验证」） | 自有企业租户 `email_trust=any` + `jit_mode=on`；否则保持 `inherit` | 存量飞书 provider 可设为 `any`；新建默认 `inherit`（只允许绑定，需显式选 `any` 才自动开户） |
   | `wechat` | **无邮箱 API** | 不适用（`email_trust` 无效果） | 依旧豁免邮箱要求，只能绑定已有账号 |
 
-  另：SSO 无法自动绑定 / 开户时暂存的 pending 身份，现在**只会在用户登录后于 Dashboard 显式确认时绑定**（`GET/POST/DELETE /api/v1/auth/sso/pending`，登录后顶部横幅），不再跟随"同一浏览器的下一次登录"自动绑定——共享机器上他人的暂存身份不会再落到你的账号上。确认时会按 provider 当前的邮箱域白名单重新校验。
+  另：SSO 无法自动绑定 / 开户时暂存的 pending 身份，**只会在用户登录后于 Dashboard 显式确认时绑定**（`GET/POST/DELETE /api/v1/auth/sso/pending`，登录后顶部横幅），不会在"同一浏览器的下一次登录"时自动绑定——共享机器上他人的暂存身份不会再落到你的账号上。确认时会按 provider 当前的邮箱域白名单重新校验。
 
   典型组合：企业飞书 / Google Workspace 租户 `jit_mode=on`（可信租户自动开户）；开放注册的 GitHub `jit_mode=off`（只允许绑定已有账号）。
 - 第三方登录只证明上游身份：本地策略（强制改密、TOTP、全局/用户级强制 MFA）在会话签发前照常生效，与密码登录共用同一套 MFA 挑战（挑战行记录来源 `via=sso`）。
@@ -409,7 +501,7 @@ GitHub / Google / 飞书 / 微信 / OIDC 均使用此路径；平台差异只体
 
 链路追踪：所有响应回显 `x-request-id`（透传请求头或生成 UUID），并写入 tracing span，访问日志按 `request_id` 关联。
 
-旧路径 `/api/...`（无 `v1`）已废弃，不再提供 JSON API。
+只有 `/api/v1` 提供 JSON；无版本前缀的 `/api` 不做路由。
 
 ## 14. 登录白名单（邮箱域名）
 

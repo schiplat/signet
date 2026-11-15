@@ -109,7 +109,7 @@ docker compose -f deploy/docker-compose.yml exec -T signet \
   env RUST_LOG=off signet sync sources --json | jq -r '.[].code'
 ```
 
-- 与调度器/手动触发并发时由迁移 `025` 的单运行唯一索引兜底，后来者报 `another sync run for this source is already in progress`。
+- 与调度器/手动触发并发时由单运行部分唯一索引兜底，后来者报 `another sync run for this source is already in progress`。
 - 完整命令、输出、退出码与 `--dry-run` 语义见 [directory-sync.md §9](./directory-sync.md#9-命令行)。
 
 ---

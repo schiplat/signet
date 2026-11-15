@@ -23,7 +23,7 @@
    through**);
 5. Support upstream **push** integrations.
 
-### 1.2 Non-goals (explicitly out of scope for v1)
+### 1.2 Non-goals (explicitly out of scope)
 
 | Not doing | Why |
 |---|---|
@@ -65,7 +65,7 @@
 
 ## 4. Data model
 
-### 4.1 New tables (migration `024_directory_sync.sql`)
+### 4.1 New tables
 
 ```sql
 -- Source configuration
@@ -122,23 +122,23 @@ CREATE TABLE directory_entries (
 CREATE INDEX directory_entries_user_idx ON directory_entries (user_id);
 ```
 
-> `users.external_id` (migration `012`) is **globally unique** and SCIM-facing; it
+> `users.external_id` is **globally unique** and SCIM-facing; it
 > **cannot** serve as a per-source external id. Hence `directory_entries`.
 > One external identity may link to exactly one local user; one local user may be
-> linked by several sources (multi-source, see §17).
+> linked by several sources (multi-source).
 
 ### 4.2 `users` changes
 
 ```sql
 -- Three "disable intent" bits: each authority owns one, none overwrites another
 ALTER TABLE users ADD COLUMN local_disabled     BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;  -- migration 026
-ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;  -- migration 026
--- The SCIM client manages this account's attributes (migration 027)
+ALTER TABLE users ADD COLUMN directory_disabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE users ADD COLUMN scim_disabled      BOOLEAN NOT NULL DEFAULT FALSE;
+-- The SCIM client manages this account's attributes
 ALTER TABLE users ADD COLUMN scim_managed       BOOLEAN NOT NULL DEFAULT FALSE;
 -- Directory-sourced groups, kept apart from local manual groups (§6.5)
 ALTER TABLE users ADD COLUMN directory_groups TEXT[] NOT NULL DEFAULT '{}';
--- Since migration 043 both columns are UUID[]: ids, resolved through signet_group_names()
+-- Both columns are UUID[]: ids, resolved through signet_group_names()
 ```
 
 The effective status is the **OR** of the three bits, locked down by a database
@@ -196,10 +196,9 @@ by hand (`DELETE /directory/sources/{code}` says so), and scanning by owner woul
 then find nobody to release, locking the account permanently. Scanning by
 liveness makes the system self-heal.
 
-> A real lock-up bug lived here: after the SCIM token was revoked nothing released
-> `scim_disabled`, and an SCIM-disabled account could not be enabled by an admin
-> (the constraint forbids it), so **no path** recovered it. `tests/disable_flags.rs`
-> now pins the difference between rotation and revocation.
+> If an authority dies without releasing its intent, the account would stay locked
+> with no way out; scanning by liveness makes the system self-heal.
+> `tests/disable_flags.rs` pins the difference between rotation and revocation.
 
 ### 4.4 Upstream-managed markers: origin and ownership are separate
 
@@ -232,7 +231,7 @@ the directory is the source of truth for attributes).
 | `password_hash` | Local | ❌ | ✅ (always empty for directory users) |
 | `mfa_required` / `totp_enabled` / `totp_secret` | Local | ❌ | ✅ |
 | `role` | **Local** | ❌ | ✅ |
-| `phone` | Local | ❌ (v1) | ✅ |
+| `phone` | Local | ❌ | ✅ |
 | `must_change_password` | Local | ❌ (always `false` for directory users) | ✅ |
 
 **Determining "who manages"**: `authority::managing_authority(pool, user_id) -> Option<Authority>`,
@@ -240,10 +239,10 @@ where `Authority` is `Directory(code)` or `Scim`. The directory takes the
 **highest-priority** source code (`ORDER BY priority ASC, code ASC`; `code` gives a
 deterministic result at equal priority), and directory outranks SCIM.
 
-**Why one query rather than two functions**: the originally planned
-`is_managed(pool, user_id) -> bool` and `managing_source(..) -> Option<String>`
-are two projections of the same query, and every enforcement point needs the code
-to build its error and audit detail ("managed by directory source corp" and
+**Why one query rather than two functions**: `is_managed(pool, user_id) -> bool`
+and `managing_source(..) -> Option<String>` would be two projections of the same
+query, and every enforcement point needs the code to build its error and audit
+detail ("managed by directory source corp" and
 "managed by SCIM" are different sentences); a boolean projection would only add a
 second truth source that drifts.
 
@@ -263,26 +262,20 @@ above.
 collide with a value SCIM overwrites. Moving SCIM groups to `directory_groups` is
 separate work (§6.5, §14).
 
-**Implemented (P0)**:
-
 | Entry point | Behaviour |
 |---|---|
 | `update_user` | Refuses only when the **normalised new value** of `email`/`username`/`display_name` differs from the current one; changes to local fields (`role`/`groups`/`phone`/`mfa_required`/`status`, …) pass through |
 | `delete_user` | Always refused, suggesting disable instead (consistent with D3: upstream deletion only disables, and local should not hard-delete either) |
 | `disable_user` / `enable_user` / `batch_disable_users` | **Allowed**, writing/clearing `users.local_disabled` (below) |
 
-> **One correction to the wording above**: §5 originally listed `disable_user`
-> among the entries that must refuse. But the same D5 table says `status` is
-> "directory + local override, locally changeable (only through
-> `local_disabled`)" — refusing disable would make the promised local override
-> unusable. The implementation therefore **allows it and writes
-> `local_disabled`**. `set_status` now requires the caller to pass
-> `local_disabled`, so any local disable that bypasses that intent is caught at
+> `disable_user` is **allowed** and writes `local_disabled`, because the D5 table
+> says `status` is a directory value plus a local override; refusing disable would
+> make that override unreachable. `set_status` requires the caller to pass
+> `local_disabled`, so a local disable that bypasses the intent is caught at
 > compile time.
 
 > A refused write audits `directory.managed_write_blocked` (`detail = { source,
-> field }`). The sync engine's own `directory.sync.*` / `directory.user.*` events
-> belong to P1, since there was no sync to audit yet.
+> field }`).
 
 ### 5.1 Testability of the refusal policy
 
@@ -424,10 +417,10 @@ one — an operator reading "account disabled" at 3 a.m. must be able to tell
 > ignore the status. The owning source's attributes win — that is what `priority`
 > means.
 >
-> The cost is that groups contributed by a lower-priority source are dropped. v1
-> accepts that (Q5 is still open); when ownership changes, the next run replans.
+> The cost is that groups contributed by a lower-priority source are dropped.
+> When ownership changes, the next run replans.
 
-> **Security**: v1 **does not** auto-claim an existing account by email.
+> **Security**: Signet **does not** auto-claim an existing account by email.
 > Otherwise a malicious or misconfigured directory entry (say
 > `admin@corp.com`) could take over a local admin account. Surfacing the conflict
 > beats silent takeover. If claiming is ever supported it must require: the source
@@ -446,7 +439,7 @@ clobber local manual groups. The split-column approach:
   the claim is repeatable)
 
 On sync, the groups this source contributes are replaced wholesale (since
-migration 043 stored as ids; unknown names create `source='directory'` rows):
+stored as ids; unknown names create `source='directory'` rows):
 
 ```sql
 UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id = $1
@@ -455,7 +448,7 @@ UPDATE users SET directory_groups = signet_group_ids($2, 'directory') WHERE id =
 > This needs changes in the OIDC claim assembly and the dashboard user list — a
 > manageable cost that leaves room for multi-source and local coexistence.
 
-v1 group boundaries:
+Group boundaries:
 
 - Sync **direct members only**; no nested expansion;
 - On the LDAP side, resolve via `member` (OpenLDAP group objects) or `memberOf`
@@ -466,7 +459,7 @@ v1 group boundaries:
   badge) and can be moved under a department; name, membership and existence
   still belong to the sync source.
 
-**Implemented (P1/P2)**: sync fully replaces `users.directory_groups` (`update_user`
+Sync fully replaces `users.directory_groups` (`update_user`
 keeps the existing value when `$5 IS NULL`, so a source with `sync_groups` off
 does not wipe it; a non-null value goes through `signet_group_ids($5,'directory')`);
 on a successful run with `sync_groups` enabled, `source='directory'` groups with
@@ -591,7 +584,7 @@ so `corp.example` matches `corp.example` and `mail.corp.example` but **not**
 language expressive enough for anything is also something the preview cannot
 validate and a typo can silently narrow or empty the scope. Department values are
 compared exactly (trimmed, case-insensitive), with no prefix matching. That gap is
-Q7 in §17: AD often writes departments as a path like `Engineering / Platform`,
+Q3 in §15: AD often writes departments as a path like `Engineering / Platform`,
 in which case `department_attribute` / `department_path` must point at exactly
 that level — a parent name will not match, **and because scope is ownership, a
 mistake disables (`out_of_scope`) rather than merely syncing fewer rows**. Always
@@ -641,8 +634,8 @@ duplicate account. The DN lives only in `external_dn`, for bind.
 
 **Conclusion**: incremental sync is only an optimisation to reduce cost, and a
 periodic full reconciliation (especially for deletion detection) **must** remain.
-Defaults: hourly incremental + daily full; v1 may start with full only and add
-incremental after it works.
+Defaults: hourly incremental + daily full. The current implementation is full
+reconciliation only; incremental can be added later.
 
 ---
 
@@ -667,10 +660,10 @@ Branch by **managing source** instead:
 4. On success continue to begin_login_mfa_flow (unchanged; MFA needs no changes)
 ```
 
-This also fixes the empty-password defect in §15: only unmanaged users reach the
-argon2 branch, and an empty hash must return `401`, not `500`.
+Only unmanaged users reach the argon2 branch; an empty hash returns `401`, never
+`500`.
 
-**Implemented (P2)**:
+The sign-in path resolves as follows:
 
 | Component | Location | Behaviour |
 |---|---|---|
@@ -734,10 +727,10 @@ credential" the rule, because anonymous binds silently return a reduced view).
 Timeouts: connect 5s, operation 10s (configurable); timeouts are **mandatory**, or
 a hung LDAP server exhausts the login thread pool.
 
-### 8.4 Lockout policy (to confirm, §17)
+### 8.4 Lockout policy
 
 Local `failed_login_attempts` and AD's own lockout policy **stack**, potentially
-locking a user out with the causes masking each other. v1 recommendation:
+locking a user out with the causes masking each other. Recommended policy:
 
 - LDAP authentication **failures do not count** towards local lockout (the
   directory's own policy governs);
@@ -756,7 +749,7 @@ locally?" must be answered explicitly.
 ## 9. Command line
 
 Implemented in `directory/cli.rs`. Adding a CLI is a behaviour change for
-`main.rs` (which previously parsed no argv and was env-only), so **no subcommand
+`main.rs` (no subcommand keeps the env-only startup), so **no subcommand
 keeps the old behaviour** (read env → serve), leaving container commands and
 deploy scripts untouched.
 
@@ -771,9 +764,7 @@ signet serve                                                             # same 
 ```
 
 `run`'s connector comes from the source's `kind` (`ldap` / `http_json`); one
-command drives both. The subcommand was renamed from `ldap` to `run` in P4, with
-`ldap` kept as `#[command(visible_alias = "ldap")]` so existing scripts work
-unchanged.
+command drives both. `run` and `ldap` are aliases, so existing scripts need no change.
 
 `--limit` is not just "run fewer": **it also skips the "missing upstream means
 disable" reconciliation** — a truncated snapshot cannot distinguish "deleted"
@@ -847,7 +838,7 @@ entry errors) / `failed`.
   the run closes as `failed` + `error` and a `directory.sync.failed` audit is
   written (a dry run has `run_id = null`). Leaving the failure record is
   deliberate — otherwise a killed process would hold "running" forever.
-- **Concurrency**: migration `025`'s single-run unique index allows one `running`
+- **Concurrency**: a single-run partial unique index on `directory_sync_runs` allows one `running`
   row per source. Racing the dashboard trigger or the scheduler, the later caller
   gets `another sync run for this source is already in progress` (HTTP 409)
   instead of two interleaved syncs. A running run heartbeats every 60 seconds;
@@ -910,8 +901,8 @@ Design:
 - **Replica safety**: take a source-level `pg_try_advisory_lock` (key derived from
   `source_id`) before running and skip when it is held; otherwise every replica
   runs the sync;
-- v1 uses `interval_minutes` (integer) rather than cron expressions, avoiding a
-  cron-parsing dependency; upgrade later if needed;
+- The scheduler uses `interval_minutes` (integer) rather than cron expressions,
+  avoiding a cron-parsing dependency; upgrade later if needed;
 - Run history is written to `directory_sync_runs` and exposed through:
 
 ```text
@@ -926,26 +917,26 @@ GET  /api/v1/admin/directory/sources/{code}/runs/{id}       # one run's detail
 
 Permissions: all require `require_admin_role` (credentials are sensitive).
 
-**Implemented (P3)**: `directory::scheduler` (60-second tick /
+The scheduler consists of `directory::scheduler` (60-second tick /
 `MissedTickBehavior::Delay` / skipping the first immediate tick) plus
 `model::due_sources`. "Due" is decided in one SQL statement: `enabled`,
 `interval_minutes IS NOT NULL`, no **live** running run, and at least the
 interval elapsed since the most recent `started_at`.
 
-> **One deviation from §10: no `pg_try_advisory_lock`.** A session-level advisory
-> lock belongs to the **connection that took it**, and this repository's
+> **No `pg_try_advisory_lock`.** A session-level advisory lock belongs to the
+> **connection that took it**, and this repository's
 > connections come from a pool, borrowed and returned per query — "lock → spawn a
 > task → unlock" spans connections, so the lock does not lock anything, and a lock
 > that does not lock is worse than none because readers assume protection.
 >
-> The real mutex is migration `025`'s partial unique index
+> The real mutex is the partial unique index
 > (`directory_sync_runs (source_id) WHERE status = 'running'`): `begin_run` can
 > insert exactly one row across **all replicas and all trigger modes**
 > (schedule/manual/cli), and the insert happens **before** connecting to the
 > directory. The losing replica gets `Conflict` and writes nothing. A database
 > constraint cannot be forgotten.
 >
-> **Another deviation, and a bug fix**: `due_sources` defines "live" as
+> **A stale run must not block scheduling**: `due_sources` defines "live" as
 > `started_at` within `STALE_RUN_MINUTES`. Treating any `running` row as blocking
 > would let one crashed run stop the source **forever** — the recovery path
 > `fail_stale_runs` only runs inside `open_run`, and `open_run` is only reached
@@ -1022,17 +1013,17 @@ passwords, service-account credentials or bind passwords.
 |---|---|
 | LDAP TLS | LDAPS + certificate verification enforced (D4); the code exposes no skip-verification switch |
 | Credential storage | Service-account passwords / bearer tokens always go through `Encryptor` (AES-256-GCM) into `credential_enc`; **never** plaintext |
-| Outbound SSRF | A new unified outbound module: http(s) only, no redirect following, connect/total timeouts, response-size cap, **private/loopback/link-local addresses blocked (including a second check after DNS resolution, against rebinding)**. LDAP is not HTTP, but the HTTP JSON source (P4) needs it, so it is built in P0 and `webhooks.rs:80` plus federation's `issuer_url` validation switch to it |
+| Outbound SSRF | A new unified outbound module: http(s) only, no redirect following, connect/total timeouts, response-size cap, **private/loopback/link-local addresses blocked (including a second check after DNS resolution, against rebinding)**. LDAP is not HTTP, but the HTTP JSON source needs it, so it is built alongside it and `webhooks.rs:80` plus federation's `issuer_url` validation switch to it |
 | Directory account permissions | Read-only, least privilege (read the user and group subtrees only) |
 | Privilege escalation | Directory data **never** writes `users.role`; groups write only `directory_groups` |
 | Read-only enforcement | Admin endpoints refuse managed-field edits per §5 with `403` and a clear reason |
-| Conflicts do not take over | Auto-claiming an existing account (especially admin/manager) by email is explicitly forbidden in v1 |
+| Conflicts do not take over | Auto-claiming an existing account (especially admin/manager) by email is explicitly forbidden |
 | Passwords | Never stored, logged or cached; bind-through uses only the submitted password |
 | Incidental fix | `webhooks.secret` was **plaintext** while SSO client secrets and TOTP secrets were already encrypted — unify on `Encryptor` |
 
 ---
 
-## 13. Generic HTTP JSON source (P4)
+## 13. Generic HTTP JSON source
 
 Configuration (`kind = 'http_json'`; `config` uses explicit dotted paths and
 `deny_unknown_fields`):
@@ -1074,14 +1065,14 @@ Configuration (`kind = 'http_json'`; `config` uses explicit dotted paths and
   always has another page would loop forever while holding the service token;
 - **Outbound validation**: every page re-runs `outbound::ensure_allowed` (DNS
   rebinding means the save-time check is stale by fetch time), no redirects are
-  followed, and the response-size cap plus connect/total timeouts reuse P0's
+  followed, and the response-size cap plus connect/total timeouts reuse the
   `outbound` module. Saving also checks once
   (`source::ensure_destination_allowed`), same layer as webhooks: a literal
   private address may only be saved with `SIGNET_OUTBOUND_ALLOW_PRIVATE` on;
-- **Reuses P1's mapping and reconciliation layer**: the connector only fetches
+- **Reuses the same mapping and reconciliation layer**: the connector only fetches
   data, producing `Vec<UpstreamUser>` into the same planner / apply / run history
   / audit chain; `engine::fetch_and_plan` is the only place dispatching by kind;
-- **Explicitly not done (v1)**: `method` supports only `GET` (a POST body has no
+- **Explicitly not supported**: `method` supports only `GET` (a POST body has no
   configuration surface, so it errors rather than silently downgrading), no
   wildcard/filter general JSONPath, and no parsing of "group object arrays"
   (`{id,name}` cannot be guessed; report "no groups" rather than inventing names);
@@ -1188,11 +1179,10 @@ picker.
 - **Validate everything, page the output**: `fields`' `resolved/total` and
   `targets`' counts are computed over **all** sample entries (`total ==
   entry_count`); only `rows` are paged by `offset`, 25 per page. They deliberately
-  do not share a number: an earlier version truncated validation to the first 50
-  entries, so one panel showed two denominators, "120 entries" and "10/50", and the
-  smaller one made rare attributes look more common than they are (8% rendered as
-  20%) — exactly the misjudgement the count exists to prevent. Analysis is one
-  in-memory pass and `MAX_SAMPLE_BYTES` caps it, so the cost is negligible;
+  do not share a number: a truncated denominator would make rare attributes look
+  more common than they are (8% rendered as 20%) — exactly the misjudgement the
+  count exists to prevent. Analysis is one in-memory pass and `MAX_SAMPLE_BYTES`
+  caps it, so the cost is negligible;
 - An out-of-range `offset` **falls back to the last page** instead of returning an
   empty table (the sample may shrink between two debounced calls, and an empty
   table reads as "this source has no users"). `page_size` is always the page width
@@ -1235,37 +1225,26 @@ so neither "preview passes but save fails" nor the reverse can occur.
 
 ---
 
-## 14. SCIM inbound push (P5 outline)
+## 14. SCIM inbound push
 
-The existing `/scim/v2` is a SCIM **server**, on the right track, but needs
-hardening to really take Okta / Entra pushes:
+Signet implements the SCIM 2.0 server side, so Okta / Entra can create, update
+and delete users and groups over `/scim/v2/*` behind a bearer token (see
+[integrations.md](./integrations.md)).
 
-| Problem | Location | Fix |
-|---|---|---|
-| `role = 'user'` violates the CHECK (only admin/manager/member), so **user creation always 500s** | `scim.rs` create_user | Use `'member'` |
-| The PATCH body's operation list is named `operations`, while RFC 7644 and IdPs send `Operations`; serde is case-sensitive + `#[serde(default)]` ⇒ an empty list, **the whole body discarded**, yet 200 with an unchanged resource | `scim.rs` `PatchUserBody` / `PatchGroupBody` | Accept both spellings |
-| Operations ignored `op`/`path` and treated everything as a write ⇒ on the group route `remove` **added** members; `{"op":"remove","path":"active"}` without `value` ⇒ silently ineffective; Entra's `{"op":"Replace","path":"active","value":false}` (scalar) ⇒ accepted and ignored | `scim.rs` `patch_user` / `patch_group` | Parse `op`/`path` per RFC 7644 §3.5.2, supporting `active`/`displayName`/`members` |
-| `PATCH /Groups` could only add, never remove | `scim.rs` `patch_group` | Support add/remove/replace |
-| `delete_group` bound an unused `$1` | `scim.rs` `delete_group` | Fix the binding |
-| DELETE returned 200 + an Error schema | `scim.rs` `delete_user` / `delete_group` | Return `204` |
-| Missing audits (no `scim.group.*`) | — | Add them |
-
-Not implemented today: `PATCH /Users` writing `userName` / `emails` (a
-uniqueness conflict needs a defined policy for pushing clients), SCIM `filter`
-support, and moving SCIM group storage onto `directory_groups`. The
-[documentation index](./README.md#not-implemented-yet) keeps the canonical list.
-
-> **The `Operations` item deserves its own note**: it made every PATCH defect above
-> unobservable — a real client's body became an empty list during
-> deserialisation, and the route "successfully" did nothing. The earlier defect
-> analysis ("op/path semantics completely ignored") only held for lowercase
-> bodies; against a real IdP the symptom is "PATCH always returns 200 and nothing
-> changes". Regression tests therefore go through the **body** layer
-> (`user_attrs_from_body` / `group_member_changes_from_body`) rather than calling
-> the interpreter directly — otherwise the bug stays untestable.
-
-The push write path should reuse the sync mapping and conflict logic, and write
-`directory_sync_runs` (`trigger = 'push'`) for a unified run history and audit.
+- **Users**: `POST` creates; `PUT`/`PATCH` update `active` and `displayName`; the
+  PATCH body accepts both `Operations` (RFC 7644) and `operations`; lookups work
+  by UUID, `externalId` or email.
+- **Groups**: `POST` creates; `PATCH` adds and removes members (including Okta's
+  `members[value eq "<id>"]` filter form); `DELETE` tombstones the group (§14.1).
+- **Deletes disable, never remove data** (D3): see §14.1.
+- **Audit granularity is one event per request**, not per affected row — an IdP
+  replacing a 500-person group is one action. Idempotent pushes that change
+  nothing are not audited; the event set is in §11.1.
+- **Not implemented**: `PATCH /Users` writing `userName` / `emails` (a uniqueness
+  conflict needs a defined policy for pushing clients), SCIM `filter` support,
+  and storing SCIM groups in `directory_groups` (they still write the local
+  `users.groups` column). The
+  [documentation index](./README.md#not-implemented-yet) keeps the canonical list.
 
 ### 14.1 Upstream deletes only disable, never remove data (D3 in practice)
 
@@ -1275,15 +1254,15 @@ deletion. Landing points:
 | Entry | Behaviour | Why |
 |---|---|---|
 | `DELETE /scim/v2/Users/{id}` | Set `scim_disabled = TRUE` (`status` derives per §4.2) and `scim_managed = TRUE`; **never delete the row** | `directory_entries.user_id` and the IdP's `externalId` both point at this id. Deleting it would make the next push **open a new account** for the same person, and the old account's sessions, audits and group history would lose their owner — and a mistaken delete is unrecoverable |
-| `DELETE /scim/v2/Groups/{id}` | Set `deleted_at = NOW()`, snapshot members into `members_at_delete` (migration `028`), and remove the group name from every user's `groups` | Both directions must hold: membership **must stop authorising** (`groups` feeds the claim), and a recoverable record **must remain**. Deleting the row would destroy "this group existed and who was in it" |
+| `DELETE /scim/v2/Groups/{id}` | Set `deleted_at = NOW()`, snapshot members into `members_at_delete`, and remove the group name from every user's `groups` | Both directions must hold: membership **must stop authorising** (`groups` feeds the claim), and a recoverable record **must remain**. Deleting the row would destroy "this group existed and who was in it" |
 | An admin deletes a managed account | `403`, suggesting disable | Deletion rights for managed accounts belong upstream (§5) |
 
 **Recreating a same-named group**: `scim_groups.display_name`'s unique constraint
-becomes a partial index over live rows only
+is a partial index over live rows only
 (`scim_groups_live_display_name_key`); otherwise the tombstone would hold the name
 forever and block an IdP recreating it.
 
-### 14.2 Mixed deployments: SCIM and directory sync no longer overwrite each other
+### 14.2 Mixed deployments: SCIM and directory sync do not overwrite each other
 
 When one account is both directory-linked and SCIM-pushed (the three intent bits
 in §4.2 exist for this):
@@ -1299,71 +1278,10 @@ in §4.2 exist for this):
 
 ---
 
-## 15. P0 defect list (prerequisite for every phase)
-
-These were **already broken** in the code and sit on the paths this design
-reuses:
-
-| # | Location | Problem | Fix |
-|---|---|---|---|
-| 1 | `scim.rs:228` | Inserts `role = 'user'`, violating `CHECK (role IN ('admin','manager','member'))` → `POST /scim/v2/Users` always 500s | Use `'member'` |
-| 2 | `mfa/mod.rs:341` | `mfa_challenges.purpose = 'change_password'` violates `CHECK (purpose IN ('login','enroll'))` → forced password change broken | Extend the CHECK or reuse an existing value |
-| 3 | `auth/routes.rs:90` | Users with `password_hash = ''` (SSO JIT / SCIM) make `PasswordHash::new("")` fail, turning into **500** rather than 401 | Branch per §8.1; unmanaged users with an empty hash return 401 |
-| 4 | `scim.rs:684` | `delete_group`'s UPDATE references only `$2` but binds `group.id` first | Fix the binding |
-| 5 | `webhooks.rs:80` | Outbound URLs only checked for an `http(s)://` prefix; no SSRF protection | Adopt §12's unified outbound validation |
-| 6 | `webhooks.rs:87` | `webhooks.secret` stored in plaintext, inconsistent with other secrets | Encrypt with `Encryptor` |
-| 7 | `federation/provider.rs` | Outbound HTTP had no timeout (only webhooks had 10s) | Unify on the outbound module |
-
-> **Where item 6 landed**: `audit::record(pool, event)` became
-> `audit::record(state, event)`, and `webhooks::dispatch` / `deliver_one` take
-> `&AppState` as well, so the delivery path can reach the `Encryptor` to decrypt
-> `secret_enc`. `login_alert::track_login` changed signature too. Existing
-> plaintext is migrated by `bootstrap::encrypt_webhook_secrets` at startup, and
-> that step is **deliberately fatal**: a silent failure would leave `secret_enc`
-> empty and downgrade deliveries to unsigned.
-
-> **Outbound validation compatibility note**: `outbound` rejects targets resolving
-> to private/loopback/link-local addresses by default, so **existing webhooks
-> pointing at intranet addresses start failing** (a `success = false` delivery is
-> recorded). If an intranet receiver must stay, set
-> `SIGNET_OUTBOUND_ALLOW_PRIVATE=true` (deployment-level, off by default; turning
-> it on logs a WARN at startup, and it only relaxes the **address** policy — non
-> http(s) schemes and embedded credentials are still refused). Also: all outbound
-> requests disable redirects, so a provider whose endpoint relies on redirects is
-> affected. `issuer_url` and OIDC discovery use a strict mode (literal address
-> check only, no DNS resolution), so an intranet IdP works fine by hostname.
-
----
-
-## 16. Phasing and acceptance
-
-| Phase | Content | Acceptance |
-|---|---|---|
-| **P0 foundation** | All §15 defects; `is_managed`/read-only semantics; the three tables + `users` changes in §4; audit events; unified outbound module; credential encryption | Existing tests pass; SCIM user creation no longer 500s; forced password change works; empty-password users return 401; an admin editing a directory user is refused |
-| **P1 LDAP sync engine** | Connect/LDAPS; full paged pull; fingerprint comparison; create/update; missing means disable; groups into `directory_groups`; CLI (`--dry-run`, `--json`); manual trigger API; run history | `--dry-run` diff matches a real run; a full run against the target directory succeeds; an upstream deletion disables the user with an audit trail; a second run reports `updated = 0` |
-| **P2 LDAP bind-through** | Branch sign-in per §8; LDAPS bind; fail closed; metrics | Directory users sign in with their directory password and pass MFA normally; a changed password takes effect; LDAP down returns 503 with no fallback |
-| **P3 scheduling** | §10 scheduler + advisory lock; run-history UI entry | Runs on time; two replicas starting together run once; failures audited and metered |
-| **P4 HTTP JSON source** | §13 | One full sync; SSRF cases (private address, redirect, oversized response) all refused |
-| **P4.5 Shared mapping UI** | §13.1 | Paste a sample once and click mappings; preview matches real writes after normalisation; the sample is never stored or logged |
-| **P4.7 Source scope: email domains / departments** | §7.2.1 | Sync only the configured domains/departments; a misconfiguration (0 matches) fails the preview instead of silently emptying; run history distinguishes "left" from "transferred" |
-| **P5 SCIM push hardening** | §14 | Real Okta/Entra pushes can create/update/delete; group add/remove correct; audits complete |
-
-Not implemented today: the upstream sample probe (P4.6). The mapping
-preview takes a pasted sample, so the LDAP group column stays best effort.
-
-> **P1 and P2 must ship together**: syncing users without bind-through means
-> directory users are imported but cannot sign in — the feature is not delivered.
-
----
-
-## 17. Open questions
+## 15. Open questions
 
 | # | Open | Impact |
 |---|---|---|
 | Q1 | Is the first integration target **AD** or **OpenLDAP**? | Decides the `external_id` field, member resolution and incremental fields. Lock down **one** first; do not support both at once |
 | Q2 | User count and expected sync frequency? | Decides `page_size`, batch-transaction size and whether incremental is needed (the full-reconciliation window at 100k users) |
-| Q3 | Should LDAP auth failures increment local lockout? (§8.4 recommends **no**) | Double-lockout risk |
-| Q4 | Adopt the split-column `directory_groups` approach? (§6.5 recommends it) | Affects OIDC claim assembly and dashboard display |
-| Q5 | Must multiple sources co-manage one user? | Affects conflict arbitration (`priority`) and whether `directory_entries` may hold several rows per user |
-| Q6 | Should this document be listed in the README documentation index? | Discoverability |
-| Q7 | Should `department_values` support **hierarchy/prefix** semantics (e.g. "everything under Engineering")? | Today it compares exact values (§7.2.1); if AD writes departments as paths like `Engineering / Platform`, `department_attribute` / `department_path` must point at **exactly that level**, otherwise a configured filter matches nothing. Prefix semantics would loosen the scope test and change the "out of scope means disabled" boundary, requiring follow-up decisions: whether the preview's `scope` row distinguishes "prefix hit" from "exact hit", and whether prefixes split only on `/`. **Not implemented for now** — recorded only |
+| Q3 | Should `department_values` support **hierarchy/prefix** semantics (e.g. "everything under Engineering")? | Today it compares exact values (§7.2.1); if AD writes departments as paths like `Engineering / Platform`, `department_attribute` / `department_path` must point at **exactly that level**, otherwise a configured filter matches nothing. Prefix semantics would loosen the scope test and change the "out of scope means disabled" boundary, requiring follow-up decisions: whether the preview's `scope` row distinguishes "prefix hit" from "exact hit", and whether prefixes split only on `/`. **Not implemented for now** — recorded only |

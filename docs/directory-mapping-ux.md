@@ -245,7 +245,10 @@ Paging therefore lives entirely in `offset` and touches only `rows`.
 
 ### Terminology note (D7)
 
-The `scope` row's purpose line changed as part of D7, and the change is the point: it used to read *"Everything outside it is left alone"*, which was wrong once a scope could disable on absence. It now says the scope is what the source **owns**, and that leaving it disables the account — because that is what actually happens (§7.2.1 of `directory-sync.md`). A hint that reassures the admin about the wrong behaviour is worse than no hint.
+The `scope` row's purpose line says the scope is what the source **owns**, and that
+leaving it disables the account — because that is what actually happens (§7.2.1 of
+`directory-sync.md`). A hint that reassures the admin about the wrong behaviour is
+worse than no hint.
 
 ---
 

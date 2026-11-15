@@ -6,7 +6,7 @@
 |---|---|
 | Project | **Signet** |
 | Role | Organisation-wide identity service (OIDC IdP) |
-| Production entry (future) | `https://sso.example.com` |
+| Production example | `https://sso.example.com` |
 | Development issuer | `http://localhost:8443` (default; a value saved under Dashboard → Settings → Server identity wins, and `SIGNET_ISSUER` only seeds/falls back) |
 | Protocol | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
 | First client | Cella (intranet deployment with outbound access) |
@@ -25,11 +25,11 @@
 - Provide a stable identity key (`sub`) and basic user information so the
   business side can authorise
 
-### 1.2 Non-goals (first phase)
+### 1.2 Non-goals
 
 - Not a replacement for each system's **fine-grained business permissions**
   (dataset ACLs, operation policies stay in the business system)
-- No full WeCom / DingTalk sync (possible future IdP connectors)
+- No WeCom / DingTalk connectors or SAML; every client speaks OIDC
 - No general API gateway, billing or app store
 - No shared naming or config prefix with Alibaba Cloud OSS (object storage)
 
@@ -111,7 +111,7 @@ Discovery (supported):
 GET https://sso.example.com/.well-known/openid-configuration
 ```
 
-### 3.3 Core endpoints (first phase)
+### 3.3 Core endpoints
 
 | Endpoint | Method | Notes |
 |------|------|------|
@@ -196,7 +196,7 @@ AuthorizationCode / RefreshToken / Session
 - `email` (when present)
 - `name` or `preferred_username`
 
-**Optional (may be empty early on):**
+**Optional:**
 
 - `groups` / `roles` — starting data for the business side's role mapping, not a
   substitute for business ACLs
@@ -239,8 +239,8 @@ User → Cella UI/API (not signed in)
 3. Signet clears its own SSO session, so other connected subsystems require a
    fresh sign-in next time
 
-The first phase may implement step 1 only; steps 2–3 are a unified-logout
-enhancement.
+Clearing the local business session is enough for many deployments; steps 2–3
+add unified logout across connected systems.
 
 ### 5.3 Account lifecycle and roles (settled)
 
@@ -343,8 +343,7 @@ code does not bind itself to Signet implementation details.
 - Observability: `/metrics` exposes login/token/MFA counters and HTTP metrics
   (Prometheus text format); request logs carry `x-request-id` for correlation
 
-> Implementation status (done/planned) plus the full key and configuration
-> inventory: **[security.md](./security.md)**.
+> The full key and configuration inventory is in **[security.md](./security.md)**.
 
 ---
 
@@ -366,113 +365,7 @@ bind implementation details.
 
 ---
 
-## 9. Roadmap
-
-### Phase 0 — contract and skeleton
-
-- This design settles
-- Repository `signetproject`, DNS certificate, base deployment manifests
-
-### Phase 1 — minimum usable IdP (for business systems)
-
-- User + ClientApp CRUD (config file / simple admin may come first)
-- authorize / token / jwks / userinfo
-- Sign-in page + PKCE
-- Discovery document
-- Client registration
-
-### Phase 2 — sessions and operations
-
-- Refresh rotation, revoke
-- Unified logout
-- Dashboard (user disable, app management, audit search)
-- Monitoring and alerting
-
-### Phase 3 — extensions
-
-- groups/roles claims
-- External IdP federation (WeCom, …)
-- Multi-tenant / multi-environment isolation
-
-### Phase 4 — security hardening
-
-Ordered by priority:
-
-| Priority | Feature | Notes |
-|--------|------|------|
-| P0 | Password reset/recovery | `/api/v1/password-reset/*`; 30-minute single-use token; real SMTP delivery (503 without one) |
-| P0 | **SMS-verified phone binding** | Needs an SMS gateway; `phone` is currently unverified contact information |
-| P0 | RFC 7009 revocation endpoint | Dedicated `/oauth/revoke` |
-| P0 | WebAuthn/passkey + recovery codes | Register/sign-in/manage; challenges in memory |
-| P1 | New device/IP sign-in alerts | `login_devices` + `auth.new_device` audit/alert mail |
-| P1 | Global API rate limiting | Per-IP sliding window, 429 on excess |
-
-### Phase 5 — integrations and operations
-
-| Priority | Feature | Notes |
-|--------|------|------|
-| P1 | OAuth dynamic client registration | RFC 7591 `/oauth/register` + single-use registration token |
-| P2 | SCIM v2 user/group sync | `/scim/v2/Users`, `/scim/v2/Groups` |
-| P2 | Webhook event delivery | Async audit delivery with HMAC signatures |
-
-### Phase 6 — monitoring and observability
-
-| Priority | Feature | Notes |
-|--------|------|------|
-| P1 | HTTP metrics | Request counts (by class) / in-flight / latency histograms on `/metrics` |
-| P1 | Health-check hardening | `/health` probes Postgres, 503 on failure |
-| P2 | Alerting integration | Feed Prometheus metrics into Alertmanager |
-| P2 | Tracing / request id | `x-request-id` generation/passthrough/echo + tracing span correlation |
-
-Not implemented today: **SMS-verified phone binding** and the
-**Alertmanager integration**. Everything else in the phases above shipped; the
-documentation index keeps the canonical list.
-
-### Connectors and SAML (reviewed against peers; scope unchanged, with triggers)
-
-A peer comparison (Keycloak / Authentik / Zitadel) re-examined two gaps, and the
-conclusion is to **keep the original scope decision**:
-
-**DingTalk / WeCom connectors — not built; start on demand.**
-- The non-goals section already said so (§1.2): "no full WeCom/DingTalk sync
-  (possible future IdP connectors)", with federation in Phase 3.
-- This organisation's identity source is **Feishu** (its login connector, webhook
-  alert format and e2e coverage); the repository has no DingTalk/WeCom consumer.
-- Trigger: the first concrete system that needs DingTalk or WeCom sign-in/sync;
-  implement then, following the Feishu connector's shape (an S–M each).
-
-**SAML — not built, with technical justification.**
-- The repository and every client speak OIDC; there is no SAML SP consumer.
-- The Rust ecosystem has no mature SAML toolkit (compare Python's python3-saml or
-  Java's OpenSAML): either an immature crate or hand-written XML signatures and
-  canonicalisation — precisely the historical home of XML signature-wrapping
-  attacks. The security review turns an L into an XL.
-- **A bridge already exists**: Signet's generic OIDC upstream connector can sit
-  behind a SAML-capable IdP (Keycloak/ADFS), turning "an upstream only speaks
-  SAML" into a standard federation integration without Signet implementing SAML.
-- Trigger: a downstream SP that cannot move to OIDC and must be connected;
-  separate project, including a dedicated XMLDsig security review.
-
-### Group identity and the organisation tree
-
-- `users.groups` / `users.directory_groups` store `UUID[]` (migration `043`);
-  reads resolve names through `signet_group_names()`, writes go through
-  `signet_group_ids(names, src)`, and an unknown name creates a row for `src`
-- `scim_groups` gained `parent_id` / `kind` (department|group) / `source`
-  (local|scim|directory) and became the single group entity and tree
-- The OIDC `groups` claim still emits names, **direct membership only**, with no
-  ancestor inheritance
-- Directory sync writes ids into `directory_groups` (`src='directory'`) and, on a
-  successful run with `sync_groups` enabled, sweeps empty child-less directory
-  groups (tombstones)
-- SCIM `/Groups` only sees `source='scim'` groups; on delete, children move up
-  and members are released
-- The dashboard gained a **Directory** page (tree + members; staff manage, only
-  admin deletes; non-local nodes can only be moved)
-
----
-
-## 10. Configuration and key naming
+## 9. Configuration and key naming
 
 Stop using the `OSS_*` prefix. Suggested:
 
@@ -490,7 +383,7 @@ one; **never** use `OSS_` for this service.
 
 ---
 
-## 11. Terminology
+## 10. Terminology
 
 | Legacy phrasing | Standard term |
 |------------|------------|
@@ -499,28 +392,3 @@ one; **never** use `OSS_` for this service.
 | Alibaba Cloud OSS | Object storage (unrelated to this project) |
 
 ---
-
-## 12. Open questions
-
-1. Final domains and `redirect_uri` values for each business system (registered
-   in the dashboard or through dynamic registration)
-2. Cookie session vs business-side JWT session (each business decides; Signet
-   only issues OIDC tokens)
-3. Whether production uses separate issuer / keys / database (isolated from
-   development)
-
-Settled: users are local accounts created by administrators in the first phase;
-confidential clients + PKCE; development never uses the production domain.
-
----
-
-## Revision history
-
-| Date | Change |
-|------|------|
-| 2026-08-13 | First draft: Signet positioning, OIDC+PKCE, public/intranet topology, Cella boundary and phasing |
-| 2026-08-13 | Account model: admin provisioning + bootstrap admin; development issuer and the `dashboard/` frontend convention |
-| 2026-08-13 | Implementation: brute-force protection, password policy, session management, groups claims, OIDC consent, audit export/retention, Prometheus metrics |
-| 2026-08-13 | Roadmap gained Phase 4/5: password reset, refresh rotation/revocation, WebAuthn, sign-in alerts, rate limiting, client management + dynamic registration, SCIM, webhooks |
-| 2026-08-13 | Implemented Phase 4/5/6 (except SMS verification, alerting and tracing): revocation, password reset, passkeys, sign-in alerts, rate limiting, dynamic registration, SCIM, webhooks, HTTP metrics and health checks |
-| 2026-08-13 | Added: user self-service MFA disable (when not enforced), the Users MFA status column, optional-scope consent, the `phone` scope / `phone_number` claim, `x-request-id` tracing |

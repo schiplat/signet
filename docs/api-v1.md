@@ -7,8 +7,8 @@ OIDC protocol endpoints stay at `/oauth/*` and
 `/.well-known/openid-configuration` (see [client-integration.md](./client-integration.md)).
 Dynamic registration / webhooks / SCIM examples: [integrations.md](./integrations.md).
 
-Authentication: the browser cookie `signet_session` (HttpOnly). An unauthenticated
-call returns `401`; insufficient permission returns `403`.
+Authentication: see [Authentication](#authentication). An unauthenticated call
+returns `401`; insufficient permission returns `403`.
 
 Error body (JSON):
 
@@ -16,9 +16,109 @@ Error body (JSON):
 { "error": "message" }
 ```
 
+## Authentication
+
+### Browser sessions (the dashboard)
+
+The dashboard authenticates with the `signet_session` cookie: HttpOnly,
+`SameSite=Lax`, `Secure` whenever the effective issuer is https, lifetime from
+the runtime session policy. Requests are JSON with `credentials: include`; there
+is no CSRF token — a Lax cookie is not sent on cross-site form posts, and the API
+accepts JSON bodies only.
+
+- Sign in with `POST /api/v1/login` (password, then MFA when required, plus a
+  `captcha_token` when the gate is on). A successful sign-in sets the cookie.
+- A missing or expired session returns `401` (`not authenticated` / `session
+  expired or invalid`).
+- A signed-in account that must change its password gets `403` (`password change
+  required`) everywhere except the password-change route.
+- Role checks return `403` (for example a member calling a staff endpoint).
+
+### Machine credentials (admin API tokens, PAT)
+
+For automation without a browser:
+
+1. As an admin, create a token under **Dashboard → Settings → API tokens**, or
+   with `POST /api/v1/admin/tokens` (`{"name": "...", "expires_in_days": N}`;
+   the expiry is optional). The plaintext `sgn_pat_…` is shown exactly once and
+   only its SHA-256 hash is stored.
+2. Send it as `Authorization: Bearer sgn_pat_…` on any endpoint guarded by
+   `require_staff_user` / `require_admin_user` (the `/api/v1/admin/*` tables
+   below); no cookie is needed.
+3. The token carries no permissions of its own: every request re-reads the
+   owner's current role, status and `must_change_password`. Demoting, freezing or
+   forcing a password change on the owner invalidates it immediately.
+4. Revoke it from the same page or with `DELETE /api/v1/admin/tokens/{id}`;
+   revocation is immediate and audited. An expired or unknown token returns `401` (`invalid or expired API
+   token`).
+
+When both are present, `Authorization: Bearer` takes precedence over the session
+cookie. Only staff/admin-guarded endpoints accept a PAT — `/api/v1/me/*` and the
+sign-in/SSO-callback routes read the cookie only, so a token cannot act as a user
+session.
+
+### Examples
+
+Browser session:
+
+```bash
+# Sign in and keep the cookie
+curl -sS -c /tmp/signet.cookies -X POST "$ISSUER/api/v1/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"…"}'
+
+# Reuse it
+curl -sS -b /tmp/signet.cookies "$ISSUER/api/v1/me"
+```
+
+Admin API token:
+
+```bash
+# Create a token with an admin session; the plaintext is returned once
+TOKEN=$(curl -sS -b /tmp/signet.cookies -X POST "$ISSUER/api/v1/admin/tokens" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"ci-deploy","expires_in_days":30}' | jq -r .token)
+
+# Use it without a cookie
+curl -sS -H "Authorization: Bearer $TOKEN" "$ISSUER/api/v1/admin/users?limit=1"
+
+# Revoke it (the id is returned next to the token when it is created)
+curl -sS -b /tmp/signet.cookies -X DELETE "$ISSUER/api/v1/admin/tokens/<id>"
+```
+
+A missing credential answers `401 {"error":"not authenticated"}`; a bad or
+expired token answers `401 {"error":"invalid or expired API token"}`. The
+Settings page lists every token with its owner, creation time, last use and
+expiry, and creates and revokes through the same endpoints as the examples.
+
+### What is public
+
+No credential: `GET /api/v1/branding`, `GET /api/v1/branding/logo`,
+`GET /api/v1/setup/status`, `POST /api/v1/setup` (first admin only),
+`POST /api/v1/login`, `GET /api/v1/captcha`, `POST /api/v1/password-reset/*`,
+`GET /health`, and the discovery document plus the browser-driven OIDC endpoints
+(`/oauth/authorize`, `/oauth/consent`, `/oauth/end_session`). `/oauth/token`,
+`/oauth/revoke` and `/oauth/introspect` require client authentication instead.
+
+### Other surfaces
+
+- OIDC client authentication at `/oauth/token`, `/oauth/revoke` and
+  `/oauth/introspect`: `client_secret_basic` or `client_secret_post`; userinfo
+  takes the access token as `Authorization: Bearer`. See
+  [client-integration.md](./client-integration.md).
+- SCIM (`/scim/v2/*`): `Authorization: Bearer <SCIM token>`, generated under
+  Integrations → SCIM v2. See [integrations.md](./integrations.md).
+- RFC 7591 registration (`POST /oauth/register`): a single-use initial access
+  token, sent as `Authorization: Bearer` or as `initial_access_token`.
+- Webhook delivery is outbound and signed, not authenticated by Signet; the
+  receiver verifies the signature headers documented in
+  [integrations.md](./integrations.md).
+
+The global rate limit applies to every surface above; see §13.
+
 ---
 
-## 1. Authentication and the current user
+## 1. Sign-in and the current user
 
 | Method | Path | Notes |
 |------|------|------|
@@ -127,7 +227,7 @@ See [mfa.md](./mfa.md).
 | `POST/DELETE` | `/api/v1/admin/settings/branding/logo` | **admin**: upload/remove the logo. POST `{"data_url":"data:image/png;base64,…"}`, PNG/JPEG/WebP only (**SVG refused**, to prevent same-origin script execution), magic-byte checked, ≤256 KiB; returns `{logo_set, logo_url}`. Audits `settings.branding_logo_update` / `settings.branding_logo_remove` |
 | `GET` | `/api/v1/branding` | **Public**: `{"name": …, "logo_url": …}`; the sign-in/reset/setup/consent pages read the name and logo without authentication |
 | `GET` | `/api/v1/branding/logo` | **Public**: the logo image (404 when unset); the versioned query parameter comes with `Cache-Control: immutable` + `nosniff` |
-| `GET/POST` | `/api/v1/admin/tokens` | **admin**: machine credentials (PAT) list / create. Create `{ "name", "expires_in_days"? }` returns `{"id","token":"sgn_pat_… (once)"}`; callers send it as `Authorization: Bearer` to any admin endpoint in this table (no session cookie). The token carries no permissions of its own: every call re-checks the **owner's current** role/status/must_change_password, so a demotion, freeze or password change kills it. The audit actor is the owner |
+| `GET/POST` | `/api/v1/admin/tokens` | **admin**: machine credentials (PAT) list / create. Create `{ "name", "expires_in_days"? }` returns `{"id","token":"sgn_pat_… (once)"}`; callers send it as `Authorization: Bearer` to any staff/admin endpoint (no session cookie). The token carries no permissions of its own: every call re-checks the **owner's current** role/status/must_change_password, so a demotion, freeze or password change kills it. The audit actor is the owner |
 | `DELETE` | `/api/v1/admin/tokens/{id}` | **admin**: revoke (immediate) |
 | `POST` | `/api/v1/admin/users/{id}/mfa/reset` | **admin**: reset another user's MFA |
 
@@ -207,7 +307,7 @@ under-reported); only non-existent ids are excluded. Each target produces its ow
 audit event; after all succeed, all their sessions are revoked at once.
 
 > `phone` is currently **contact information** only, with no SMS verification.
-> SMS OTP binding is planned; see [design.md](./design.md) Phase 4.
+> SMS OTP binding is not implemented; see the [documentation index](./README.md#not-implemented-yet).
 
 ---
 
@@ -270,8 +370,8 @@ Query: `q`, `action`, `client_id`, `browser`, `os`, `page`, `page_size`, `sort`
 (including `ip`), `dir`.
 Rows carry `ip`, `user_agent`, `browser`, `os`, `client_id` (set for
 login/MFA-style events; `browser`/`os` are parsed from `User-Agent`; `client_id`
-is the OAuth app that started the sign-in — recorded from September 2026 onwards,
-empty in older rows).
+is the OAuth app that started the sign-in; it is empty for rows written before
+app attribution existed).
 Managers see an allowlist of actions only; `user.delete` / `client.delete` /
 `mfa.reset` / `settings.mfa_update` and similar are admin-only.
 
@@ -502,8 +602,8 @@ Notes:
 - Toggle JIT under Dashboard → **Settings → JIT provision on SSO**
   (`app_settings.sso.jit_provision`), or `GET/PATCH /api/v1/admin/settings/sso`.
   `SIGNET_SSO_JIT_PROVISION` only backs the setting while the row is absent
-  (default `true`); after migration `020` the DB/Settings win.
-- **Per-provider overrides** (migration `033`): each provider may set `jit_mode`
+  (default `true`); once a value is saved, the DB/Settings win.
+- **Per-provider overrides**: each provider may set `jit_mode`
   (`inherit` follows the global switch / `on` provisions even when globally off /
   `off` refuses even when globally on) and `email_trust` (`inherit` uses the
   adapter's verification flag / `any` treats any email as verified / `verified`
@@ -522,15 +622,15 @@ Notes:
   | `github` | Reported faithfully (primary + verified) | `inherit` | Auto-bind/provision only on a verified email |
   | `google` | Reported faithfully (`email_verified`) | `inherit` | Same |
   | `oidc` | Depends on the upstream, standard field | `inherit`; use `verified` when the upstream cannot be trusted | Same |
-  | `feishu` | **No verification flag** (the adapter reports "unverified") | Company tenant: `email_trust=any` + `jit_mode=on`; otherwise keep `inherit` | Migration 033 set existing Feishu providers to `any` to preserve behaviour; new ones default to `inherit` (bind only; auto-provisioning requires choosing `any`) |
+  | `feishu` | **No verification flag** (the adapter reports "unverified") | Company tenant: `email_trust=any` + `jit_mode=on`; otherwise keep `inherit` | Existing Feishu providers may be set to `any`; new ones default to `inherit` (bind only; auto-provisioning requires choosing `any`) |
   | `wechat` | **No email API** | Not applicable (`email_trust` has no effect) | Still exempt from the email requirement; can only bind an existing account |
 
-  Also: a pending identity stashed when SSO could not auto-bind/provision is now
-  bound **only when the user explicitly confirms it in the dashboard after
-  signing in** (`GET/POST/DELETE /api/v1/auth/sso/pending`, a banner at the top
-  after sign-in) and no longer auto-binds on "the next sign-in from the same
-  browser" — so someone else's stashed identity on a shared machine cannot land
-  on your account. Confirmation re-checks the provider's current email-domain
+  A pending identity stashed when SSO could not auto-bind/provision is bound
+  **only when the user explicitly confirms it in the dashboard after signing
+  in** (`GET/POST/DELETE /api/v1/auth/sso/pending`, a banner at the top after
+  sign-in). It is not bound automatically on the next sign-in from the same
+  browser, so someone else's stashed identity on a shared machine cannot land on
+  your account. Confirmation re-checks the provider's current email-domain
   allowlist.
 
   Typical combinations: company Feishu / Google Workspace tenants use
@@ -588,7 +688,7 @@ Request correlation: every response echoes `x-request-id` (passed through or a
 generated UUID) and writes it into the tracing span; access logs correlate on
 `request_id`.
 
-The legacy `/api/...` paths (without `v1`) are retired and no longer serve JSON.
+Only `/api/v1` serves JSON; the unversioned `/api` prefix is not routed.
 
 ## 14. Sign-in allowlist (email domains)
 

@@ -71,8 +71,8 @@ an OAuth client and becomes its owner, with no administrator approval involved.
   live check panel (issuer reachability/HTTPS, SMTP completeness, first enabled
   client). Required steps cannot be dismissed until they pass; SMTP is optional and
   does not block. Once dismissed it reopens from the header (`Setup guide · n/4`)
-- Sign-in detail lives in **Audit logs** (Overview no longer inlines a recent list,
-  to avoid duplicating Audit logs / Activity)
+- Sign-in detail lives in **Audit logs** (Overview does not inline a recent list, to avoid duplicating Audit logs /
+  Activity)
 
 ### Directory (staff)
 
@@ -136,8 +136,9 @@ same pane:
   immediately; fields nobody saved keep following the environment
 - **Email relay (SMTP)**: host / port / username / From, with a test message after
   saving; the password is write-only and never echoed back
-- **API tokens**: machine credentials for the admin API (a PAT). The plaintext is shown
-  once and only its hash is stored
+- **API tokens**: machine credentials for the admin API (a PAT). Create and revoke
+  them here (or through `/api/v1/admin/tokens`); the plaintext is shown once and
+  only its hash is stored, and the list shows owner, last use and expiry
 
 ### Integrations (admin only)
 
