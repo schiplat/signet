@@ -230,10 +230,22 @@ function onLogoClick(e: MouseEvent) {
     <div v-if="!ui.isCollapsed" class="px-4 pb-4">
       <div class="border-t border-sidebar-border/80 pt-3">
         <p
-          class="px-1 text-left text-[11px] tabular-nums text-muted-foreground"
-          :title="`${branding.name} Signet v${appVersion}`"
+          class="flex flex-wrap items-center px-1 text-left text-[11px] tabular-nums text-muted-foreground"
+          :title="`Signet v${appVersion}`"
         >
-          {{ branding.name }}<span class="px-1.5 text-muted-foreground/45">·</span>v{{ appVersion }}
+          <span>Signet</span>
+          <span class="px-1.5 text-muted-foreground/45">·</span>
+          <span>v{{ appVersion }}</span>
+          <span class="px-1.5 text-muted-foreground/45">·</span>
+          <a
+            href="https://github.com/schiplat/signet/blob/master/docs/README.md"
+            target="_blank"
+            rel="noreferrer"
+            class="rounded transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/30"
+            title="Documentation on GitHub"
+          >
+            Docs<span aria-hidden="true"> ↗</span>
+          </a>
         </p>
       </div>
     </div>
