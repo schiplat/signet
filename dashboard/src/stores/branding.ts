@@ -12,6 +12,8 @@ import { fetchBranding } from "@/lib/api";
  */
 export const useBrandingStore = defineStore("branding", () => {
   const name = ref("Signet");
+  /** Versioned logo URL from the public branding endpoint; null = initials. */
+  const logoUrl = ref<string | null>(null);
   let started = false;
 
   async function load() {
@@ -20,11 +22,19 @@ export const useBrandingStore = defineStore("branding", () => {
     try {
       const res = await fetchBranding();
       if (res.name) name.value = res.name;
+      logoUrl.value = res.logo_url ?? null;
     } catch {
       /* keep the default */
     }
-    document.title = name.value;
+    // The router composes "<page> · <name>"; a late load must only replace the
+    // brand part, never drop the page prefix.
+    const suffix = " · Signet";
+    if (document.title.endsWith(suffix)) {
+      document.title = document.title.slice(0, -suffix.length) + ` · ${name.value}`;
+    } else if (document.title === "Signet" || document.title === "Signet · Identity") {
+      document.title = name.value;
+    }
   }
 
-  return { name, load };
+  return { name, logoUrl, load };
 });

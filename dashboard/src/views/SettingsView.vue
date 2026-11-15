@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import BrandLogo from "@/components/ui/BrandLogo.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import {
@@ -15,7 +17,9 @@ import {
   fetchSsoSettings,
   me,
   resetBrandingSettings,
+  removeBrandingLogo,
   resetCaptchaSettings,
+  resetServerSettings,
   resetSmtpSettings,
   revokeApiToken,
   testSmtp,
@@ -25,6 +29,7 @@ import {
   updateRuntimeSettings,
   updateServerSettings,
   updateSignInSettings,
+  uploadBrandingLogo,
   updateSmtpSettings,
   updateSsoSettings,
   type ApiToken,
@@ -108,9 +113,10 @@ const allowlistLocksMeOut = computed(() => {
 
 // --- Server identity: the issuer -----------------------------------------
 //
-// The environment always wins (read-only field) and the first save locks the
-// value: changing it invalidates outstanding tokens and every client config,
-// so it is deliberately harder to do by accident than a policy tweak.
+// The database wins over the environment: SIGNET_ISSUER only seeds the value
+// until a dashboard save, so this field stays editable even when the variable
+// is set. The first save locks the value — changing it invalidates outstanding
+// tokens and every client config — and Reset clears the override.
 const server = ref<ServerSettings | null>(null);
 const serverIssuer = ref("");
 const serverSaving = ref(false);
@@ -148,6 +154,7 @@ async function onSaveServerIssuer() {
       message:
         `Every token minted so far stops validating (they carry the old iss), and every ` +
         `client plus third-party SSO callback must be reconfigured to ${next}. ` +
+        `The saved value overrides SIGNET_ISSUER; Reset override restores it. ` +
         `Sessions stay valid and you will not be signed out. Continue?`,
       confirmText: "Change issuer",
       danger: true,
@@ -166,6 +173,35 @@ async function onSaveServerIssuer() {
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Issuer save failed";
     serverIssuer.value = server.value.issuer;
+  } finally {
+    serverSaving.value = false;
+  }
+}
+
+async function onResetServer() {
+  if (!server.value) return;
+  if (
+    !(await confirm({
+      title: "Reset the issuer override?",
+      message:
+        `The saved issuer is cleared and the value falls back to ` +
+        `${server.value.env_fallback ? "SIGNET_ISSUER" : "the built-in default"}. ` +
+        `Tokens carrying the current iss stop validating. Continue?`,
+      confirmText: "Reset",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
+  error.value = "";
+  serverSaving.value = true;
+  try {
+    const res = await resetServerSettings();
+    server.value = res;
+    serverIssuer.value = res.issuer;
+    markServerSaved();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Reset failed";
   } finally {
     serverSaving.value = false;
   }
@@ -553,9 +589,78 @@ const brandingName = ref("");
 const brandingSaving = ref(false);
 const brandingSaved = ref(false);
 
+// Logo: the browser reads the file and posts a data URL; the server validates
+// the MIME, the magic bytes and a 256 KiB cap (SVG is rejected there — it can
+// execute script when navigated to from this origin).
+const LOGO_MAX_BYTES = 256 * 1024;
+const logoInput = ref<HTMLInputElement | null>(null);
+const logoSet = ref(false);
+const logoBusy = ref(false);
+
 async function refreshBranding() {
   const res = await fetchBrandingSettings();
   brandingName.value = res.name;
+  logoSet.value = res.logo_set;
+  branding.logoUrl = res.logo_url;
+}
+
+async function onPickLogo(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  error.value = "";
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    error.value = "Logo must be a PNG, JPEG or WebP image";
+    input.value = "";
+    return;
+  }
+  if (file.size > LOGO_MAX_BYTES) {
+    error.value = "Logo must be at most 256 KB";
+    input.value = "";
+    return;
+  }
+  logoBusy.value = true;
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error("Could not read the file"));
+      reader.readAsDataURL(file);
+    });
+    const res = await uploadBrandingLogo(dataUrl);
+    branding.logoUrl = res.logo_url;
+    logoSet.value = res.logo_set;
+    brandingSaved.value = true;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Logo upload failed";
+  } finally {
+    logoBusy.value = false;
+    input.value = "";
+  }
+}
+
+async function onRemoveLogo() {
+  if (
+    !(await confirm({
+      title: "Remove the logo?",
+      message: "Every brand surface falls back to the product name's initial.",
+      confirmText: "Remove",
+      danger: true,
+    }))
+  ) {
+    return;
+  }
+  error.value = "";
+  logoBusy.value = true;
+  try {
+    const res = await removeBrandingLogo();
+    branding.logoUrl = res.logo_url;
+    logoSet.value = res.logo_set;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Could not remove the logo";
+  } finally {
+    logoBusy.value = false;
+  }
 }
 
 async function onSaveBranding() {
@@ -568,7 +673,7 @@ async function onSaveBranding() {
     const res = await updateBrandingSettings(name);
     brandingName.value = res.name;
     branding.name = res.name; // live in this session too
-    document.title = res.name;
+    document.title = `Settings · ${res.name}`;
     brandingSaved.value = true;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Branding save failed";
@@ -584,13 +689,145 @@ async function onResetBranding() {
     const res = await resetBrandingSettings();
     brandingName.value = res.name;
     branding.name = res.name;
-    document.title = res.name;
+    document.title = `Settings · ${res.name}`;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Branding reset failed";
   } finally {
     brandingSaving.value = false;
   }
 }
+// --- Section navigation ----------------------------------------------------
+//
+// Nine settings sections do not fit one scroll column; the left sub-nav keeps
+// one section visible at a time and groups them by intent. State only — the
+// route stays /settings.
+
+type SettingsSection =
+  | "server"
+  | "branding"
+  | "security"
+  | "domains"
+  | "sso"
+  | "captcha"
+  | "policies"
+  | "smtp"
+  | "tokens";
+
+type NavItem = { key: SettingsSection; label: string; badge: string | null };
+type NavGroup = { group: string; items: NavItem[] };
+
+/// The active section lives in `?section=` so a reload (or a shared link)
+/// lands on the same panel; an unknown value falls back to the first one.
+const SECTION_KEYS = [
+  "server",
+  "branding",
+  "security",
+  "domains",
+  "sso",
+  "captcha",
+  "policies",
+  "smtp",
+  "tokens",
+] as const;
+
+const route = useRoute();
+const router = useRouter();
+
+function sectionFromQuery(): SettingsSection {
+  const value = route.query.section;
+  return typeof value === "string" && (SECTION_KEYS as readonly string[]).includes(value)
+    ? (value as SettingsSection)
+    : "server";
+}
+
+const section = ref<SettingsSection>(sectionFromQuery());
+
+// Back/forward (and any other query change) keep the pane in sync.
+watch(
+  () => route.query.section,
+  () => {
+    const next = sectionFromQuery();
+    if (next !== section.value) section.value = next;
+  },
+);
+
+const settingsNav = computed<NavGroup[]>(() => [
+  {
+    group: "General",
+    items: [
+      {
+        key: "server",
+        label: "Server identity",
+        badge:
+          server.value?.source === "database"
+            ? "saved"
+            : server.value?.source === "environment"
+              ? "env"
+              : null,
+      },
+      { key: "branding", label: "Branding", badge: null },
+    ],
+  },
+  {
+    group: "Access",
+    items: [
+      {
+        key: "security",
+        label: "Security",
+        badge: requiredGlobally.value ? "on" : null,
+      },
+      {
+        key: "domains",
+        label: "Email domains",
+        badge: allowlistDomains.value.length
+          ? String(allowlistDomains.value.length)
+          : null,
+      },
+      {
+        key: "sso",
+        label: "SSO / federation",
+        badge: jitProvision.value ? "JIT" : null,
+      },
+      {
+        key: "captcha",
+        label: "CAPTCHA",
+        badge: captcha.value?.enabled ? "on" : null,
+      },
+    ],
+  },
+  {
+    group: "Operations",
+    items: [
+      { key: "policies", label: "Runtime policies", badge: null },
+      {
+        key: "smtp",
+        label: "Email relay",
+        badge: smtp.value?.configured ? "ready" : "not set",
+      },
+    ],
+  },
+  {
+    group: "Developer",
+    items: [
+      {
+        key: "tokens",
+        label: "API tokens",
+        badge: apiTokens.value.length ? String(apiTokens.value.length) : null,
+      },
+    ],
+  },
+]);
+
+function selectSection(key: SettingsSection) {
+  section.value = key;
+  const query = { ...route.query };
+  if (key === "server") delete query.section;
+  else query.section = key;
+  // replace, not push: switching panes should not grow the history stack.
+  void router.replace({ query });
+  document.querySelector("main")?.scrollTo({ top: 0, behavior: "smooth" });
+}
+
 </script>
 
 <template>
@@ -604,7 +841,39 @@ async function onResetBranding() {
     <div v-if="loading" class="py-12 text-center text-sm text-muted-foreground">Loading…</div>
 
     <template v-else>
-      <section v-if="server" class="surface-card max-w-xl space-y-5 p-6">
+      <div class="flex flex-col gap-6 lg:flex-row lg:items-start">
+        <nav
+          class="flex gap-1 overflow-x-auto pb-1 lg:sticky lg:top-4 lg:w-52 lg:shrink-0 lg:flex-col lg:overflow-visible lg:pb-0"
+        >
+          <template v-for="g in settingsNav" :key="g.group">
+            <p class="type-eyebrow hidden px-2.5 pb-1.5 pt-7 first:pt-0 lg:block">
+              {{ g.group }}
+            </p>
+            <button
+              v-for="item in g.items"
+              :key="item.key"
+              type="button"
+              class="flex shrink-0 items-center gap-2 whitespace-nowrap rounded-xl px-3 py-2 text-left text-[13px] transition-colors lg:w-full"
+              :class="
+                section === item.key
+                  ? 'bg-sidebar-accent font-medium text-foreground'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              "
+              @click="selectSection(item.key)"
+            >
+              {{ item.label }}
+              <span
+                v-if="item.badge"
+                class="ml-auto hidden text-[10px] font-medium text-muted-foreground/70 lg:inline"
+              >
+                {{ item.badge }}
+              </span>
+            </button>
+          </template>
+        </nav>
+
+        <div class="min-w-0 flex-1 lg:max-w-2xl">
+          <section v-if="section === 'server' && server" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Server identity</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -620,7 +889,7 @@ async function onResetBranding() {
             id="issuer"
             v-model="serverIssuer"
             class="field-input font-mono text-[12px]"
-            :disabled="server.env_locked || server.locked"
+            :disabled="server.locked"
             placeholder="https://sso.example.com"
           />
           <p class="type-meta mt-1.5 text-[11px] leading-relaxed">
@@ -633,15 +902,20 @@ async function onResetBranding() {
                     : "default"
               }}
             </span>
-            <template v-if="server.env_locked">
-              Set by <code>SIGNET_ISSUER</code> — edit the environment and restart. This page
-              cannot override it.
+            <template v-if="server.source === 'database'">
+              <template v-if="server.locked">
+                Locked after the first change. Unlock below to edit again.
+              </template>
+              <template v-else>
+                Applies immediately; peer replicas converge within 30 seconds.
+              </template>
             </template>
-            <template v-else-if="server.locked">
-              Locked after the first change. Unlock below to edit again.
+            <template v-else-if="server.env_fallback">
+              Seeded from <code>SIGNET_ISSUER</code>; saving here overrides it, and Reset restores
+              it.
             </template>
             <template v-else>
-              Applies immediately; peer replicas converge within 30 seconds.
+              Built-in default; saving a value here overrides it.
             </template>
           </p>
           <p v-if="server.public_base_url" class="type-meta mt-1 text-[11px]">
@@ -653,7 +927,7 @@ async function onResetBranding() {
         <div class="flex flex-wrap items-center gap-3">
           <UiButton
             size="sm"
-            :disabled="serverSaving || server.env_locked || server.locked || !serverDirty"
+            :disabled="serverSaving || server.locked || !serverDirty"
             @click="onSaveServerIssuer"
           >
             {{ serverSaving ? "Saving…" : "Save" }}
@@ -668,13 +942,22 @@ async function onResetBranding() {
             Unlock to change
           </UiButton>
           <UiButton
-            v-if="!server.env_locked && server.allow_repeat_changes"
+            v-if="server.allow_repeat_changes"
             size="sm"
             variant="ghost"
             :disabled="serverSaving"
             @click="onToggleRepeat(false)"
           >
             Re-lock
+          </UiButton>
+          <UiButton
+            v-if="server.source === 'database'"
+            size="sm"
+            variant="secondary"
+            :disabled="serverSaving"
+            @click="onResetServer"
+          >
+            Reset override
           </UiButton>
           <span v-if="serverSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
@@ -686,7 +969,7 @@ async function onResetBranding() {
         </p>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'security'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Security</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -714,7 +997,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'domains'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Email domain allowlist</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -770,7 +1053,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'policies'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Runtime policies</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -813,7 +1096,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'sso'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">SSO / federation</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -842,7 +1125,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'tokens'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">API tokens</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -932,7 +1215,7 @@ async function onResetBranding() {
         <p v-else class="text-xs text-muted-foreground">No tokens yet.</p>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'smtp'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Email relay (SMTP)</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -1045,7 +1328,7 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'captcha'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">CAPTCHA</h2>
           <p class="mt-1 text-xs text-muted-foreground">
@@ -1114,14 +1397,49 @@ async function onResetBranding() {
         </div>
       </section>
 
-      <section class="surface-card max-w-xl space-y-5 p-6">
+      <section v-if="section === 'branding'" class="surface-card space-y-5 p-6">
         <div>
           <h2 class="text-sm font-semibold tracking-tight">Branding</h2>
           <p class="mt-1 text-xs text-muted-foreground">
-            The product name shown on the sign-in page, setup wizard, sidebar and browser tab.
-            Saved here it wins over <code class="text-[11px]">SIGNET_BRAND_NAME</code> and applies
-            immediately — no redeploy. Plain text only.
+            The logo and product name shown on the sign-in page, setup wizard, sidebar and
+            browser tab. Saved here they apply immediately — no redeploy. The name is stored as
+            plain text and wins over <code class="text-[11px]">SIGNET_BRAND_NAME</code>.
           </p>
+        </div>
+
+        <div class="flex items-start gap-4">
+          <BrandLogo size-class="h-12 w-12" />
+          <div class="min-w-0">
+            <input
+              ref="logoInput"
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              class="hidden"
+              @change="onPickLogo"
+            />
+            <div class="flex flex-wrap items-center gap-2">
+              <UiButton
+                size="sm"
+                variant="secondary"
+                :disabled="logoBusy"
+                @click="logoInput?.click()"
+              >
+                {{ logoBusy ? "Uploading…" : logoSet ? "Replace logo" : "Upload logo" }}
+              </UiButton>
+              <UiButton
+                v-if="logoSet"
+                size="sm"
+                variant="ghost"
+                :disabled="logoBusy"
+                @click="onRemoveLogo"
+              >
+                Remove
+              </UiButton>
+            </div>
+            <p class="type-meta mt-1.5 text-[11px]">
+              PNG, JPEG or WebP, up to 256 KB. Square images look best (shown at 32–40 px).
+            </p>
+          </div>
         </div>
 
         <label class="block">
@@ -1145,6 +1463,8 @@ async function onResetBranding() {
           <span v-if="brandingSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
       </section>
+        </div>
+      </div>
     </template>
   </div>
 </template>

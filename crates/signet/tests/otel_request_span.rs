@@ -9,15 +9,36 @@ use axum::body::Body;
 use axum::routing::get;
 use axum::Router;
 use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::trace::{SpanData, SpanExporter};
+use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use tracing_subscriber::prelude::*;
 
+/// Minimal in-memory exporter.
+///
+/// The SDK's `testing` feature ships one, but it also enables `rt-async-std`,
+/// which drags the unmaintained `async-std`/`pin-utils` pair into the lockfile
+/// (dev-only, but flagged by `cargo audit`). The middleware exports
+/// synchronously, so a Vec behind a mutex is all this test needs.
+#[derive(Debug, Default)]
+struct CollectSpans(Arc<Mutex<Vec<SpanData>>>);
+
+impl SpanExporter for CollectSpans {
+    fn export(
+        &mut self,
+        batch: Vec<SpanData>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = OTelSdkResult> + Send + 'static>> {
+        self.0.lock().expect("collect spans").extend(batch);
+        Box::pin(async { Ok(()) })
+    }
+}
+
 #[tokio::test]
 async fn the_request_span_is_exported_with_its_correlation_fields() {
-    let (exporter, mut rx, _shutdown_rx) =
-        opentelemetry_sdk::testing::trace::new_tokio_test_exporter();
+    let spans = Arc::new(Mutex::new(Vec::new()));
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_simple_exporter(exporter)
+        .with_simple_exporter(CollectSpans(spans.clone()))
         .build();
     let tracer = provider.tracer("test");
 
@@ -44,8 +65,9 @@ async fn the_request_span_is_exported_with_its_correlation_fields() {
 
     // The span closes when the middleware's own handle drops (it already has:
     // the call returned), so the simple exporter must have received it.
-    let span = rx
-        .try_recv()
+    let exported = spans.lock().expect("read exported spans");
+    let span = exported
+        .last()
         .expect("the http.request span is exported synchronously");
     assert_eq!(span.name, "http.request");
     let attrs: Vec<(String, String)> = span

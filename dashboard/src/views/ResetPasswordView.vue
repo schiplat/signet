@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import BrandLogo from "@/components/ui/BrandLogo.vue";
 import { nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
@@ -109,11 +110,7 @@ async function handleConfirm() {
     <div class="w-full max-w-sm space-y-6">
       <div class="space-y-1 text-center">
         <div class="mb-3 flex justify-center">
-          <span
-            class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-sm font-semibold tracking-wide text-primary-foreground"
-          >
-            Sg
-          </span>
+          <BrandLogo size-class="h-10 w-10" />
         </div>
         <h1 class="text-lg font-semibold tracking-tight">Reset password</h1>
         <p class="type-meta">Recover access to your {{ branding.name }} account</p>

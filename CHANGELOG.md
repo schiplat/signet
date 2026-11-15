@@ -4,6 +4,47 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [0.6.1] - 2026-11-15
+
+### Added
+
+- **Branding logo upload** — Settings → Branding accepts PNG / JPEG / WebP
+  (≤256 KiB, SVG rejected because a same-origin navigation could execute
+  script) and serves it from the public versioned endpoint
+  `GET /api/v1/branding/logo`; every brand surface (sidebar, sign-in, setup,
+  reset, consent) renders the logo, falling back to the product name's
+  initial when unset. Upload/remove is audited
+  (`settings.branding_logo_update` / `_remove`).
+
+A focused release: a redesigned Settings page, an uploadable logo, and the
+issuer made genuinely dashboard-first.
+
+### Changed
+
+- **Settings redesign** — the page is now a left sub-nav (General / Access /
+  Operations / Developer) showing one section at a time; the active pane is
+  kept in `?section=`, so a reload or a shared link lands on the same section.
+  A "Reset override" action covers recovery after a saved issuer.
+- **Brand name consistency** — the consent prompt and the document title use
+  the configured product name instead of the hardcoded "Signet"; a late
+  branding load only replaces the brand part of the title.
+- **Issuer precedence is now database > environment** — a value saved under
+  Dashboard → Settings → Server identity wins over `SIGNET_ISSUER`, so the
+  setting stays editable from the web even when the variable is present. The
+  variable seeds the value until the first save. Recovery for a wrong saved
+  value: the new `DELETE /api/v1/admin/settings/server` ("Reset override",
+  audited as `settings.issuer_reset`) clears the override and falls back to
+  the variable or the built-in default; the same row can be deleted in SQL.
+  `deploy/env.tpl` still ships `SIGNET_ISSUER` as the production default, but
+  it no longer locks the dashboard field.
+
+### Breaking
+
+- `GET /api/v1/admin/settings/server` no longer returns `env_locked`, and
+  PATCH is no longer refused with 409 when `SIGNET_ISSUER` is set: the saved
+  value wins. Integrations that keyed on `env_locked` should read `source`
+  (`environment` / `database` / `default`) and the new `env_fallback` flag.
+
 ## [0.6.0] - 2026-11-14
 
 A mid-sized release: self-service clients, a dashboard-managed issuer, a

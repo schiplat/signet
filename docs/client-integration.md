@@ -14,7 +14,7 @@
 
 | 环境 | Issuer 示例 |
 |------|-------------|
-| 本地开发 | `http://localhost:8443`（`SIGNET_ISSUER`） |
+| 本地开发 | `http://localhost:8443`（默认值；公开值可在 Dashboard → Settings → Server identity 修改，`SIGNET_ISSUER` 仅为可选覆盖） |
 | 生产（未来） | `https://sso.example.com` |
 
 客户端配置应只依赖 **Issuer**，通过 Discovery 发现端点，勿写死相对路径以外的主机假设。

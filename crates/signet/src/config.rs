@@ -18,9 +18,10 @@ pub struct Config {
     /// overridden at runtime by `app_settings.server.issuer`; read it through
     /// [`crate::state::AppState::issuer`] at the point of use, never here.
     pub issuer: String,
-    /// True when `SIGNET_ISSUER` was set. The environment always wins over the
-    /// dashboard value: it is the recovery path when a wrong issuer was saved
-    /// and also what makes the UI field read-only.
+    /// True when `SIGNET_ISSUER` was set. The variable seeds the issuer until
+    /// a value is saved in the dashboard; after that the database wins (the
+    /// setting stays editable from the web). Clearing the saved override falls
+    /// back to this value.
     pub issuer_from_env: bool,
     /// `SIGNET_COOKIE_SECURE` parsed as a boolean. The effective cookie flag is
     /// `cookie_secure_forced || effective issuer is https` — see

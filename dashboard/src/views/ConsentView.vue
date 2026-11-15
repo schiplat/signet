@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import BrandLogo from "@/components/ui/BrandLogo.vue";
 import { computed, ref } from "vue";
 import { useRoute } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useBrandingStore } from "@/stores/branding";
 
 const route = useRoute();
+const branding = useBrandingStore();
 const loading = ref(false);
 const error = ref("");
 const denied = ref(false);
@@ -105,14 +108,10 @@ async function submit(allow: boolean) {
       <template v-if="!denied">
         <div class="space-y-1 text-center">
           <div class="mb-3 flex justify-center">
-            <span
-              class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-sm font-semibold tracking-wide text-primary-foreground"
-            >
-              Sg
-            </span>
+            <BrandLogo size-class="h-10 w-10" />
           </div>
           <h1 class="text-lg font-semibold tracking-tight">Authorize application</h1>
-          <p class="type-meta">Signet is asking for your consent</p>
+          <p class="type-meta">{{ branding.name }} is asking for your consent</p>
         </div>
 
       <div class="surface-card p-5">
@@ -180,11 +179,7 @@ async function submit(allow: boolean) {
       <template v-else>
         <div class="space-y-1 text-center">
           <div class="mb-3 flex justify-center">
-            <span
-              class="flex h-10 w-10 items-center justify-center rounded-xl bg-muted text-sm font-semibold tracking-wide text-muted-foreground"
-            >
-              Sg
-            </span>
+            <BrandLogo size-class="h-10 w-10" muted />
           </div>
           <h1 class="text-lg font-semibold tracking-tight">Access denied</h1>
           <p class="type-meta">You did not grant access to this application.</p>

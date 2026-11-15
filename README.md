@@ -5,8 +5,8 @@ Unified identity authentication (SSO / OIDC IdP) service.
 > Language: English · [简体中文](./README.zh-CN.md)
 
 - **Production entry (future)**: `https://sso.example.com`
-- **Default dev Issuer**: `http://localhost:8443` (configurable via `SIGNET_ISSUER`)
-- **First integrating app**: Cella (internal subsystem); clients register through the generic channel (Dashboard → Clients or RFC 7591 dynamic registration), with no built-in presets
+- **Issuer**: defaults to `http://localhost:8443`; the public value is set after first sign-in under **Dashboard → Settings → Server identity**. `SIGNET_ISSUER` is optional: it seeds the value until the first dashboard save, after which the saved value wins
+- **First integrating app**: Cella (internal subsystem); clients register through the generic channel (Dashboard → Clients, self-service **My apps**, or RFC 7591 dynamic registration), with no built-in presets
 
 > Naming note: this project is an SSO, **not** Alibaba Cloud Object Storage (OSS).
 
@@ -19,8 +19,8 @@ Three ways to get a server running. **The release binary is the recommended way*
 ```bash
 # 1. Download the asset for your platform from GitHub Releases (grab the
 #    latest tag there), e.g.:
-curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.0/signet-0.6.0-macos-arm64
-chmod +x signet-0.6.0-macos-arm64 && mv signet-0.6.0-macos-arm64 signet
+curl -fLO https://github.com/schiplat/signet/releases/download/v0.6.1/signet-0.6.1-macos-arm64
+chmod +x signet-0.6.1-macos-arm64 && mv signet-0.6.1-macos-arm64 signet
 
 # 2. Start a PostgreSQL matching the built-in default connection string
 #    (signet/signet@127.0.0.1:5433/signet) — skip if you already run one
@@ -63,17 +63,18 @@ cargo run -p signet
 
 ### Configuration
 
-All three options read the same environment: the binary loads `.env` from its working directory, the compose files inject the same variables. The two lines below are enough to start; `.env.example` is the full annotated reference.
+All three options read the same environment: the binary loads `.env` from its working directory, the compose files inject the same variables. Only the database URL is needed to boot — the issuer can be left unset and configured in the dashboard after the first sign-in. `.env.example` is the full annotated reference.
 
 ```dotenv
 SIGNET_DATABASE_URL=postgres://signet:signet@127.0.0.1:5433/signet
-SIGNET_ISSUER=http://localhost:8443
+# Optional override — leave unset to manage the issuer in the dashboard:
+# SIGNET_ISSUER=https://sso.example.com
 ```
 
 | Setting | Notes |
 |---------|-------|
 | `SIGNET_DATABASE_URL` | PostgreSQL connection string (the value above is the built-in default, matching the dev `db` container) |
-| `SIGNET_ISSUER` | Public origin clients use to reach this IdP; must not end with `/`. Set it to the real HTTPS domain in production — an https issuer also turns on `Secure` cookies. When set it wins over **Dashboard → Settings → Server identity** and makes that field read-only (the recovery path); leave it unset to manage the issuer from the dashboard |
+| `SIGNET_ISSUER` | **Optional.** Public origin clients use to reach this IdP; must not end with `/`. Precedence is **database > environment > built-in default**: a value saved under **Dashboard → Settings → Server identity** wins (hot-applied, locked after the first change), while the variable only seeds the value until that save. `Reset override` in the same page (or `DELETE /api/v1/admin/settings/server`) clears the saved value and falls back to the variable. An https effective issuer also turns on `Secure` cookies |
 | `SIGNET_HTTP_BIND` | HTTP listen address; default `0.0.0.0:8443` |
 | `SIGNET_TRUSTED_PROXIES` | Only behind a reverse proxy: comma-separated proxy IPs/CIDRs allowed to assert `X-Forwarded-For` |
 | Keys | `./data/jwt_private.pem` and `./data/encryption.key` are auto-generated on first boot — **back them up**: losing or rotating them invalidates issued tokens and stored TOTP secrets |
@@ -84,9 +85,9 @@ The first administrator is **not** configured via the file: on first boot the da
 
 ### First run
 
-Open **http://localhost:8443** — the first visit redirects to **`/setup`**, where you create the first administrator and sign in.
+Open **http://localhost:8443** — the first visit redirects to **`/setup`**, where you create the first administrator and sign in. On a real deployment, set the public issuer next under **Dashboard → Settings → Server identity** (HTTPS origin, no trailing `/`): it is stored in the database, overrides `SIGNET_ISSUER`, applied immediately, and locked after the first change. The Overview setup panel keeps flagging incomplete steps until the issuer, SMTP and first client are configured.
 
-**Try SSO:** register a client under **Dashboard → Clients** (the secret is shown once, together with ready-to-paste `.env` / `config.toml` snippets), then click **Test drive** in the row — a new tab walks the real authorize → sign-in → consent → callback round trip.
+**Try SSO:** register a client under **Dashboard → Clients** (staff; the secret is shown once, together with ready-to-paste `.env` / `config.toml` snippets); any signed-in user can also register their own under **Dashboard → My apps**. Then click **Test drive** in the Clients row: a new tab walks the real authorize → sign-in → consent → callback round trip.
 
 **(Optional) example client** for the full integration in five minutes:
 
@@ -105,7 +106,8 @@ For the hot-reload dev server (`:5173` proxying `:8443`), see [Local development
 - Dashboard: a combined **Directory** (users + organisation tree), clients, audit logs, overview stats (client-scoped), MFA, passkeys, webhooks, SCIM
 - **Groups & departments as one tree**: Dashboard → Directory manages an organisational tree (`department` / `group`), membership and move/rename with cycle protection; the OIDC `groups` claim publishes direct group names. SCIM- and directory-owned nodes appear in the tree but stay managed by their source
 - **Self-service OAuth clients**: any signed-in user can register and manage their own app (name + redirect URIs) under Dashboard → My apps — owner-scoped, secret shown once, admins keep global control (Name / Owner columns)
-- **Web-managed issuer**: the public issuer can be set in Dashboard → Settings → Server identity (audited, locked after the first change); `SIGNET_ISSUER` still wins as the recovery path
+- **Web-managed issuer**: the public issuer is set in Dashboard → Settings → Server identity (DB > `SIGNET_ISSUER`, audited, locked after the first change; **Reset override** restores the environment/default). **Settings is split into a left sub-nav** (General / Access / Operations / Developer) with the active section in `?section=`, so reloads and shared links land on the same pane
+- **Branding**: product name + **logo upload** (PNG/JPEG/WebP ≤256 KiB, SVG rejected), applied to the sidebar, sign-in, setup, reset and consent pages — no redeploy
 - **First-run setup guide**: Overview shows administrators a live check panel (issuer reachability/HTTPS, SMTP completeness, first enabled client) until the required steps pass
 - **Runtime policies** (token/session lifetimes, lockout, password policy, audit retention, rate limit) edited in the dashboard — DB-backed, no redeploy
 - **Signing-key rotation** (`signet keys rotate` / `keys prune`) with a JWKS key ring that keeps outstanding tokens verifiable
@@ -203,6 +205,10 @@ In production/staging, Rust serves `dashboard/dist` via `rust-embed` (the folder
 | `GET/POST /oauth/end_session` | Single logout |
 | `POST /oauth/revoke` | RFC 7009 revocation |
 | `POST /oauth/register` | RFC 7591 dynamic client registration |
+| `GET/POST /api/v1/me/clients` | Self-service client registration (`PUT`/`rotate-secret`/`DELETE` on `/me/clients/{id}`) |
+| `GET/PATCH /api/v1/admin/settings/server` | Web-managed issuer (Server identity) |
+| `GET /api/v1/branding` | Public product name + logo URL (sign-in/setup/reset/consent) |
+| `GET /api/v1/branding/logo` | Public logo image (404 when unset) |
 | `GET /api/v1/setup/status` | First-run setup probe (`needs_setup`) |
 | `POST /api/v1/setup` | Create the first admin on first run |
 | `POST /api/v1/password-reset/*` | Password reset (request/confirm) |
@@ -224,7 +230,7 @@ Examples: `POST /api/v1/login`, `GET /api/v1/admin/users`, `GET /api/v1/admin/st
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Runtime image from prebuilt `linux-amd64` → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`), plus deploy config bundle to OSS |
 
-Tag a release (example): `git tag -a v0.6.0 -m v0.6.0 && git push origin v0.6.0`.
+Tag a release (example): `git tag -a v0.6.1 -m v0.6.1 && git push origin v0.6.1`.
 
 Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`, `env.tpl`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).

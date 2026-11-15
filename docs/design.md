@@ -5,7 +5,7 @@
 | 项目名 | **Signet**（印鉴） |
 | 定位 | 组织内统一身份认证服务（OIDC IdP） |
 | 生产入口（未来） | `https://sso.example.com` |
-| 开发 Issuer | `http://localhost:8443`（`SIGNET_ISSUER` 优先；也可在 Dashboard → Settings → Server identity 修改） |
+| 开发 Issuer | `http://localhost:8443`（默认值；Dashboard → Settings → Server identity 保存的值优先，`SIGNET_ISSUER` 仅作初始值/回退） |
 | 协议 | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
 | 首个客户端 | Cella（内网部署、可出网） |
 | 状态 | Phase 1 MVP 实现中 |
@@ -409,6 +409,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 ```text
 SIGNET_DATABASE_URL=
 SIGNET_HTTP_BIND=0.0.0.0:8443
+# 可选：仅首次保存前的初始值；Dashboard → Settings → Server identity 保存后以数据库为准
 SIGNET_ISSUER=https://sso.example.com
 SIGNET_JWT_PRIVATE_KEY=   # 或 KMS 引用
 ```
