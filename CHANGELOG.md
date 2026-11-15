@@ -4,6 +4,39 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [0.6.2] - 2026-11-15
+
+Public self-registration with an explicit readiness gate, plus release and
+documentation cleanup.
+
+### Added
+
+- **Public self-registration, off by default.** Settings → Public sign-up adds
+  `GET/PATCH /api/v1/admin/settings/signup`; enabling runs a preflight against
+  the live configuration (relay host/port/From, CAPTCHA provider/site
+  key/secret) and refuses with every blocking problem listed. A request writes
+  `signup_requests` only and sends a 30-minute, single-use verification link;
+  confirmation creates a plain `member` with no groups, marks the address
+  verified and does not sign in. Public endpoints:
+  `GET /api/v1/signup/status`, `POST /api/v1/signup` and
+  `POST /api/v1/signup/confirm`; the dashboard adds `/signup`,
+  `/signup/confirm` and a **Create account** link on sign-in. Responses are
+  generic for new, pending and existing addresses; per-address/per-IP throttles,
+  CAPTCHA, the domain allowlist and audit events cover abuse. The request path
+  re-checks both prerequisites (503 if either disappears).
+
+### Changed
+
+- **Public sign-up preflight** is a single checklist with `Ready` /
+  `Action needed` / `Advisory` rows, concise copy, one link per fix and a
+  **Re-check** action. The settings API returns `ready`, `problems` and
+  `warnings`; an unusable relay `From` or port blocks enabling alongside a
+  missing CAPTCHA.
+- **README quick start** links to the Releases page instead of a versioned
+  asset URL, and the release example uses 0.6.2.
+- **Dashboard toolchain** moves to Vite 6.4.6 and vue-tsc 3.3.14 (development
+  only); `pnpm audit` is clean for both runtime and dev dependencies.
+
 ## [0.6.1] - 2026-11-15
 
 ### Added
