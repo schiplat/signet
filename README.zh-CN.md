@@ -165,7 +165,7 @@ Signet 对外有四个接口面，完整说明见 `docs/`：
 | **Release Signet Binary** | `v*` tag（或手动） | 多架构二进制 → GitHub Release |
 | **Build Signet Image** | 二进制发布成功后 | 用已构建的二进制打多架构运行时镜像（`linux/amd64`、`linux/arm64`）→ **ACR** + **Docker Hub**（`${DOCKERHUB_USERNAME}/signet`） |
 
-发版示例：`git tag -a v0.6.2 -m v0.6.2 && git push origin v0.6.2`。
+发版示例：`git tag -a v0.6.3 -m v0.6.3 && git push origin v0.6.3`。
 
 构建与部署布局见 [`docs/deploy.md`](./docs/zh-CN/deploy.md)。生产编排在 [`deploy/`](./deploy/)（`docker-compose.yml`），本地镜像 / Postgres 见 [`build/docker-compose.yml`](./build/docker-compose.yml)
 （`docker compose -f build/docker-compose.yml --profile dev up -d db`）。
