@@ -76,6 +76,35 @@ Discovery 返回（节选）：
 
 纯 SPA 公共客户端不受支持：token 端点仍要求 `client_secret`。
 
+### 2.4 配方：Buz（流水线平台）
+
+[Buz](https://github.com/schiplat/buz) 2.1.10 起支持用户通过任意标准 OIDC IdP 登录（`manager.toml` 的 `[auth.oidc]`）。把 Signet 作为其身份源：
+
+1. **在 Dashboard → Clients 注册客户端**：
+   - `client_id`：如 `buz`
+   - `redirect_uris`：`https://<buz-host>/api/v1/auth/oidc/callback` —— 逐字一致，包含 `/api/v1` 前缀
+   - scopes：`openid profile email`（Buz 默认请求这三个）
+   - grant types：至少 `authorization_code`（多加 `refresh_token` 无妨）
+2. **来源 IP 白名单**：对 `/oauth/authorize`（终端用户浏览器）与 `/oauth/token`（Buz 服务端出口地址）都会生效。给多人使用的 SSO 客户端，要么关闭该客户端的白名单，要么同时列出用户网段和 Buz 服务端出口网段。
+3. **配置 Buz**（`manager.toml`；secret 也可用环境变量 `BUZ_OIDC_CLIENT_SECRET` 或 `client_secret_file`）：
+
+   ```toml
+   [auth.oidc]
+   enabled = true
+   issuer = "https://sso.example.com"   # 必须与 Signet 完全一致，无尾部斜杠
+   client_id = "buz"
+   client_secret = "..."
+   redirect_uri = "https://<buz-host>/api/v1/auth/oidc/callback"
+   scopes = ["openid", "profile", "email"]
+   auto_provision = true
+   ```
+
+说明：
+
+- issuer 必须与 Signet 配置的 issuer 逐字一致——Buz 拉取 `{issuer}/.well-known/openid-configuration`，发现 issuer 不匹配即拒绝。之后修改 Signet 的 issuer，所有按旧值配置的客户端（包括 Buz）都会失效，直到更新配置。
+- `auto_provision = true`（默认）在首次登录时创建普通 Buz 用户，不带任何团队与管理员权限；之后再通过 Buz 的 RBAC 授权。设为 `false` 则要求预先绑定身份。
+- 组 claims 与 RP 发起登出属于 Buz 后续阶段；Signet 已提供这两者（`groups` scope 与 `end_session_endpoint`），届时可直接使用。
+
 ---
 
 ## 3. 登录流程

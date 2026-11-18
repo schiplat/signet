@@ -105,6 +105,50 @@ initial access token**; see [integrations.md](./integrations.md) §1.
 Pure-SPA public clients are not supported: the token endpoint requires a
 `client_secret`.
 
+### 2.4 Recipe: Buz (CI/CD platform)
+
+[Buz](https://github.com/schiplat/buz) 2.1.10+ lets its users sign in through
+any standards-compliant OIDC provider (`[auth.oidc]` in `manager.toml`). To
+make Signet its identity provider:
+
+1. **Register the client** under Dashboard → Clients:
+   - `client_id`: e.g. `buz`
+   - `redirect_uris`: `https://<buz-host>/api/v1/auth/oidc/callback` — exact
+     string, including the `/api/v1` prefix
+   - scopes: `openid profile email` (what Buz requests by default)
+   - grant types: at least `authorization_code` (adding `refresh_token` is
+     harmless)
+2. **Source-IP allowlist**: it applies to both `/oauth/authorize` (the end
+   user's browser) and `/oauth/token` (the Buz server's egress address). For
+   an SSO client used by many users, either disable the client's allowlist or
+   list both the user networks and the Buz server's egress addresses.
+3. **Configure Buz** (`manager.toml`; the secret can also come from the
+   `BUZ_OIDC_CLIENT_SECRET` env var or `client_secret_file`):
+
+   ```toml
+   [auth.oidc]
+   enabled = true
+   issuer = "https://sso.example.com"   # must match Signet exactly, no trailing slash
+   client_id = "buz"
+   client_secret = "..."
+   redirect_uri = "https://<buz-host>/api/v1/auth/oidc/callback"
+   scopes = ["openid", "profile", "email"]
+   auto_provision = true
+   ```
+
+Notes:
+
+- The issuer must equal Signet's configured issuer exactly — Buz fetches
+  `{issuer}/.well-known/openid-configuration` and refuses a document claiming a
+  different issuer. Changing Signet's issuer later breaks every client
+  configured against the old value until they are updated.
+- `auto_provision = true` (the default) creates a plain Buz user on first
+  sign-in with no teams and no admin flags; grant roles through Buz's RBAC
+  afterwards. Set it to `false` to require pre-bound identities.
+- Group claims and RP-initiated logout arrive in later Buz phases; Signet
+  already provides both (the `groups` scope and `end_session_endpoint`) for
+  when they ship.
+
 ---
 
 ## 3. Sign-in flow
