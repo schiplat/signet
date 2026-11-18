@@ -6,7 +6,7 @@
 
 - **生产入口（未来）**：`https://sso.example.com`
 - **Issuer**：默认 `http://localhost:8443`；公开值在首次登录后于 **Dashboard → Settings → Server identity** 配置。`SIGNET_ISSUER` 可选：仅作为首次保存前的初始值，保存后以数据库值为准
-- **首个接入方**：Cella（内网子系统）；客户端统一走通用申请渠道（Dashboard → Clients、自助 **My apps** 或 RFC 7591 动态注册），无内置预置
+- **首个接入方**：内部业务子系统；客户端统一走通用申请渠道（Dashboard → Clients、自助 **My apps** 或 RFC 7591 动态注册），无内置预置
 
 > 命名说明：本项目为 SSO，**不是**阿里云 Object Storage（OSS）。
 

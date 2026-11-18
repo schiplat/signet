@@ -9,7 +9,7 @@
 | 生产入口示例 | `https://sso.example.com` |
 | 开发 Issuer | `http://localhost:8443`（默认值；Dashboard → Settings → Server identity 保存的值优先，`SIGNET_ISSUER` 仅作初始值/回退） |
 | 协议 | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
-| 首个客户端 | Cella（内网部署、可出网） |
+| 首个客户端 | 内网业务子系统（可出网） |
 
 ---
 
@@ -37,7 +37,7 @@ Signet  ──负责──→  认证（你是谁）：登录、会话、id_toke
 业务系统 ──负责──→  授权（你能做什么）：角色、数据集权限、功能开关
 ```
 
-Signet 可下发可选的 `roles` / `groups` **claims** 作为业务侧的初始映射，但**权威业务授权表在业务系统**（如 Cella 用户角色表）。
+Signet 可下发可选的 `roles` / `groups` **claims** 作为业务侧的初始映射，但**权威业务授权表在业务系统**（如示例应用的用户角色表）。
 
 ---
 
@@ -54,7 +54,7 @@ Signet 可下发可选的 `roles` / `groups` **claims** 作为业务侧的初始
                          │ HTTPS 出站
          ┌───────────────┴────────────────┐
          │ 内网（可访问外网）                │
-         │  Cella / 其他子系统              │
+         │  示例应用 / 其他子系统           │
          │  用户浏览器（可开内网 + 公网）     │
          └────────────────────────────────┘
 ```
@@ -63,10 +63,10 @@ Signet 可下发可选的 `roles` / `groups` **claims** 作为业务侧的初始
 
 OIDC 授权码模式的关键跳转发生在**用户浏览器**：
 
-1. 浏览器打开内网 Cella  
+1. 浏览器打开内网示例应用  
 2. 重定向到公网 Signet 登录  
 3. Signet **302 回跳**浏览器到内网 `redirect_uri`（Signet **服务端不必**主动连入内网）  
-4. Cella 服务**出站**调用 Signet 的 token / JWKS / userinfo  
+4. 示例应用服务**出站**调用 Signet 的 token / JWKS / userinfo  
 
 ### 2.3 约束
 
@@ -85,7 +85,7 @@ OIDC 授权码模式的关键跳转发生在**用户浏览器**：
 ### 3.1 选用协议
 
 - **OIDC Authorization Code Flow + PKCE**（面向浏览器 SPA / 带前端的服务）  
-- 机密客户端（若服务端持有 `client_secret`）与公共客户端（纯 SPA + PKCE）均可；Cella 推荐：**后端持码换票**（BFF 或 Axum 回调处理），避免 token 长期落在纯前端  
+- 机密客户端（若服务端持有 `client_secret`）与公共客户端（纯 SPA + PKCE）均可；示例应用推荐：**后端持码换票**（BFF 或 Axum 回调处理），避免 token 长期落在纯前端  
 
 ### 3.2 Issuer
 
@@ -121,7 +121,7 @@ GET https://sso.example.com/.well-known/openid-configuration
 | `access_token` | 调 Signet userinfo 或受保护 API | 不建议业务 API 直接当业务会话长期使用 |
 | `refresh_token` | 刷新 | 旋转刷新；可撤销 |
 
-业务系统（Cella）在完成回调后，应签发**自己的会话**（cookie / 本地 JWT），后续 API 鉴权以业务会话为准，并缓存 `sub` 与用户主键映射。
+业务系统（示例应用）在完成回调后，应签发**自己的会话**（cookie / 本地 JWT），后续 API 鉴权以业务会话为准，并缓存 `sub` 与用户主键映射。
 
 ---
 
@@ -131,7 +131,7 @@ GET https://sso.example.com/.well-known/openid-configuration
 
 ```text
 User            用户（登录主体）
-ClientApp       接入应用（如 cella）
+ClientApp       接入应用（如 demo-app）
 AuthorizationCode / RefreshToken / Session
 （可选）Group / Membership   组与成员，用于 claims 映射
 （可选）Org                  多租户预留，当前单租户
@@ -157,7 +157,7 @@ AuthorizationCode / RefreshToken / Session
 
 | 字段 | 说明 |
 |------|------|
-| `client_id` | 如 `cella` |
+| `client_id` | 如 `demo-app` |
 | `client_secret_hash` | 机密客户端 |
 | `redirect_uris` | 精确白名单 |
 | `post_logout_redirect_uris` | 可选 |
@@ -190,13 +190,13 @@ AuthorizationCode / RefreshToken / Session
 
 ## 5. 登录与登出流程
 
-### 5.1 登录（Cella 示例）
+### 5.1 登录（示例应用）
 
 ```text
-用户 → Cella UI/API（未登录）
+用户 → 示例应用 UI/API（未登录）
      → 302 Signet /oauth/authorize
-          ?client_id=cella
-          &redirect_uri=https://<cella-host>/auth/callback
+          ?client_id=demo-app
+          &redirect_uri=https://<app-host>/auth/callback
           &response_type=code
           &scope=openid profile email
           &state=...
@@ -204,16 +204,16 @@ AuthorizationCode / RefreshToken / Session
           &code_challenge_method=S256
      → 用户在 Signet 登录
      → 302 redirect_uri?code=...&state=...
-     → Cella 后端：code + code_verifier → Signet /oauth/token
+     → 示例应用后端：code + code_verifier → Signet /oauth/token
      → 校验 id_token（iss/aud/exp/签名）
      → upsert 本地用户（按 sub）
-     → 建立 Cella 会话
+     → 建立示例应用会话
      → 进入业务页
 ```
 
 ### 5.2 登出
 
-1. 清除 Cella 本地会话  
+1. 清除示例应用本地会话  
 2. （可选）重定向 Signet `end_session_endpoint`，并带 `post_logout_redirect_uri`  
 3. Signet 清除自身 SSO 会话，使其他已接子系统下次也需重新登录  
 
@@ -243,7 +243,7 @@ Signet **不是**对外账户体系：无公开自助注册。
 
 `/setup` 创建流程有并发保护（Postgres advisory lock），且创建成功后写审计 `setup.complete`。详见 [api-v1.md](./api-v1.md)。
 
-业务系统（Cella）的「第一个业务管理员」由 **Cella** 自己的 bootstrap 解决，不依赖 Signet 把所有人都设成超管。
+业务系统（示例应用）的「第一个业务管理员」由 **示例应用** 自己的 bootstrap 解决，不依赖 Signet 把所有人都设成超管。
 
 ---
 
@@ -331,7 +331,7 @@ SIGNET_ISSUER=https://sso.example.com
 SIGNET_JWT_PRIVATE_KEY=   # 或 KMS 引用
 ```
 
-客户端侧（Cella）使用 `OIDC_*` 或 `SIGNET_*` 均可，团队内统一一种即可；**禁止**用 `OSS_` 表示本服务。
+客户端侧（示例应用）使用 `OIDC_*` 或 `SIGNET_*` 均可，团队内统一一种即可；**禁止**用 `OSS_` 表示本服务。
 
 ---
 

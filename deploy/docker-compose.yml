@@ -15,7 +15,7 @@
 # database is started here — the `db` service in build/docker-compose.yml is a
 # local-dev convenience only.
 #
-# On gz4, signet joins the `manager-net` Docker network created by the
+# On the production host, signet joins the `manager-net` Docker network created by the
 # super-manager stack, so the database host is `postgres`:
 #   postgres://<user>:<password>@postgres:5432/signet
 # Signet connects as a dedicated, least-privilege `signet` role — NOT the

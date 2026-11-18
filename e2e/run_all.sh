@@ -7,8 +7,8 @@ pkill -f axum-oidc-client 2>/dev/null
 sleep 1
 export PGPASSWORD="$E2E_PG_PASS"
 psql -h "$E2E_PG_HOST" -U "$E2E_PG_USER" -d postgres \
-  -c "DROP DATABASE IF EXISTS $E2E_DB WITH (FORCE)" -c "CREATE DATABASE $E2E_DB OWNER admin" \
-  -c "DROP DATABASE IF EXISTS $E2E_DB_UP WITH (FORCE)" -c "CREATE DATABASE $E2E_DB_UP OWNER admin" >/dev/null
+  -c "DROP DATABASE IF EXISTS $E2E_DB WITH (FORCE)" -c "CREATE DATABASE $E2E_DB OWNER $E2E_PG_USER" \
+  -c "DROP DATABASE IF EXISTS $E2E_DB_UP WITH (FORCE)" -c "CREATE DATABASE $E2E_DB_UP OWNER $E2E_PG_USER" >/dev/null
 bash "$SCRIPT_DIR/start_instances.sh"
 bash "$SCRIPT_DIR/e2e_core.sh"; CORE=$?
 bash "$SCRIPT_DIR/e2e_sso.sh"; SSO=$?

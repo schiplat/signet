@@ -2,7 +2,7 @@
 
 > English · [简体中文](./zh-CN/client-integration.md)
 
-For business systems (such as Cella) connecting to Signet SSO. Signet is an
+For business systems connecting to Signet SSO. Signet is an
 **OIDC Identity Provider**; clients use the standard **Authorization Code + PKCE
 (S256)** flow.
 
@@ -57,7 +57,7 @@ Liveness: `GET {issuer}/health` → `ok`
 
 An administrator or manager registers / edits under Dashboard → **Clients**:
 
-- `client_id`: a stable identifier (e.g. `cella`)
+- `client_id`: a stable identifier (e.g. `demo-app`)
 - `redirect_uris`: an exact-match allowlist (one per line)
 - PKCE S256 is **always enforced**: clients have no `pkce_required` switch any
   more, and both the authorization and token endpoints require a 43–128

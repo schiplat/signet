@@ -173,4 +173,4 @@ Signet 当前按**单活动实例**设计与验证：三块进程内状态——
 | 需要容器化 Postgres | `build/docker-compose.yml` 的 `db` profile |
 | 验证完整镜像 | `build/docker-compose.yml` 的 `signet` 服务 `--build` |
 | 跑目录同步 CLI | 本机 `cargo run -p signet -- sync …`；线上见 [§4](#4-容器内执行目录同步-cli) |
-| 上线 / gz4 等环境 | `deploy/` + 镜像 tag + 渲染后的 `.env` |
+| 上线 / 自托管环境 | `deploy/` + 镜像 tag + 渲染后的 `.env` |

@@ -62,7 +62,7 @@ echo "$CREATE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["client
 echo "== 3. quickstart OIDC round trip =="
 pkill -f axum-oidc-client 2>/dev/null; sleep 1
 nohup env OIDC_ISSUER="$DOWN" OIDC_CLIENT_ID=e2e-app OIDC_CLIENT_SECRET="$(cat $B/secret)" \
-  /root/signet/target/debug/axum-oidc-client > /tmp/qs.log 2>&1 &
+  "$E2E_REPO/target/debug/axum-oidc-client" > /tmp/qs.log 2>&1 &
 sleep 2
 AUTH=$(curl -s -c $J/cl -o /dev/null -w '%{redirect_url}' http://127.0.0.1:3000/auth/login)
 check "client login redirects to authorize" "$AUTH" "/oauth/authorize"

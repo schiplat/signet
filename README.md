@@ -6,7 +6,7 @@ Unified identity authentication (SSO / OIDC IdP) service.
 
 - **Production entry (future)**: `https://sso.example.com`
 - **Issuer**: defaults to `http://localhost:8443`; the public value is set after first sign-in under **Dashboard → Settings → Server identity**. `SIGNET_ISSUER` is optional: it seeds the value until the first dashboard save, after which the saved value wins
-- **First integrating app**: Cella (internal subsystem); clients register through the generic channel (Dashboard → Clients, self-service **My apps**, or RFC 7591 dynamic registration), with no built-in presets
+- **First integrating app**: an internal business subsystem; clients register through the generic channel (Dashboard → Clients, self-service **My apps**, or RFC 7591 dynamic registration), with no built-in presets
 
 > Naming note: this project is an SSO, **not** Alibaba Cloud Object Storage (OSS).
 

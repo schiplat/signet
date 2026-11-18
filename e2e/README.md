@@ -46,6 +46,8 @@ bash e2e/run_all.sh            # prints PASS/FAIL per assertion + SUMMARY
                                # (core, sso, ops; exit code = failures)
 ```
 
-All lab specifics are env-overridable — see `e2e/lib.sh` (`E2E_REPO`, `E2E_DOWN`,
-`E2E_UP`, `E2E_PG_*`, `E2E_DB*`). Defaults point at the original lab
-(132/130); **do not point the database names at anything you care about.**
+Everything is env-overridable — see `e2e/lib.sh` (`E2E_REPO`, `E2E_DOWN`,
+`E2E_UP`, `E2E_PG_*`, `E2E_DB*`). Defaults target loopback (instances and
+Postgres on `127.0.0.1`) and carry no host names, addresses or credentials:
+set `E2E_PG_HOST` / `E2E_PG_USER` / `E2E_PG_PASS` and the issuer URLs for your
+own environment. **Do not point the database names at anything you care about.**

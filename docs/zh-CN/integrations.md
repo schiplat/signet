@@ -43,7 +43,7 @@ curl -s -b /tmp/signet_cookies.txt \
 curl -s -X POST "$ISSUER/oauth/register" \
   -H 'Content-Type: application/json' \
   -d '{
-    "client_name": "cella-web",
+    "client_name": "demo-app-web",
     "redirect_uris": ["http://localhost:3000/auth/callback"],
     "initial_access_token": "9fG3..."
   }'
