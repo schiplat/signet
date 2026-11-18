@@ -19,6 +19,15 @@ semantic versioning.
   pushes the multi-arch image; `deploy/env.tpl` is gone. Deployment systems
   provide `.env` / environment variables through their own pipeline.
 
+### Security
+
+- **lettre 0.11.24** — picks up six upstream RustSec advisories published
+  2026-11-17: STARTTLS response injection, SMTP command injection via missing
+  dot-stuffing, unbounded SMTP reply buffering (memory exhaustion),
+  denial-of-service panics on malformed `EHLO` replies / mailbox display names,
+  and messages misrouted for addresses with a quoted local part. Dependency
+  bump only; no API change.
+
 ## [0.6.2] - 2026-11-15
 
 Public self-registration with an explicit readiness gate, plus release and
