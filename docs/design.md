@@ -9,7 +9,7 @@
 | Production example | `https://sso.example.com` |
 | Development issuer | `http://localhost:8443` (default; a value saved under Dashboard → Settings → Server identity wins, and `SIGNET_ISSUER` only seeds/falls back) |
 | Protocol | OAuth 2.0 / OIDC **Authorization Code + PKCE** |
-| First client | Cella (intranet deployment with outbound access) |
+| First client | an intranet business subsystem (with outbound access) |
 
 ---
 
@@ -44,7 +44,7 @@ Business app  ── owns ──▶  authorization (what you may do): roles, dat
 
 Signet may publish optional `roles` / `groups` **claims** as a starting point for
 the business side's mapping, but the **authoritative business authorisation table
-lives in the business system** (e.g. Cella's user-role table).
+lives in the business system** (e.g. the demo app's user-role table).
 
 ---
 
@@ -61,7 +61,7 @@ lives in the business system** (e.g. Cella's user-role table).
                          │ HTTPS outbound
          ┌───────────────┴────────────────┐
          │ Intranet (internet-reachable)   │
-         │  Cella / other subsystems       │
+         │  Demo app / other subsystems    │
          │  User browser (intranet + web)  │
          └────────────────────────────────┘
 ```
@@ -70,11 +70,11 @@ lives in the business system** (e.g. Cella's user-role table).
 
 The key hops of the OIDC authorization-code flow happen in the **user's browser**:
 
-1. The browser opens Cella on the intranet
+1. The browser opens the demo app on the intranet
 2. It is redirected to Signet on the public internet to sign in
 3. Signet **302s the browser back** to the intranet `redirect_uri` (Signet's
    server never needs inbound access to the intranet)
-4. The Cella server **calls out** to Signet's token / JWKS / userinfo
+4. The demo app server **calls out** to Signet's token / JWKS / userinfo
 
 ### 2.3 Constraints
 
@@ -95,7 +95,7 @@ The key hops of the OIDC authorization-code flow happen in the **user's browser*
 - **OIDC Authorization Code Flow + PKCE** (for browser SPAs and services with a
   frontend)
 - Confidential clients (the server holds a `client_secret`) and public clients
-  (pure SPA + PKCE) both work; for Cella the recommendation is **backend code
+  (pure SPA + PKCE) both work; for the demo app the recommendation is **backend code
   exchange** (a BFF or an Axum callback handler) so tokens never live in a pure
   frontend for long
 
@@ -136,7 +136,7 @@ The sign-in page and dashboard are hosted on the same origin (`/login`,
 | `access_token` | Calls Signet userinfo or protected APIs | Not recommended as a long-lived business session |
 | `refresh_token` | Refresh | Rotating and revocable |
 
-After the callback, the business system (Cella) should issue **its own session**
+After the callback, the business system (the demo app) should issue **its own session**
 (cookie or local JWT), use that for subsequent API authorisation, and cache the
 mapping from `sub` to its local user key.
 
@@ -148,7 +148,7 @@ mapping from `sub` to its local user key.
 
 ```text
 User            A person (the sign-in subject)
-ClientApp       A connected application (e.g. cella)
+ClientApp       A connected application (e.g. demo-app)
 AuthorizationCode / RefreshToken / Session
 (optional) Group / Membership   Groups and members, for claim mapping
 (optional) Org                  Tenant placeholder; single-tenant for now
@@ -174,7 +174,7 @@ AuthorizationCode / RefreshToken / Session
 
 | Field | Notes |
 |------|------|
-| `client_id` | e.g. `cella` |
+| `client_id` | e.g. `demo-app` |
 | `client_secret_hash` | For confidential clients |
 | `redirect_uris` | Exact allowlist |
 | `post_logout_redirect_uris` | Optional |
@@ -210,13 +210,13 @@ AuthorizationCode / RefreshToken / Session
 
 ## 5. Sign-in and logout flows
 
-### 5.1 Sign-in (Cella example)
+### 5.1 Sign-in (demo-app example)
 
 ```text
-User → Cella UI/API (not signed in)
+User → demo-app UI/API (not signed in)
      → 302 Signet /oauth/authorize
-          ?client_id=cella
-          &redirect_uri=https://<cella-host>/auth/callback
+          ?client_id=demo-app
+          &redirect_uri=https://<app-host>/auth/callback
           &response_type=code
           &scope=openid profile email
           &state=...
@@ -224,16 +224,16 @@ User → Cella UI/API (not signed in)
           &code_challenge_method=S256
      → user signs in at Signet
      → 302 redirect_uri?code=...&state=...
-     → Cella backend: code + code_verifier → Signet /oauth/token
+     → demo-app backend: code + code_verifier → Signet /oauth/token
      → validate id_token (iss/aud/exp/signature)
      → upsert the local user (keyed by sub)
-     → create the Cella session
+     → create the demo app session
      → enter the application
 ```
 
 ### 5.2 Logout
 
-1. Clear the local Cella session
+1. Clear the local demo app session
 2. (Optional) redirect to Signet's `end_session_endpoint` with
    `post_logout_redirect_uri`
 3. Signet clears its own SSO session, so other connected subsystems require a
@@ -272,7 +272,7 @@ After startup migrations complete:
 `/setup` is concurrency-protected (a Postgres advisory lock) and writes the
 `setup.complete` audit event on success. See [api-v1.md](./api-v1.md).
 
-The "first business administrator" inside Cella is **Cella's** own bootstrap
+The "first business administrator" inside the demo app is **the demo app's** own bootstrap
 problem, not a reason to make every Signet user a superuser.
 
 ---
@@ -378,7 +378,7 @@ SIGNET_ISSUER=https://sso.example.com
 SIGNET_JWT_PRIVATE_KEY=   # or a KMS reference
 ```
 
-The client side (Cella) may use `OIDC_*` or `SIGNET_*` as long as the team picks
+The client side (the demo app) may use `OIDC_*` or `SIGNET_*` as long as the team picks
 one; **never** use `OSS_` for this service.
 
 ---

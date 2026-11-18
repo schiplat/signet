@@ -233,4 +233,4 @@ The two in-process caches are deliberate trade-offs, not oversights:
 | Containerised Postgres | the `db` profile in `build/docker-compose.yml` |
 | Verify the full image | `--build` on the `signet` service in `build/docker-compose.yml` |
 | Run the directory-sync CLI | locally `cargo run -p signet -- sync …`; production see [§4](#4-running-the-directory-sync-cli-inside-the-container) |
-| Rollout / gz4-style environments | `deploy/` + an image tag + the rendered `.env` |
+| Rollout / self-hosted environments | `deploy/` + an image tag + the rendered `.env` |

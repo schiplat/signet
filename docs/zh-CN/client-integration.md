@@ -2,7 +2,7 @@
 
 > [English](../client-integration.md) · 简体中文
 
-面向要接入 Signet SSO 的业务系统（如 Cella）。Signet 作为 **OIDC Identity Provider**，客户端走标准 **Authorization Code + PKCE (S256)**。
+面向要接入 Signet SSO 的业务系统。Signet 作为 **OIDC Identity Provider**，客户端走标准 **Authorization Code + PKCE (S256)**。
 
 相关文档：[设计总览](./design.md) · [MFA](./mfa.md) · [Dashboard API](./api-v1.md) · [管理台](./dashboard.md)
 
@@ -50,7 +50,7 @@ Discovery 返回（节选）：
 
 管理员 / 经理在 Dashboard → **Clients** 注册 / 编辑：
 
-- `client_id`：稳定标识（如 `cella`）
+- `client_id`：稳定标识（如 `demo-app`）
 - `redirect_uris`：精确匹配白名单（一行一个）
 - PKCE S256 **始终强制**：客户端已无 `pkce_required` 开关字段，授权端点与 token 端点都要求 43–128 字符的 challenge/verifier
 - **Source IP allowlist**（默认开启）：仅允许列出的 IP / CIDR 访问该客户端的 `/oauth/authorize` 与 `/oauth/token`；可关闭为不限制。开启时必须至少配置一条 CIDR/IP。

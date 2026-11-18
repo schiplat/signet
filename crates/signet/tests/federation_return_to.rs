@@ -11,9 +11,9 @@ use signet::federation::{login_url, safe_return_to};
 #[test]
 fn authorize_and_end_session_paths_survive() {
     let ok = [
-        "/oauth/authorize?response_type=code&client_id=cella&redirect_uri=http%3A%2F%2Flocalhost%2Fcb",
+        "/oauth/authorize?response_type=code&client_id=demo-app&redirect_uri=http%3A%2F%2Flocalhost%2Fcb",
         "/oauth/authorize",
-        "/oauth/end_session?client_id=cella",
+        "/oauth/end_session?client_id=demo-app",
     ];
     for v in ok {
         assert_eq!(
@@ -61,18 +61,18 @@ fn blank_and_missing_are_none() {
 #[test]
 fn surrounding_whitespace_is_trimmed() {
     assert_eq!(
-        safe_return_to(Some("  /oauth/authorize?client_id=cella  ")).as_deref(),
-        Some("/oauth/authorize?client_id=cella")
+        safe_return_to(Some("  /oauth/authorize?client_id=demo-app  ")).as_deref(),
+        Some("/oauth/authorize?client_id=demo-app")
     );
 }
 
 #[test]
 fn login_url_encodes_return_to_into_the_query() {
-    let rt = "/oauth/authorize?client_id=cella&redirect_uri=http%3A%2F%2Flocalhost%2Fcb";
+    let rt = "/oauth/authorize?client_id=demo-app&redirect_uri=http%3A%2F%2Flocalhost%2Fcb";
     let url = login_url("/login?sso_step=mfa", Some(rt));
     assert_eq!(
         url,
-        "/login?sso_step=mfa&return_to=%2Foauth%2Fauthorize%3Fclient_id%3Dcella%26redirect_uri%3Dhttp%253A%252F%252Flocalhost%252Fcb"
+        "/login?sso_step=mfa&return_to=%2Foauth%2Fauthorize%3Fclient_id%3Ddemo-app%26redirect_uri%3Dhttp%253A%252F%252Flocalhost%252Fcb"
     );
 
     // Without one, the base URL stays untouched (no dangling '&').
