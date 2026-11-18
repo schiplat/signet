@@ -4,7 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
-## [Unreleased]
+## [0.6.3] - 2026-11-19
+
+Security dependency bump and public-repo hygiene: the lettre SMTP advisories,
+neutral example names in docs and e2e, and a Buz SSO recipe.
+
+### Added
+
+- **Buz SSO recipe** in the client integration guide (en + zh): the client to
+  register under Dashboard → Clients (redirect URI, scopes, grant types), the
+  source-IP allowlist caveat for a multi-user SSO client, and the
+  `[auth.oidc]` block for Buz's `manager.toml`, including the
+  issuer-exact-match and JIT provisioning notes.
 
 ### Changed
 
@@ -12,6 +23,12 @@ semantic versioning.
   `SIGNET_*` settings from the environment, with the database URL required
   rather than falling back to the localhost default. `deploy/docker-compose.env-file.yml`
   keeps dotenv compatibility as an optional overlay, not the primary path.
+- **Neutral example names** — an internal subsystem name and an internal host
+  name no longer appear in the READMEs, docs, the deploy compose comment or
+  test fixtures; the docs' example client is `demo-app`. The `e2e/` suite
+  defaults to loopback, derives the repo path from the checkout, and no longer
+  ships host names, addresses or credentials — `start_instances.sh` also
+  honours the `E2E_*` variables now instead of duplicating hardcoded values.
 
 ### Removed
 
