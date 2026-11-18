@@ -5,7 +5,7 @@ source "$(dirname "$0")/lib.sh"
 # and signing-key rotation/prune against a real process.
 #
 # Runs on its own port (8445), database and data directory, so it neither
-# disturbs the other two suites nor touches /root/signet/data. Everything it
+# disturbs the other two suites nor touches the repo's own data directory. Everything it
 # creates is removed on exit.
 set -u
 
@@ -46,7 +46,7 @@ trap cleanup EXIT
 
 start_instance() {
   nohup env \
-    SIGNET_DATABASE_URL="postgres://admin:123456@$E2E_PG_HOST:5432/$DB" \
+    SIGNET_DATABASE_URL="postgres://$E2E_PG_USER:$E2E_PG_PASS@$E2E_PG_HOST:5432/$DB" \
     SIGNET_HTTP_BIND="0.0.0.0:8445" \
     SIGNET_ISSUER="$OPS" \
     SIGNET_JWT_PRIVATE_KEY_PATH="$DATA/jwt_private.pem" \
@@ -72,7 +72,7 @@ echo "== 0. fresh throwaway instance =="
 rm -rf "$DATA"; mkdir -p "$DATA"
 psql -h "$E2E_PG_HOST" -U "$E2E_PG_USER" -d postgres \
   -c "DROP DATABASE IF EXISTS $DB WITH (FORCE)" \
-  -c "CREATE DATABASE $DB OWNER admin" >/dev/null
+  -c "CREATE DATABASE $DB OWNER $E2E_PG_USER" >/dev/null
 start_instance || { echo "FAIL: instance start"; exit 1; }
 ok "throwaway instance started"
 
@@ -131,7 +131,7 @@ COUNT=$(jwks_field "len(keys)")
 check "one key before rotation" "$COUNT" "1"
 
 NEW_KID=$(env \
-  SIGNET_DATABASE_URL="postgres://admin:123456@$E2E_PG_HOST:5432/$DB" \
+  SIGNET_DATABASE_URL="postgres://$E2E_PG_USER:$E2E_PG_PASS@$E2E_PG_HOST:5432/$DB" \
   SIGNET_JWT_PRIVATE_KEY_PATH="$DATA/jwt_private.pem" \
   SIGNET_JWT_RETIRED_KEY_DIR="$DATA/retired_keys" \
   SIGNET_ENCRYPTION_KEY_PATH="$DATA/encryption.key" \
@@ -170,7 +170,7 @@ check "login still works after rotation" "$R" '"status":"ok"'
 
 echo "== 6. retired-key prune =="
 env \
-  SIGNET_DATABASE_URL="postgres://admin:123456@$E2E_PG_HOST:5432/$DB" \
+  SIGNET_DATABASE_URL="postgres://$E2E_PG_USER:$E2E_PG_PASS@$E2E_PG_HOST:5432/$DB" \
   SIGNET_JWT_PRIVATE_KEY_PATH="$DATA/jwt_private.pem" \
   SIGNET_JWT_RETIRED_KEY_DIR="$DATA/retired_keys" \
   SIGNET_ENCRYPTION_KEY_PATH="$DATA/encryption.key" \

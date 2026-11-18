@@ -5,8 +5,8 @@ source "$(dirname "$0")/lib.sh"
 # first-time federation exercises the real JIT path, and jit_mode=off really
 # refuses an identity with no local account.
 #
-#   UP   http://192.168.39.132:8444  DB signet_verify_up  (own keys)
-#   DOWN http://192.168.39.132:8443  DB signet_verify    (global MFA ON, set by core)
+#   UP   $E2E_UP   (:8444)  DB signet_verify_up  (own keys)
+#   DOWN $E2E_DOWN (:8443)  DB signet_verify     (global MFA ON, set by core)
 set -u
 DOWN="$E2E_DOWN"
 UP="$E2E_UP"
