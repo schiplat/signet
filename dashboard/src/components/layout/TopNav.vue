@@ -732,7 +732,7 @@ onUnmounted(() => {
         aria-modal="true"
         aria-label="Edit profile"
         tabindex="-1"
-        class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
         @keydown="a11yProfile.onKeydown"
         @keydown.esc="!profileSaving && (showProfile = false)"
       >
@@ -782,7 +782,7 @@ onUnmounted(() => {
         aria-modal="true"
         aria-label="Change password"
         tabindex="-1"
-        class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-sm overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
         @keydown="a11yPassword.onKeydown"
         @keydown.esc="!passwordSaving && (showPassword = false)"
       >
