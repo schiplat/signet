@@ -9,10 +9,11 @@ import {
   UserRoundX,
   UsersRound,
 } from "@lucide/vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, useId, watch } from "vue";
 import UsersView from "@/views/UsersView.vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import { confirm } from "@/lib/confirm";
 import {
   addGroupMembers,
@@ -301,6 +302,16 @@ const userResults = ref<AdminUser[]>([]);
 const userSearching = ref(false);
 let userTimer: ReturnType<typeof setTimeout> | null = null;
 
+/*
+ * Both dialogs share the dashboard dialog behaviour: scroll lock, focus in/out,
+ * Tab containment, Escape mirroring the backdrop click.
+ */
+const editorPanel = ref<HTMLElement | null>(null);
+const addMembersPanel = ref<HTMLElement | null>(null);
+const a11yEditor = useDialog(editorPanel, showEditor);
+const a11yAddMembers = useDialog(addMembersPanel, showAddMembers);
+const dv = useId();
+
 function onUserQuery() {
   if (userTimer) clearTimeout(userTimer);
   userTimer = setTimeout(() => void searchUsers(), 250);
@@ -572,26 +583,33 @@ function sourceLabel(source: AdminGroup["source"]) {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showEditor = false" />
         <div
-          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="editorPanel"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="editorMode === 'create' ? 'New group or department' : 'Edit group'"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yEditor.onKeydown"
+          @keydown.esc="showEditor = false"
         >
           <h3 class="mb-4 text-[15px] font-semibold">
             {{ editorMode === "create" ? "New group or department" : "Edit group" }}
           </h3>
           <form class="space-y-4" @submit.prevent="saveEditor">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Name</label>
-              <input v-model="editorName" required maxlength="200" class="field-input" />
+              <label :for="`${dv}-name`" class="mb-1 block text-[12px] font-medium">Name</label>
+              <input :id="`${dv}-name`" v-model="editorName" required maxlength="200" class="field-input" />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Kind</label>
-              <select v-model="editorKind" class="field-input">
+              <label :for="`${dv}-kind`" class="mb-1 block text-[12px] font-medium">Kind</label>
+              <select :id="`${dv}-kind`" v-model="editorKind" class="field-input">
                 <option value="group">Group</option>
                 <option value="department">Department</option>
               </select>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Parent</label>
-              <select v-model="editorParent" class="field-input">
+              <label :for="`${dv}-parent`" class="mb-1 block text-[12px] font-medium">Parent</label>
+              <select :id="`${dv}-parent`" v-model="editorParent" class="field-input">
                 <option value="">No parent (root)</option>
                 <option v-for="opt in parentOptions" :key="opt.id" :value="opt.id">
                   {{ opt.label }}
@@ -625,7 +643,14 @@ function sourceLabel(source: AdminGroup["source"]) {
           @click="showAddMembers = false"
         />
         <div
-          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="addMembersPanel"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="selectedGroup ? `Add members to ${selectedGroup.display_name}` : 'Add members'"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yAddMembers.onKeydown"
+          @keydown.esc="showAddMembers = false"
         >
           <h3 class="mb-4 text-[15px] font-semibold">
             Add members to {{ selectedGroup?.display_name }}

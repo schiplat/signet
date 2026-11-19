@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { AppWindow, ChevronDown, Download, Fingerprint, KeyRound, Laptop, Link2, LogOut, PanelLeft, Shield, User } from "@lucide/vue";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import UiButton from "@/components/ui/UiButton.vue";
 import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
+import { useDialog } from "@/composables/useDialog";
 import { useQrDataUrl } from "@/composables/useQrDataUrl";
 import {
   changePassword,
@@ -105,6 +106,30 @@ const totpEnabled = ref(false);
 const recoveryRemaining = ref(0);
 const policyRequired = ref(false);
 const mfaCode = ref("");
+
+/*
+ * Account dialogs share the dashboard's dialog behaviour: counted scroll lock,
+ * focus into the panel on open and back to the trigger on close, Tab held
+ * inside. Escape follows each backdrop's guard, so a dialog with an in-flight
+ * request cannot be dismissed mid-save.
+ */
+const profilePanel = ref<HTMLElement | null>(null);
+const passwordPanel = ref<HTMLElement | null>(null);
+const mfaPanelEl = ref<HTMLElement | null>(null);
+const sessionsPanel = ref<HTMLElement | null>(null);
+const passkeysPanel = ref<HTMLElement | null>(null);
+const consentsPanel = ref<HTMLElement | null>(null);
+const identitiesPanel = ref<HTMLElement | null>(null);
+
+/* Field ids for the two small forms (labels and inputs are siblings here). */
+const navId = useId();
+const a11yProfile = useDialog(profilePanel, showProfile);
+const a11yPassword = useDialog(passwordPanel, showPassword);
+const a11yMfa = useDialog(mfaPanelEl, showMfa);
+const a11ySessions = useDialog(sessionsPanel, showSessions);
+const a11yPasskeys = useDialog(passkeysPanel, showPasskeys);
+const a11yConsents = useDialog(consentsPanel, showConsents);
+const a11yIdentities = useDialog(identitiesPanel, showIdentities);
 const enrollSecret = ref("");
 const enrollUri = ref("");
 const { dataUrl: qrUrl } = useQrDataUrl(enrollUri);
@@ -701,20 +726,29 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showProfile" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!profileSaving && (showProfile = false)" />
-      <div class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="profilePanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit profile"
+        tabindex="-1"
+        class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yProfile.onKeydown"
+        @keydown.esc="!profileSaving && (showProfile = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Edit profile</h2>
         <form class="space-y-3.5" @submit.prevent="submitProfile">
           <div>
-            <label class="type-label mb-1.5 block">Email</label>
-            <input class="field-input opacity-70" :value="auth.user?.email" disabled />
+            <label class="type-label mb-1.5 block" :for="`${navId}-profile-email`">Email</label>
+            <input :id="`${navId}-profile-email`" class="field-input opacity-70" :value="auth.user?.email" disabled />
           </div>
           <div>
-            <label class="type-label mb-1.5 block">Display name</label>
-            <input v-model="displayName" class="field-input" required />
+            <label class="type-label mb-1.5 block" :for="`${navId}-profile-name`">Display name</label>
+            <input :id="`${navId}-profile-name`" v-model="displayName" class="field-input" required />
           </div>
           <div>
-            <label class="type-label mb-1.5 block">Phone</label>
-            <input v-model="profilePhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-profile-phone`">Phone</label>
+            <input :id="`${navId}-profile-phone`" v-model="profilePhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
             <p v-if="profilePhoneCheckState === 'exists'" class="field-error mt-1">
               This phone is already registered.
             </p>
@@ -742,16 +776,26 @@ onUnmounted(() => {
         class="absolute inset-0 bg-black/30 backdrop-blur-sm"
         @click="!passwordSaving && (showPassword = false)"
       />
-      <div class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="passwordPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Change password"
+        tabindex="-1"
+        class="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yPassword.onKeydown"
+        @keydown.esc="!passwordSaving && (showPassword = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Change password</h2>
         <form class="space-y-3.5" @submit.prevent="submitPassword">
           <div>
-            <label class="type-label mb-1.5 block">Current password</label>
-            <input v-model="currentPassword" type="password" required class="field-input" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-pw-current`">Current password</label>
+            <input :id="`${navId}-pw-current`" v-model="currentPassword" type="password" required class="field-input" />
           </div>
           <div>
-            <label class="type-label mb-1.5 block">New password</label>
+            <label class="type-label mb-1.5 block" :for="`${navId}-pw-new`">New password</label>
             <input
+              :id="`${navId}-pw-new`"
               v-model="newPassword"
               type="password"
               required
@@ -763,8 +807,8 @@ onUnmounted(() => {
             </p>
           </div>
           <div>
-            <label class="type-label mb-1.5 block">Confirm new password</label>
-            <input v-model="confirmPassword" type="password" required minlength="10" class="field-input" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-pw-confirm`">Confirm new password</label>
+            <input :id="`${navId}-pw-confirm`" v-model="confirmPassword" type="password" required minlength="10" class="field-input" />
           </div>
           <p v-if="passwordErr" class="field-error">{{ passwordErr }}</p>
           <div class="flex justify-end gap-2 pt-1">
@@ -789,7 +833,16 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showMfa" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!mfaLoading && (showMfa = false)" />
-      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="mfaPanelEl"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Two-factor authentication"
+        tabindex="-1"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yMfa.onKeydown"
+        @keydown.esc="!mfaLoading && (showMfa = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Two-factor authentication</h2>
 
         <div v-if="mfaLoading && mfaPanel === 'status'" class="py-8 text-center text-sm text-muted-foreground">
@@ -872,8 +925,8 @@ onUnmounted(() => {
           </div>
           <p class="break-all rounded-lg bg-muted px-3 py-2 font-mono text-[11px]">{{ enrollSecret }}</p>
           <div>
-            <label class="type-label mb-1.5 block">Authentication code</label>
-            <input ref="mfaEnrollCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-mfa-enroll-code`">Authentication code</label>
+            <input :id="`${navId}-mfa-enroll-code`" ref="mfaEnrollCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
@@ -893,8 +946,8 @@ onUnmounted(() => {
         >
           <p class="text-xs text-muted-foreground">Enter a current authenticator code to continue.</p>
           <div>
-            <label class="type-label mb-1.5 block">Authentication code</label>
-            <input ref="mfaVerifyCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-mfa-verify-code`">Authentication code</label>
+            <input :id="`${navId}-mfa-verify-code`" ref="mfaVerifyCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
@@ -914,8 +967,8 @@ onUnmounted(() => {
             Enter a current authenticator code to disable MFA. You can enable it again later.
           </p>
           <div>
-            <label class="type-label mb-1.5 block">Authentication code</label>
-            <input ref="mfaDisableCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
+            <label class="type-label mb-1.5 block" :for="`${navId}-mfa-disable-code`">Authentication code</label>
+            <input :id="`${navId}-mfa-disable-code`" ref="mfaDisableCodeInput" v-model="mfaCode" class="field-input font-mono" required autocomplete="one-time-code" />
           </div>
           <p v-if="mfaErr" class="field-error">{{ mfaErr }}</p>
           <div class="flex justify-end gap-2">
@@ -952,7 +1005,16 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showSessions" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!sessionsBusy && (showSessions = false)" />
-      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="sessionsPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Active sessions"
+        tabindex="-1"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11ySessions.onKeydown"
+        @keydown.esc="!sessionsBusy && (showSessions = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Active sessions</h2>
 
         <div v-if="sessionsLoading" class="py-8 text-center text-sm text-muted-foreground">
@@ -1019,7 +1081,16 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showPasskeys" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!passkeyBusy && (showPasskeys = false)" />
-      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="passkeysPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Passkeys"
+        tabindex="-1"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yPasskeys.onKeydown"
+        @keydown.esc="!passkeyBusy && (showPasskeys = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Passkeys</h2>
 
         <div v-if="passkeyLoading" class="py-8 text-center text-sm text-muted-foreground">
@@ -1059,9 +1130,10 @@ onUnmounted(() => {
           </div>
 
           <form class="space-y-3 border-t border-border/30 pt-4" @submit.prevent="registerPasskey">
-            <label class="type-label block">Add a passkey</label>
+            <label class="type-label block" :for="`${navId}-passkey-name`">Add a passkey</label>
             <div class="flex gap-2">
               <input
+                :id="`${navId}-passkey-name`"
                 v-model="passkeyName"
                 class="field-input"
                 placeholder="Name (e.g. MacBook)"
@@ -1086,7 +1158,16 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showConsents" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!consentsBusy && (showConsents = false)" />
-      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="consentsPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Connected apps"
+        tabindex="-1"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yConsents.onKeydown"
+        @keydown.esc="!consentsBusy && (showConsents = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Connected apps</h2>
 
         <div v-if="consentsLoading" class="py-8 text-center text-sm text-muted-foreground">
@@ -1141,7 +1222,16 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="showIdentities" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!identitiesBusy && (showIdentities = false)" />
-      <div class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+      <div
+        ref="identitiesPanel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Linked accounts"
+        tabindex="-1"
+        class="relative z-10 mx-4 max-h-[90vh] w-full max-w-md overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11yIdentities.onKeydown"
+        @keydown.esc="!identitiesBusy && (showIdentities = false)"
+      >
         <h2 class="mb-4 text-base font-semibold">Linked accounts</h2>
 
         <div v-if="identitiesLoading" class="py-8 text-center text-sm text-muted-foreground">

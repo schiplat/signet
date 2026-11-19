@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { Check, Copy, Fingerprint, Globe, KeyRound, Link2, Plus, RefreshCw, Send, Trash2, Webhook as WebhookIcon, X } from "@lucide/vue";
-import { onMounted, ref } from "vue";
+import { onMounted, ref, useId } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import { splitList } from "@/lib/directoryMapping";
 import SsoProviderIcon from "@/components/ui/SsoProviderIcon.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import {
   createSsoProvider,
   createWebhook,
@@ -60,6 +61,19 @@ const ssoSaving = ref(false);
 const ssoErr = ref("");
 const ssoEditing = ref<string | null>(null); // provider code being edited, null = create
 const ssoBusyCode = ref<string | null>(null);
+
+/*
+ * The three dialogs share the dashboard dialog behaviour: scroll lock, focus
+ * in/out, Tab containment. Escape mirrors each backdrop's guard, so an
+ * in-flight save cannot be dismissed mid-request.
+ */
+const webhookPanel = ref<HTMLElement | null>(null);
+const scimPanel = ref<HTMLElement | null>(null);
+const ssoPanel = ref<HTMLElement | null>(null);
+const a11yWebhook = useDialog(webhookPanel, showCreate);
+const a11yScim = useDialog(scimPanel, showScimToken);
+const a11ySso = useDialog(ssoPanel, ssoShowModal);
+const iv = useId();
 
 const ssoForm = ref({
   code: "",
@@ -688,26 +702,35 @@ async function copyText(text: string): Promise<boolean> {
     <Teleport to="body">
       <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!creating && (showCreate = false)" />
-        <div class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <div
+          ref="webhookPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="New webhook"
+          tabindex="-1"
+          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yWebhook.onKeydown"
+          @keydown.esc="!creating && (showCreate = false)"
+        >
           <h2 class="mb-4 text-base font-semibold">New webhook</h2>
           <form class="space-y-3.5" @submit.prevent="onCreate">
             <div>
-              <label class="type-label mb-1.5 block">Type</label>
-              <select v-model="formKind" class="field-input">
+              <label class="type-label mb-1.5 block" :for="`${iv}-kind`">Type</label>
+              <select :id="`${iv}-kind`" v-model="formKind" class="field-input">
                 <option value="feishu">Feishu custom bot</option>
                 <option value="generic">Generic (raw JSON + HMAC header)</option>
               </select>
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Webhook URL</label>
-              <input v-model="formUrl" class="field-input" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" required />
+              <label class="type-label mb-1.5 block" :for="`${iv}-url`">Webhook URL</label>
+              <input :id="`${iv}-url`" v-model="formUrl" class="field-input" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/…" required />
               <p v-if="formKind === 'feishu'" class="type-meta mt-1 text-[11px]">
                 Paste the full Feishu custom-bot webhook URL.
               </p>
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Signature secret (optional)</label>
-              <input v-model="formSecret" class="field-input" placeholder="Only needed if the Feishu bot has signature verification enabled" />
+              <label class="type-label mb-1.5 block" :for="`${iv}-secret`">Signature secret (optional)</label>
+              <input :id="`${iv}-secret`" v-model="formSecret" class="field-input" placeholder="Only needed if the Feishu bot has signature verification enabled" />
               <p class="type-meta mt-1 text-[11px]">
                 For Feishu, only needed if the bot has signature verification enabled.
               </p>
@@ -730,10 +753,23 @@ async function copyText(text: string): Promise<boolean> {
     <Teleport to="body">
       <div v-if="showScimToken" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showScimToken = false" />
-        <div class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <div
+          ref="scimPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="SCIM bearer token"
+          tabindex="-1"
+          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yScim.onKeydown"
+          @keydown.esc="showScimToken = false"
+        >
           <div class="mb-3 flex items-center justify-between">
             <h2 class="text-base font-semibold">SCIM bearer token</h2>
-            <button class="text-muted-foreground hover:text-foreground" @click="showScimToken = false">
+            <button
+              class="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              aria-label="Close"
+              @click="showScimToken = false"
+            >
               <X class="h-4 w-4" />
             </button>
           </div>
@@ -759,15 +795,24 @@ async function copyText(text: string): Promise<boolean> {
     <Teleport to="body">
       <div v-if="ssoShowModal" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!ssoSaving && (ssoShowModal = false)" />
-        <div class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl">
+        <div
+          ref="ssoPanel"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="ssoEditing ? 'Edit sign-in provider' : 'New sign-in provider'"
+          tabindex="-1"
+          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11ySso.onKeydown"
+          @keydown.esc="!ssoSaving && (ssoShowModal = false)"
+        >
           <h2 class="mb-4 text-base font-semibold">
             {{ ssoEditing ? "Edit sign-in provider" : "New sign-in provider" }}
           </h2>
           <form class="space-y-3.5" @submit.prevent="onSsoSave">
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label class="type-label mb-1.5 block">Type</label>
-                <select v-model="ssoForm.provider_type" class="field-input" :disabled="!!ssoEditing">
+                <label class="type-label mb-1.5 block" :for="`${iv}-sso-type`">Type</label>
+                <select :id="`${iv}-sso-type`" v-model="ssoForm.provider_type" class="field-input" :disabled="!!ssoEditing">
                   <option value="github">GitHub</option>
                   <option value="google">Google</option>
                   <option value="feishu">Feishu</option>
@@ -791,8 +836,9 @@ async function copyText(text: string): Promise<boolean> {
                 </p>
               </div>
               <div>
-                <label class="type-label mb-1.5 block">Code (URL slug)</label>
+                <label class="type-label mb-1.5 block" :for="`${iv}-sso-code`">Code (URL slug)</label>
                 <input
+                  :id="`${iv}-sso-code`"
                   v-model="ssoForm.code"
                   class="field-input"
                   placeholder="github"
@@ -803,19 +849,20 @@ async function copyText(text: string): Promise<boolean> {
               </div>
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Display name</label>
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-display-name`">Display name</label>
               <input
+                :id="`${iv}-sso-display-name`"
                 v-model="ssoForm.display_name"
                 class="field-input"
                 :placeholder="SSO_TYPE_LABELS[ssoForm.provider_type]"
               />
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Client ID</label>
-              <input v-model="ssoForm.client_id" class="field-input" placeholder="App / client ID from the provider" required />
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-client-id`">Client ID</label>
+              <input :id="`${iv}-sso-client-id`" v-model="ssoForm.client_id" class="field-input" placeholder="App / client ID from the provider" required />
             </div>
             <div>
-              <label class="type-label mb-1.5 block">
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-secret`">
                 Client secret {{ ssoEditing ? "(leave blank to keep current)" : "" }}
               </label>
               <input
@@ -828,8 +875,9 @@ async function copyText(text: string): Promise<boolean> {
               />
             </div>
             <div v-if="ssoForm.provider_type === 'oidc'">
-              <label class="type-label mb-1.5 block">Issuer URL</label>
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-issuer`">Issuer URL</label>
               <input
+                :id="`${iv}-sso-issuer`"
                 v-model="ssoForm.issuer_url"
                 class="field-input"
                 placeholder="https://sso.example.com/realms/main"
@@ -840,16 +888,18 @@ async function copyText(text: string): Promise<boolean> {
               </p>
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Scopes (optional)</label>
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-scopes`">Scopes (optional)</label>
               <input
+                :id="`${iv}-sso-scopes`"
                 v-model="ssoForm.scopes"
                 class="field-input"
                 placeholder="Leave blank for provider defaults"
               />
             </div>
             <div>
-              <label class="type-label mb-1.5 block">Allowed email domains (optional)</label>
+              <label class="type-label mb-1.5 block" :for="`${iv}-sso-domains`">Allowed email domains (optional)</label>
               <input
+                :id="`${iv}-sso-domains`"
                 v-model="ssoForm.allowed_email_domains"
                 class="field-input font-mono text-[12px]"
                 placeholder="corp.example"
@@ -862,8 +912,8 @@ async function copyText(text: string): Promise<boolean> {
             </div>
             <div class="grid grid-cols-2 gap-3">
               <div>
-                <label class="type-label mb-1.5 block">Auto-create accounts (JIT)</label>
-                <select v-model="ssoForm.jit_mode" class="field-input">
+                <label class="type-label mb-1.5 block" :for="`${iv}-sso-jit`">Auto-create accounts (JIT)</label>
+                <select :id="`${iv}-sso-jit`" v-model="ssoForm.jit_mode" class="field-input">
                   <option value="inherit">Follow global setting</option>
                   <option value="on">Always (override global off)</option>
                   <option value="off">Never (override global on)</option>
@@ -875,8 +925,8 @@ async function copyText(text: string): Promise<boolean> {
                 </p>
               </div>
               <div>
-                <label class="type-label mb-1.5 block">Email trust</label>
-                <select v-model="ssoForm.email_trust" class="field-input">
+                <label class="type-label mb-1.5 block" :for="`${iv}-sso-email-trust`">Email trust</label>
+                <select :id="`${iv}-sso-email-trust`" v-model="ssoForm.email_trust" class="field-input">
                   <option value="inherit">Provider's own verified flag</option>
                   <option value="any">Any returned email counts as verified</option>
                   <option value="verified">Require the verified flag</option>

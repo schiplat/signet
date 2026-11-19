@@ -18,6 +18,7 @@ import { computed, onMounted, ref } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import RowActionsMenu, { type RowActionItem } from "@/components/ui/RowActionsMenu.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import MappingPanel from "@/components/directory/MappingPanel.vue";
 import { joinList, mappingKeys, splitList, withListValues } from "@/lib/directoryMapping";
 import {
@@ -53,6 +54,13 @@ const runsLoading = ref(false);
 // --- Create/edit modal ---
 const showModal = ref(false);
 const saving = ref(false);
+
+/*
+ * The source editor shares the dashboard dialog behaviour: scroll lock, focus
+ * in/out, Tab containment; Escape mirrors the backdrop's in-flight guard.
+ */
+const panelEl = ref<HTMLElement | null>(null);
+const a11y = useDialog(panelEl, showModal);
 const formErr = ref("");
 const editing = ref<string | null>(null); // source code being edited; null = create
 
@@ -870,7 +878,14 @@ function duration(r: DirectoryRun): string {
           @click="!saving && (showModal = false)"
         />
         <div
-          class="relative z-10 mx-4 max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="panelEl"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="editing ? 'Edit directory source' : 'New directory source'"
+          tabindex="-1"
+          class="relative z-10 mx-4 max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11y.onKeydown"
+          @keydown.esc="!saving && (showModal = false)"
         >
           <div class="mb-4 flex items-center justify-between">
             <h2 class="flex items-center gap-2 text-base font-semibold">
@@ -878,8 +893,9 @@ function duration(r: DirectoryRun): string {
               {{ editing ? "Edit directory source" : "New directory source" }}
             </h2>
             <button
-              class="text-muted-foreground hover:text-foreground"
+              class="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
               type="button"
+              aria-label="Close"
               @click="showModal = false"
             >
               <X class="h-4 w-4" />
@@ -889,8 +905,8 @@ function duration(r: DirectoryRun): string {
           <form class="space-y-4" @submit.prevent="onSave">
             <div class="grid gap-3 sm:grid-cols-3">
               <div>
-                <label class="type-label mb-1.5 block">Code</label>
-                <input
+                <label class="type-label mb-1.5 block" for="ds-code">Code</label>
+                id="ds-code" <input
                   v-model="form.code"
                   class="field-input"
                   placeholder="corp-ldap"
@@ -900,20 +916,20 @@ function duration(r: DirectoryRun): string {
                 />
               </div>
               <div>
-                <label class="type-label mb-1.5 block">Display name</label>
-                <input v-model="form.name" class="field-input" placeholder="Corporate LDAP" required />
+                <label class="type-label mb-1.5 block" for="ds-display-name">Display name</label>
+                id="ds-display-name" <input v-model="form.name" class="field-input" placeholder="Corporate LDAP" required />
               </div>
               <div>
-                <label class="type-label mb-1.5 block">Priority</label>
-                <input v-model.number="form.priority" type="number" min="1" class="field-input" />
+                <label class="type-label mb-1.5 block" for="ds-priority">Priority</label>
+                id="ds-priority" <input v-model.number="form.priority" type="number" min="1" class="field-input" />
                 <p class="type-meta mt-1 text-[11px]">Lower wins</p>
               </div>
             </div>
 
             <div v-if="!editing" class="grid gap-3 sm:grid-cols-3">
               <div class="sm:col-span-1">
-                <label class="type-label mb-1.5 block">Source kind</label>
-                <select v-model="form.kind" class="field-input">
+                <label class="type-label mb-1.5 block" for="ds-source-kind">Source kind</label>
+                id="ds-source-kind" <select v-model="form.kind" class="field-input">
                   <option value="ldap">LDAP (LDAPS)</option>
                   <option value="http_json">HTTP JSON API</option>
                 </select>
@@ -924,8 +940,8 @@ function duration(r: DirectoryRun): string {
             <template v-if="form.kind === 'ldap'">
               <div class="grid gap-3 sm:grid-cols-2">
                 <div>
-                  <label class="type-label mb-1.5 block">LDAPS URL</label>
-                  <input
+                  <label class="type-label mb-1.5 block" for="ds-ldaps-url">LDAPS URL</label>
+                  id="ds-ldaps-url" <input
                     v-model="form.config.url"
                     class="field-input"
                     placeholder="ldaps://ldap.corp.example.com:636"
@@ -936,11 +952,12 @@ function duration(r: DirectoryRun): string {
                   </p>
                 </div>
                 <div>
-                  <label class="type-label mb-1.5 block">
+                  <label class="type-label mb-1.5 block" for="ds-ldap-credential">
                     Service-account password
                     {{ editing ? "(leave blank to keep the stored one)" : "" }}
                   </label>
                   <input
+                    id="ds-ldap-credential"
                     v-model="form.credential"
                     type="password"
                     class="field-input"
@@ -953,8 +970,8 @@ function duration(r: DirectoryRun): string {
 
               <div class="grid gap-3 sm:grid-cols-2">
                 <div>
-                  <label class="type-label mb-1.5 block">Bind DN</label>
-                  <input
+                  <label class="type-label mb-1.5 block" for="ds-bind-dn">Bind DN</label>
+                  id="ds-bind-dn" <input
                     v-model="form.config.bind_dn"
                     class="field-input"
                     placeholder="cn=svc-signet,ou=service,dc=corp,dc=example,dc=com"
@@ -962,8 +979,8 @@ function duration(r: DirectoryRun): string {
                   />
                 </div>
                 <div>
-                  <label class="type-label mb-1.5 block">Page size</label>
-                  <input
+                  <label class="type-label mb-1.5 block" for="ds-page-size">Page size</label>
+                  id="ds-page-size" <input
                     v-model.number="form.config.page_size"
                     type="number"
                     min="1"
@@ -975,8 +992,8 @@ function duration(r: DirectoryRun): string {
               </div>
 
               <div>
-                <label class="type-label mb-1.5 block">CA certificate (optional)</label>
-                <textarea
+                <label class="type-label mb-1.5 block" for="ds-ca-certificate-optional">CA certificate (optional)</label>
+                id="ds-ca-certificate-optional" <textarea
                   v-model="form.ca_cert_pem"
                   rows="3"
                   class="field-input font-mono text-[11px]"
@@ -992,8 +1009,8 @@ function duration(r: DirectoryRun): string {
             <template v-else>
               <div class="grid gap-3 sm:grid-cols-2">
                 <div>
-                  <label class="type-label mb-1.5 block">Endpoint URL</label>
-                  <input
+                  <label class="type-label mb-1.5 block" for="ds-endpoint-url">Endpoint URL</label>
+                  id="ds-endpoint-url" <input
                     v-model="form.http.url"
                     class="field-input"
                     placeholder="https://directory.corp.example.com/api/users"
@@ -1005,8 +1022,8 @@ function duration(r: DirectoryRun): string {
                   </p>
                 </div>
                 <div>
-                  <label class="type-label mb-1.5 block">Auth</label>
-                  <select v-model="form.http.auth" class="field-input">
+                  <label class="type-label mb-1.5 block" for="ds-auth">Auth</label>
+                  id="ds-auth" <select v-model="form.http.auth" class="field-input">
                     <option value="bearer">Bearer token</option>
                     <option value="basic">Basic (username + password)</option>
                     <option value="none">None</option>
@@ -1016,8 +1033,8 @@ function duration(r: DirectoryRun): string {
 
               <div class="grid gap-3 sm:grid-cols-2">
                 <div v-if="form.http.auth === 'basic'">
-                  <label class="type-label mb-1.5 block">Username</label>
-                  <input
+                  <label class="type-label mb-1.5 block" for="ds-username">Username</label>
+                  id="ds-username" <input
                     v-model="form.http.basic_username"
                     class="field-input"
                     placeholder="svc-signet"
@@ -1025,11 +1042,12 @@ function duration(r: DirectoryRun): string {
                   />
                 </div>
                 <div v-if="form.http.auth !== 'none'">
-                  <label class="type-label mb-1.5 block">
+                  <label class="type-label mb-1.5 block" for="ds-http-credential">
                     {{ form.http.auth === "bearer" ? "Token" : "Password" }}
                     {{ editing ? "(leave blank to keep the stored one)" : "" }}
                   </label>
                   <input
+                    id="ds-http-credential"
                     v-model="form.credential"
                     type="password"
                     class="field-input"
@@ -1042,8 +1060,8 @@ function duration(r: DirectoryRun): string {
 
               <div class="grid gap-3 sm:grid-cols-4">
                 <div>
-                  <label class="type-label mb-1.5 block">Pagination</label>
-                  <select v-model="form.http.pagination" class="field-input">
+                  <label class="type-label mb-1.5 block" for="ds-pagination">Pagination</label>
+                  id="ds-pagination" <select v-model="form.http.pagination" class="field-input">
                     <option value="none">None (single response)</option>
                     <option value="page">Page number</option>
                     <option value="cursor">Cursor</option>
@@ -1051,17 +1069,17 @@ function duration(r: DirectoryRun): string {
                 </div>
                 <template v-if="form.http.pagination === 'page'">
                   <div>
-                    <label class="type-label mb-1.5 block">Page param</label>
-                    <input v-model="form.http.page_param" class="field-input font-mono text-xs" />
+                    <label class="type-label mb-1.5 block" for="ds-page-param">Page param</label>
+                    id="ds-page-param" <input v-model="form.http.page_param" class="field-input font-mono text-xs" />
                   </div>
                   <div>
-                    <label class="type-label mb-1.5 block">Size param</label>
-                    <input v-model="form.http.page_size_param" class="field-input font-mono text-xs" />
+                    <label class="type-label mb-1.5 block" for="ds-size-param">Size param</label>
+                    id="ds-size-param" <input v-model="form.http.page_size_param" class="field-input font-mono text-xs" />
                   </div>
                   <div>
-                    <label class="type-label mb-1.5 block">Page size / max pages</label>
+                    <label class="type-label mb-1.5 block" for="ds-page-size-max-pages">Page size / max pages</label>
                     <div class="flex gap-2">
-                      <input
+                      id="ds-page-size-max-pages" <input
                         v-model.number="form.http.page_size"
                         type="number"
                         min="1"
@@ -1079,20 +1097,20 @@ function duration(r: DirectoryRun): string {
                 </template>
                 <template v-else-if="form.http.pagination === 'cursor'">
                   <div>
-                    <label class="type-label mb-1.5 block">Cursor param</label>
-                    <input v-model="form.http.cursor_param" class="field-input font-mono text-xs" />
+                    <label class="type-label mb-1.5 block" for="ds-cursor-param">Cursor param</label>
+                    id="ds-cursor-param" <input v-model="form.http.cursor_param" class="field-input font-mono text-xs" />
                   </div>
                   <div>
-                    <label class="type-label mb-1.5 block">Next-cursor path</label>
-                    <input
+                    <label class="type-label mb-1.5 block" for="ds-next-cursor-path">Next-cursor path</label>
+                    id="ds-next-cursor-path" <input
                       v-model="form.http.cursor_next_path"
                       class="field-input font-mono text-xs"
                       placeholder="paging.next"
                     />
                   </div>
                   <div>
-                    <label class="type-label mb-1.5 block">Max pages</label>
-                    <input
+                    <label class="type-label mb-1.5 block" for="ds-max-pages">Max pages</label>
+                    id="ds-max-pages" <input
                       v-model.number="form.http.max_pages"
                       type="number"
                       min="1"
@@ -1122,8 +1140,8 @@ function duration(r: DirectoryRun): string {
 
             <div class="grid gap-3 sm:grid-cols-2">
               <div>
-                <label class="type-label mb-1.5 block">Sync interval (minutes)</label>
-                <input
+                <label class="type-label mb-1.5 block" for="ds-sync-interval-minutes">Sync interval (minutes)</label>
+                id="ds-sync-interval-minutes" <input
                   v-model="form.interval_minutes"
                   type="number"
                   min="1"
