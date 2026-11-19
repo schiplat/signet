@@ -65,7 +65,7 @@ function isVisible(el: HTMLElement): boolean {
   return el.getClientRects().length > 0;
 }
 
-export function useDialog(panel: Ref<HTMLElement | null>, isOpen: Ref<boolean>) {
+export function useDialog(panel: Ref<HTMLElement | null>, isOpen: Ref<unknown>) {
   let previouslyFocused: HTMLElement | null = null;
 
   function focusFirst() {

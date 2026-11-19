@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { onMounted, ref } from "vue";
+import { onMounted, ref, useId } from "vue";
 import { KeyRound, Plus, Trash2 } from "@lucide/vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import ClientSecretDialog, {
   type SecretDialogPayload,
 } from "@/components/ui/ClientSecretDialog.vue";
@@ -33,6 +34,16 @@ const editing = ref<SelfClient | null>(null);
 const saving = ref(false);
 const editName = ref("");
 const editRedirects = ref("");
+
+const createPanel = ref<HTMLElement | null>(null);
+const editPanel = ref<HTMLElement | null>(null);
+const a11yCreate = useDialog(createPanel, showCreate);
+const a11yEdit = useDialog(editPanel, editing);
+
+/* The create and edit forms both have name and redirect fields; ids keep each
+ * label bound to the input in its own dialog. */
+const ca = useId();
+const ea = useId();
 
 const rotatingId = ref<string | null>(null);
 const secretDialog = ref<SecretDialogPayload | null>(null);
@@ -308,15 +319,23 @@ async function onDelete(c: SelfClient) {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showCreate = false" />
         <div
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="createPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Register an application"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yCreate.onKeydown"
+          @keydown.esc="showCreate = false"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Register an application</h3>
           <form class="space-y-4" @submit.prevent="onCreate">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${ca}-name`" class="mb-1 block text-[12px] font-medium">
                 Application name <span class="text-red-500">*</span>
               </label>
               <input
+                :id="`${ca}-name`"
                 v-model="formName"
                 required
                 maxlength="200"
@@ -328,10 +347,11 @@ async function onDelete(c: SelfClient) {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${ca}-redirects`" class="mb-1 block text-[12px] font-medium">
                 Redirect URIs <span class="text-red-500">*</span>
               </label>
               <textarea
+                :id="`${ca}-redirects`"
                 v-model="formRedirects"
                 required
                 rows="3"
@@ -343,8 +363,9 @@ async function onDelete(c: SelfClient) {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Scopes</label>
+              <label :for="`${ca}-scopes`" class="mb-1 block text-[12px] font-medium">Scopes</label>
               <input
+                :id="`${ca}-scopes`"
                 v-model="formScopes"
                 placeholder="openid, profile, email (default)"
                 class="field-input"
@@ -371,17 +392,25 @@ async function onDelete(c: SelfClient) {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="editing = null" />
         <div
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="editPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit application"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yEdit.onKeydown"
+          @keydown.esc="editing = null"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Edit application</h3>
           <form class="space-y-4" @submit.prevent="onSaveEdit">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Application name</label>
-              <input v-model="editName" required maxlength="200" class="field-input" />
+              <label :for="`${ea}-name`" class="mb-1 block text-[12px] font-medium">Application name</label>
+              <input :id="`${ea}-name`" v-model="editName" required maxlength="200" class="field-input" />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Redirect URIs</label>
+              <label :for="`${ea}-redirects`" class="mb-1 block text-[12px] font-medium">Redirect URIs</label>
               <textarea
+                :id="`${ea}-redirects`"
                 v-model="editRedirects"
                 required
                 rows="3"

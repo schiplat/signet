@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Check, Copy, Download, LogOut, Power, PowerOff, ShieldCheck, Trash2, Upload, UserRound, UserRoundX } from "@lucide/vue";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, useId, watch } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import UsersToolbar from "@/components/directory/UsersToolbar.vue";
 import RowActionsMenu, { type RowActionItem } from "@/components/ui/RowActionsMenu.vue";
@@ -8,6 +8,7 @@ import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import { buttonClass } from "@/components/ui/button";
+import { useDialog } from "@/composables/useDialog";
 import { useServerList } from "@/composables/useServerList";
 import { confirm } from "@/lib/confirm";
 import {
@@ -75,6 +76,23 @@ const pendingFileName = ref("");
 const pendingUsers = ref<ImportUserRow[] | null>(null);
 const importPreview = ref<Awaited<ReturnType<typeof importUsers>> | null>(null);
 const importError = ref("");
+
+/*
+ * Dialog behaviour (scroll lock, focus in/out, Tab containment) comes from the
+ * shared useDialog; Escape closes all three — they are form dialogs, and the
+ * backdrop click already discarded them freely.
+ */
+const createPanel = ref<HTMLElement | null>(null);
+const importPanel = ref<HTMLElement | null>(null);
+const editPanel = ref<HTMLElement | null>(null);
+const a11yCreate = useDialog(createPanel, showCreate);
+const a11yImport = useDialog(importPanel, showImport);
+const a11yEdit = useDialog(editPanel, editing);
+
+/* Stable field ids: the create and edit forms both have an email field, and
+ * a label must point at the input in the open dialog, not the other one. */
+const nu = useId();
+const eu = useId();
 
 const formEmail = ref("");
 const formUsername = ref("");
@@ -1041,13 +1059,20 @@ async function onBatchDisable() {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showCreate = false" />
         <div
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="createPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="New User"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yCreate.onKeydown"
+          @keydown.esc="showCreate = false"
         >
           <h3 class="mb-5 text-[15px] font-semibold">New User</h3>
           <form class="space-y-4" @submit.prevent="onCreate">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Email <span class="text-red-500">*</span></label>
-              <input v-model="formEmail" type="email" required class="field-input" />
+              <label :for="`${nu}-email`" class="mb-1 block text-[12px] font-medium">Email <span class="text-red-500">*</span></label>
+              <input :id="`${nu}-email`" v-model="formEmail" type="email" required class="field-input" />
               <p v-if="emailCheckState === 'exists'" class="mt-1 text-[11px] text-red-500">
                 This email is already registered.
               </p>
@@ -1056,8 +1081,8 @@ async function onBatchDisable() {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Username</label>
-              <input v-model="formUsername" class="field-input" placeholder="Optional login name" />
+              <label :for="`${nu}-username`" class="mb-1 block text-[12px] font-medium">Username</label>
+              <input :id="`${nu}-username`" v-model="formUsername" class="field-input" placeholder="Optional login name" />
               <p v-if="usernameCheckState === 'exists'" class="mt-1 text-[11px] text-red-500">
                 This username is already taken.
               </p>
@@ -1066,12 +1091,12 @@ async function onBatchDisable() {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Display name</label>
-              <input v-model="formDisplayName" class="field-input" />
+              <label :for="`${nu}-display-name`" class="mb-1 block text-[12px] font-medium">Display name</label>
+              <input :id="`${nu}-display-name`" v-model="formDisplayName" class="field-input" />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Phone</label>
-              <input v-model="formPhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
+              <label :for="`${nu}-phone`" class="mb-1 block text-[12px] font-medium">Phone</label>
+              <input :id="`${nu}-phone`" v-model="formPhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
               <p v-if="phoneCheckState === 'exists'" class="mt-1 text-[11px] text-red-500">
                 This phone is already registered.
               </p>
@@ -1080,8 +1105,9 @@ async function onBatchDisable() {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Password <span class="text-red-500">*</span></label>
+              <label :for="`${nu}-password`" class="mb-1 block text-[12px] font-medium">Password <span class="text-red-500">*</span></label>
               <input
+                :id="`${nu}-password`"
                 v-model="formPassword"
                 type="password"
                 required
@@ -1098,14 +1124,15 @@ async function onBatchDisable() {
               </span>
             </label>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Role</label>
-              <select v-model="formRole" class="field-input">
+              <label :for="`${nu}-role`" class="mb-1 block text-[12px] font-medium">Role</label>
+              <select :id="`${nu}-role`" v-model="formRole" class="field-input">
                 <option v-for="r in roleOptions" :key="r" :value="r">{{ r }}</option>
               </select>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Groups</label>
+              <label :for="`${nu}-groups`" class="mb-1 block text-[12px] font-medium">Groups</label>
               <input
+                :id="`${nu}-groups`"
                 v-model="formGroups"
                 placeholder="comma-separated, e.g. eng, ops"
                 class="field-input"
@@ -1133,7 +1160,14 @@ async function onBatchDisable() {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="closeImport" />
         <div
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="importPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Import users from JSON"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yImport.onKeydown"
+          @keydown.esc="closeImport"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Import users from JSON</h3>
 
@@ -1223,17 +1257,24 @@ async function onBatchDisable() {
       >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="editing = null" />
         <div
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="editPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Edit User"
+          tabindex="-1"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yEdit.onKeydown"
+          @keydown.esc="editing = null"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Edit User</h3>
           <form class="space-y-4" @submit.prevent="onSaveEdit">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Email</label>
-              <input v-model="editEmail" type="email" required class="field-input" />
+              <label :for="`${eu}-email`" class="mb-1 block text-[12px] font-medium">Email</label>
+              <input :id="`${eu}-email`" v-model="editEmail" type="email" required class="field-input" />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Username</label>
-              <input v-model="editUsername" class="field-input" placeholder="Optional login name" />
+              <label :for="`${eu}-username`" class="mb-1 block text-[12px] font-medium">Username</label>
+              <input :id="`${eu}-username`" v-model="editUsername" class="field-input" placeholder="Optional login name" />
               <p v-if="editUsernameCheckState === 'exists'" class="mt-1 text-[11px] text-red-500">
                 This username is already taken.
               </p>
@@ -1242,12 +1283,12 @@ async function onBatchDisable() {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Display name</label>
-              <input v-model="editDisplayName" required class="field-input" />
+              <label :for="`${eu}-display-name`" class="mb-1 block text-[12px] font-medium">Display name</label>
+              <input :id="`${eu}-display-name`" v-model="editDisplayName" required class="field-input" />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Phone</label>
-              <input v-model="editPhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
+              <label :for="`${eu}-phone`" class="mb-1 block text-[12px] font-medium">Phone</label>
+              <input :id="`${eu}-phone`" v-model="editPhone" class="field-input" placeholder="e.g. +86 138 0000 0000" />
               <p v-if="editPhoneCheckState === 'exists'" class="mt-1 text-[11px] text-red-500">
                 This phone is already registered.
               </p>
@@ -1256,14 +1297,14 @@ async function onBatchDisable() {
               </p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Role</label>
-              <select v-model="editRole" class="field-input">
+              <label :for="`${eu}-role`" class="mb-1 block text-[12px] font-medium">Role</label>
+              <select :id="`${eu}-role`" v-model="editRole" class="field-input">
                 <option v-for="r in roleOptions" :key="r" :value="r">{{ r }}</option>
               </select>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Status</label>
-              <select v-model="editStatus" class="field-input">
+              <label :for="`${eu}-status`" class="mb-1 block text-[12px] font-medium">Status</label>
+              <select :id="`${eu}-status`" v-model="editStatus" class="field-input">
                 <option value="active">active</option>
                 <option value="disabled">frozen</option>
               </select>
@@ -1293,16 +1334,18 @@ async function onBatchDisable() {
               </span>
             </label>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Groups</label>
+              <label :for="`${eu}-groups`" class="mb-1 block text-[12px] font-medium">Groups</label>
               <input
+                :id="`${eu}-groups`"
                 v-model="editGroups"
                 placeholder="comma-separated, e.g. eng, ops"
                 class="field-input"
               />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">New password</label>
+              <label :for="`${eu}-password`" class="mb-1 block text-[12px] font-medium">New password</label>
               <input
+                :id="`${eu}-password`"
                 v-model="editPassword"
                 type="password"
                 minlength="10"
