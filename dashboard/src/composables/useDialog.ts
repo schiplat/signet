@@ -40,7 +40,13 @@ let lockDepth = 0;
 let savedOverflow = "";
 let savedPaddingRight = "";
 
-function lockScroll() {
+/**
+ * Counted body-scroll lock, exported for dialogs that manage their own focus
+ * policy (the confirm host focuses Cancel, not the first field) but must not
+ * keep a private lock: a confirm raised on top of a dialog would otherwise
+ * un-scroll the page beneath it when it closes first.
+ */
+export function lockScroll() {
   if (lockDepth === 0) {
     savedOverflow = document.body.style.overflow;
     savedPaddingRight = document.body.style.paddingRight;
@@ -53,7 +59,7 @@ function lockScroll() {
   lockDepth += 1;
 }
 
-function unlockScroll() {
+export function unlockScroll() {
   lockDepth = Math.max(0, lockDepth - 1);
   if (lockDepth === 0) {
     document.body.style.overflow = savedOverflow;
