@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { Check, Copy } from "@lucide/vue";
 import UiButton from "./UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 
 export interface SecretDialogPayload {
   clientId: string;
@@ -16,6 +17,12 @@ export interface SecretDialogPayload {
 
 const props = defineProps<{ dialog: SecretDialogPayload | null }>();
 const emit = defineEmits<{ close: [] }>();
+
+const panelEl = ref<HTMLElement | null>(null);
+// The panel carries the dialog semantics, scroll lock and focus handling;
+// Escape is deliberately NOT bound — this dialog reveals a one-time secret,
+// and a stray keypress must not discard it. "Done" is the only way out.
+const a11y = useDialog(panelEl, computed(() => props.dialog !== null));
 
 const copiedField = ref<"id" | "secret" | "both" | "config" | null>(null);
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,7 +101,13 @@ function copyBoth() {
     <div v-if="dialog" class="fixed inset-0 z-50 flex items-center justify-center">
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="emit('close')" />
       <div
-        class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+        ref="panelEl"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="dialog?.title"
+        tabindex="-1"
+        class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        @keydown="a11y.onKeydown"
       >
         <h3 class="mb-2 text-[15px] font-semibold">{{ dialog.title }}</h3>
         <p class="type-meta mb-4">
