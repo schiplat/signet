@@ -376,7 +376,7 @@ function sourceLabel(source: AdminGroup["source"]) {
           <UiButton
             variant="ghost"
             size="sm"
-            class="h-7 px-2"
+            class="h-7 w-7 p-0"
             title="New group or department"
             @click="openCreate"
           >
@@ -396,7 +396,7 @@ function sourceLabel(source: AdminGroup["source"]) {
           >
             <UsersRound class="h-3.5 w-3.5 shrink-0" />
             <span class="min-w-0 flex-1 truncate">All users</span>
-            <span class="text-[10px] tabular-nums text-muted-foreground/70">{{ allCount }}</span>
+            <span class="w-7 shrink-0 text-center text-[10px] tabular-nums text-muted-foreground/70">{{ allCount }}</span>
           </div>
           <div
             class="flex cursor-pointer items-center gap-2 rounded-lg py-1.5 pl-2 pr-2 text-[13px] transition-colors"
@@ -409,7 +409,7 @@ function sourceLabel(source: AdminGroup["source"]) {
           >
             <UserRoundX class="h-3.5 w-3.5 shrink-0" />
             <span class="min-w-0 flex-1 truncate">Ungrouped</span>
-            <span class="text-[10px] tabular-nums text-muted-foreground/70">{{
+            <span class="w-7 shrink-0 text-center text-[10px] tabular-nums text-muted-foreground/70">{{
               ungroupedCount
             }}</span>
           </div>
@@ -469,7 +469,7 @@ function sourceLabel(source: AdminGroup["source"]) {
               </span>
               <span
                 v-if="row.group.member_count"
-                class="shrink-0 text-[10px] tabular-nums text-muted-foreground/70"
+                class="w-7 shrink-0 text-center text-[10px] tabular-nums text-muted-foreground/70"
               >
                 {{ row.group.member_count }}
               </span>
