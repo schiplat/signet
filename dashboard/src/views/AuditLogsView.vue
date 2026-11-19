@@ -5,6 +5,7 @@ import PageHeader from "@/components/ui/PageHeader.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import {
   fetchAuditLogs,
   fetchAuditLogFacets,
@@ -130,6 +131,11 @@ function formatTime(iso: string) {
 }
 
 const detailRow = ref<AuditLogItem | null>(null);
+
+// Escape closes the read-only detail panel; focus and the scroll lock come
+// from the shared dialog behaviour.
+const detailPanel = ref<HTMLElement | null>(null);
+const detailA11y = useDialog(detailPanel, computed(() => detailRow.value !== null));
 
 function openDetail(row: AuditLogItem) {
   detailRow.value = row;
@@ -332,7 +338,14 @@ function deviceLabel(row: AuditLogItem) {
       <div v-if="detailRow" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="detailRow = null" />
         <div
-          class="relative z-10 mx-4 max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="detailPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Audit event detail"
+          tabindex="-1"
+          class="relative z-10 mx-4 max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="detailA11y.onKeydown"
+          @keydown.esc="detailRow = null"
         >
           <h3 class="mb-4 text-[15px] font-semibold">Audit event detail</h3>
 
