@@ -25,4 +25,14 @@ ignore = [
     # libsqlite3-sys >= 0.39, or when sqlx's sqlite backend stops being pulled
     # into the lockfile.
     "RUSTSEC-2026-0459",
+
+    # RUSTSEC-2026-0543 (chrono unmaintained, informational). chrono is woven
+    # through the codebase (sqlx's chrono feature, session/token expiry, audit
+    # timestamps), the advisory carries no known vulnerability, and migrating
+    # to `time` would be a weeks-scale refactor with no security gain. This is
+    # an accepted maintenance-status warning, not a vulnerability.
+    # Ends when chrono maintenance resumes (advisory withdrawn), a real
+    # vulnerability is published against the version in use, or the workspace
+    # migrates off chrono.
+    "RUSTSEC-2026-0543",
 ]
