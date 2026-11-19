@@ -3,6 +3,7 @@ import { X } from "@lucide/vue";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import { answerConfirm, pendingConfirm } from "@/lib/confirm";
+import { lockScroll, unlockScroll } from "@/composables/useDialog";
 
 /**
  * Renders the shared confirm dialog from `lib/confirm`. Mounted once, in
@@ -11,36 +12,15 @@ import { answerConfirm, pendingConfirm } from "@/lib/confirm";
  * Escape means cancel — the native dialog's keyboard contract, kept so muscle
  * memory survives the swap.
  *
- * While open it also locks the page scroll, moves focus onto Cancel (the
+ * While open it also locks the page scroll (the shared counted lock: a confirm
+ * can be raised over another dialog, and whichever closes first must not
+ * un-scroll the page beneath the other), moves focus onto Cancel (the
  * non-destructive choice: Enter must not confirm a delete by reflex), returns
  * focus to whatever was focused when it closes, and keeps Tab inside.
  */
 
 const panelEl = ref<HTMLElement | null>(null);
 let previouslyFocused: HTMLElement | null = null;
-
-let scrollLocked = false;
-let savedOverflow = "";
-let savedPaddingRight = "";
-
-function lockScroll() {
-  if (scrollLocked) return;
-  scrollLocked = true;
-  savedOverflow = document.body.style.overflow;
-  savedPaddingRight = document.body.style.paddingRight;
-  const scrollbar = window.innerWidth - document.documentElement.clientWidth;
-  document.body.style.overflow = "hidden";
-  if (scrollbar > 0) {
-    document.body.style.paddingRight = `${scrollbar}px`;
-  }
-}
-
-function unlockScroll() {
-  if (!scrollLocked) return;
-  scrollLocked = false;
-  document.body.style.overflow = savedOverflow;
-  document.body.style.paddingRight = savedPaddingRight;
-}
 
 function onKeydown(e: KeyboardEvent) {
   if (!pendingConfirm.value) return;
