@@ -776,7 +776,7 @@ async function copyText(text: string): Promise<boolean> {
                 </select>
                 <p
                   v-if="ssoForm.provider_type === 'feishu'"
-                  class="type-meta mt-1.5 text-[11px] text-amber-700 dark:text-amber-400"
+                  class="type-meta mt-1.5 text-[11px] text-amber-700"
                 >
                   Feishu must return email for first-time link / login. Enable
                   contact:user.email:readonly (and contact:user.employee:readonly for

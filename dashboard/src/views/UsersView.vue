@@ -947,7 +947,7 @@ async function onBatchDisable() {
                     >
                       <span
                         v-if="u.provisioned_via === 'sso_jit'"
-                        class="inline-flex items-center rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700 dark:text-sky-400"
+                        class="inline-flex items-center rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700"
                         title="Account was created by SSO JIT provisioning"
                       >
                         SSO origin
@@ -1272,7 +1272,7 @@ async function onBatchDisable() {
                    saying so here is the difference between that and a bug. -->
               <p
                 v-if="editing && !editing.can_enable"
-                class="type-meta mt-1 text-amber-700 dark:text-amber-400"
+                class="type-meta mt-1 text-amber-700"
               >
                 Held by {{ editing.disabled_by.join(" + ") }}: choosing active clears the
                 local freeze only, and the account stays frozen until that authority lets go.
