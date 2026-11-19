@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { AppWindow, KeyRound, Plus, Power, PowerOff, Trash2 } from "@lucide/vue";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, useId } from "vue";
 import PageHeader from "@/components/ui/PageHeader.vue";
 import ClientSecretDialog from "@/components/ui/ClientSecretDialog.vue";
 import RowActionsMenu, { type RowActionItem } from "@/components/ui/RowActionsMenu.vue";
 import SortableTh from "@/components/ui/SortableTh.vue";
 import TablePagination from "@/components/ui/TablePagination.vue";
 import UiButton from "@/components/ui/UiButton.vue";
+import { useDialog } from "@/composables/useDialog";
 import { useClientPagination } from "@/composables/useClientPagination";
 import { useClientSort } from "@/composables/useClientSort";
 import {
@@ -32,6 +33,18 @@ const showCreate = ref(false);
 const creating = ref(false);
 const editing = ref<AdminClient | null>(null);
 const saving = ref(false);
+
+/* Dialog behaviour shared with every other screen: scroll lock, focus in/out,
+ * Tab containment. Escape mirrors the backdrop click (no in-flight guard here). */
+const createPanel = ref<HTMLElement | null>(null);
+const editPanel = ref<HTMLElement | null>(null);
+const a11yCreate = useDialog(createPanel, showCreate);
+const a11yEdit = useDialog(editPanel, editing);
+
+/* Field ids namespaced per dialog: create and edit both have redirect/scopes
+ * fields, and a label must resolve inside its own dialog. */
+const cc = useId();
+const ce = useId();
 
 const formClientId = ref("");
 const formRedirects = ref("");
@@ -560,7 +573,14 @@ async function onTestDrive(c: AdminClient) {
       <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showCreate = false" />
         <div
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="createPanel"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Register Client"
+          tabindex="-1"
+          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yCreate.onKeydown"
+          @keydown.esc="showCreate = false"
         >
           <h3 class="mb-1 text-[15px] font-semibold">Register Client</h3>
           <p class="type-meta mb-5">
@@ -569,10 +589,11 @@ async function onTestDrive(c: AdminClient) {
           </p>
           <form class="space-y-4" @submit.prevent="onCreate">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${cc}-id`" class="mb-1 block text-[12px] font-medium">
                 Client ID <span class="text-red-500">*</span>
               </label>
               <input
+                :id="`${cc}-id`"
                 v-model="formClientId"
                 required
                 pattern="[a-zA-Z0-9_-]+"
@@ -581,10 +602,11 @@ async function onTestDrive(c: AdminClient) {
               />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${cc}-redirects`" class="mb-1 block text-[12px] font-medium">
                 Redirect URIs <span class="text-red-500">*</span>
               </label>
               <textarea
+                :id="`${cc}-redirects`"
                 v-model="formRedirects"
                 required
                 rows="3"
@@ -604,10 +626,11 @@ async function onTestDrive(c: AdminClient) {
 
 <template v-if="formAdvancedOpen">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${cc}-post-logout`" class="mb-1 block text-[12px] font-medium">
                 Post-logout Redirect URIs
               </label>
               <textarea
+                :id="`${cc}-post-logout`"
                 v-model="formPostLogoutRedirects"
                 rows="2"
                 placeholder="http://localhost:3000/"
@@ -616,8 +639,9 @@ async function onTestDrive(c: AdminClient) {
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Scopes</label>
+              <label :for="`${cc}-scopes`" class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea
+                :id="`${cc}-scopes`"
                 v-model="formScopes"
                 rows="2"
                 placeholder="openid&#10;profile&#10;email"
@@ -633,10 +657,11 @@ async function onTestDrive(c: AdminClient) {
               </span>
             </label>
             <div v-if="formIpAllowlist">
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${cc}-cidrs`" class="mb-1 block text-[12px] font-medium">
                 Allowed IPs / CIDRs <span class="text-red-500">*</span>
               </label>
               <textarea
+                :id="`${cc}-cidrs`"
                 v-model="formAllowedCidrs"
                 required
                 rows="3"
@@ -662,7 +687,14 @@ async function onTestDrive(c: AdminClient) {
       <div v-if="editing" class="fixed inset-0 z-50 flex items-center justify-center">
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="editing = null" />
         <div
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="editPanel"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="editing ? `Edit ${editing.client_id}` : 'Edit client'"
+          tabindex="-1"
+          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          @keydown="a11yEdit.onKeydown"
+          @keydown.esc="editing = null"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Edit {{ editing.client_id }}</h3>
           <p
@@ -674,8 +706,9 @@ async function onTestDrive(c: AdminClient) {
           </p>
           <form class="space-y-4" @submit.prevent="onSaveEdit">
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Redirect URIs</label>
+              <label :for="`${ce}-redirects`" class="mb-1 block text-[12px] font-medium">Redirect URIs</label>
               <textarea
+                :id="`${ce}-redirects`"
                 v-model="editRedirects"
                 required
                 rows="3"
@@ -683,10 +716,11 @@ async function onTestDrive(c: AdminClient) {
               />
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">
+              <label :for="`${ce}-post-logout`" class="mb-1 block text-[12px] font-medium">
                 Post-logout Redirect URIs
               </label>
               <textarea
+                :id="`${ce}-post-logout`"
                 v-model="editPostLogoutRedirects"
                 rows="2"
                 placeholder="http://localhost:3000/"
@@ -695,8 +729,9 @@ async function onTestDrive(c: AdminClient) {
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
             <div>
-              <label class="mb-1 block text-[12px] font-medium">Scopes</label>
+              <label :for="`${ce}-scopes`" class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea
+                :id="`${ce}-scopes`"
                 v-model="editScopes"
                 rows="2"
                 placeholder="openid&#10;profile&#10;email"
@@ -716,8 +751,9 @@ async function onTestDrive(c: AdminClient) {
               </span>
             </label>
             <div v-if="editIpAllowlist">
-              <label class="mb-1 block text-[12px] font-medium">Allowed IPs / CIDRs</label>
+              <label :for="`${ce}-cidrs`" class="mb-1 block text-[12px] font-medium">Allowed IPs / CIDRs</label>
               <textarea
+                :id="`${ce}-cidrs`"
                 v-model="editAllowedCidrs"
                 required
                 rows="3"
