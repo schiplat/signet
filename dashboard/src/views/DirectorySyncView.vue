@@ -670,7 +670,7 @@ async function reloadRuns() {
 
 const STATUS_CLASS: Record<string, string> = {
   succeeded: "bg-emerald-500/10 text-emerald-600",
-  partial: "bg-amber-500/10 text-amber-700 dark:text-amber-400",
+  partial: "bg-amber-500/10 text-amber-700",
   failed: "bg-destructive/10 text-destructive",
   running: "bg-blue-500/10 text-blue-600",
 };
@@ -836,7 +836,7 @@ function duration(r: DirectoryRun): string {
                 <td class="py-1.5 pr-3">{{ r.skipped_count }}</td>
                 <td
                   class="py-1.5 pr-3"
-                  :class="r.conflict_count > 0 ? 'font-semibold text-amber-700 dark:text-amber-400' : ''"
+                  :class="r.conflict_count > 0 ? 'font-semibold text-amber-700' : ''"
                 >
                   {{ r.conflict_count }}
                 </td>

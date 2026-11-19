@@ -389,7 +389,7 @@ function ssoStartUrl(code: string): string {
         <div v-if="error" class="field-error">{{ error }}</div>
         <p
           v-if="notice"
-          class="rounded-lg border border-emerald-600/20 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800 dark:bg-emerald-950/30 dark:text-emerald-300"
+          class="rounded-lg border border-emerald-600/20 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800"
         >
           {{ notice }}
         </p>

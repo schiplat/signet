@@ -59,7 +59,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       <TopNav />
       <div
         v-if="auth.pendingSso"
-        class="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm dark:border-amber-700 dark:bg-amber-950"
+        class="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm"
         data-testid="pending-sso-banner"
       >
         <span class="flex-1">

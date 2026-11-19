@@ -996,8 +996,8 @@ function checkDotClass(status: SignupCheckStatus): string {
 }
 
 function checkStatusClass(status: SignupCheckStatus): string {
-  if (status === "ready") return "text-emerald-700 dark:text-emerald-400";
-  if (status === "blocked") return "text-amber-700 dark:text-amber-400";
+  if (status === "ready") return "text-emerald-700";
+  if (status === "blocked") return "text-amber-700";
   return "text-muted-foreground";
 }
 
@@ -1219,7 +1219,7 @@ function scrollSettingsTop() {
                brick an instance before an admin exists. -->
           <p
             v-if="allowlistLocksMeOut"
-            class="type-meta mt-2 text-amber-700 dark:text-amber-400"
+            class="type-meta mt-2 text-amber-700"
           >
             Your own address ({{ ownEmail }}) is not covered, so saving this would refuse your
             next sign-in.
@@ -1305,8 +1305,8 @@ function scrollSettingsTop() {
               class="text-[11px] font-medium"
               :class="
                 signupBlockingCount
-                  ? 'text-amber-700 dark:text-amber-400'
-                  : 'text-emerald-700 dark:text-emerald-400'
+                  ? 'text-amber-700'
+                  : 'text-emerald-700'
               "
             >
               {{ signupSummary }}
