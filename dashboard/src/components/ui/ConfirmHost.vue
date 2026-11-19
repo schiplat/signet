@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { X } from "@lucide/vue";
-import { onMounted, onUnmounted } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import UiButton from "@/components/ui/UiButton.vue";
 import { answerConfirm, pendingConfirm } from "@/lib/confirm";
 
@@ -10,15 +10,98 @@ import { answerConfirm, pendingConfirm } from "@/lib/confirm";
  *
  * Escape means cancel — the native dialog's keyboard contract, kept so muscle
  * memory survives the swap.
+ *
+ * While open it also locks the page scroll, moves focus onto Cancel (the
+ * non-destructive choice: Enter must not confirm a delete by reflex), returns
+ * focus to whatever was focused when it closes, and keeps Tab inside.
  */
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape" && pendingConfirm.value) {
-    answerConfirm(false);
+
+const panelEl = ref<HTMLElement | null>(null);
+let previouslyFocused: HTMLElement | null = null;
+
+let scrollLocked = false;
+let savedOverflow = "";
+let savedPaddingRight = "";
+
+function lockScroll() {
+  if (scrollLocked) return;
+  scrollLocked = true;
+  savedOverflow = document.body.style.overflow;
+  savedPaddingRight = document.body.style.paddingRight;
+  const scrollbar = window.innerWidth - document.documentElement.clientWidth;
+  document.body.style.overflow = "hidden";
+  if (scrollbar > 0) {
+    document.body.style.paddingRight = `${scrollbar}px`;
   }
 }
 
+function unlockScroll() {
+  if (!scrollLocked) return;
+  scrollLocked = false;
+  document.body.style.overflow = savedOverflow;
+  document.body.style.paddingRight = savedPaddingRight;
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (!pendingConfirm.value) return;
+
+  if (e.key === "Escape") {
+    answerConfirm(false);
+    return;
+  }
+  if (e.key !== "Tab") return;
+
+  const panel = panelEl.value;
+  if (!panel) return;
+  const nodes = Array.from(
+    panel.querySelectorAll<HTMLElement>("button:not([disabled])"),
+  );
+  if (nodes.length === 0) {
+    e.preventDefault();
+    panel.focus();
+    return;
+  }
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || !panel.contains(active)) {
+      e.preventDefault();
+      last.focus();
+    }
+  } else if (active === last || !panel.contains(active)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+/* The dialog is created and destroyed by a ref mutation, not a mount, so the
+ * open/close edge is the watcher — not onMounted/onUnmounted. */
+watch(pendingConfirm, (pending) => {
+  if (pending) {
+    previouslyFocused = document.activeElement as HTMLElement | null;
+    lockScroll();
+    void nextTick(() => {
+      // Focus lands on Cancel, not Confirm: Enter must not confirm a delete
+      // by reflex. The mark sits on the button because a ref on a component
+      // yields the component instance, not the rendered <button>.
+      panelEl.value
+        ?.querySelector<HTMLElement>("[data-cancel]")
+        ?.focus();
+    });
+    return;
+  }
+  unlockScroll();
+  const target = previouslyFocused;
+  previouslyFocused = null;
+  if (target && target.isConnected) target.focus();
+});
+
 onMounted(() => window.addEventListener("keydown", onKeydown));
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
+onUnmounted(() => {
+  window.removeEventListener("keydown", onKeydown);
+  unlockScroll();
+});
 </script>
 
 <template>
@@ -41,7 +124,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
           @click="answerConfirm(false)"
         />
         <div
-          class="relative z-10 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl"
+          ref="panelEl"
+          tabindex="-1"
+          class="relative z-10 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
         >
           <button
             class="absolute right-4 top-4 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
@@ -60,7 +145,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             {{ pendingConfirm.options.message }}
           </p>
           <div class="mt-6 flex justify-end gap-3">
-            <UiButton variant="ghost" size="sm" @click="answerConfirm(false)">
+            <UiButton data-cancel variant="ghost" size="sm" @click="answerConfirm(false)">
               {{ pendingConfirm.options.cancelText ?? "Cancel" }}
             </UiButton>
             <UiButton
