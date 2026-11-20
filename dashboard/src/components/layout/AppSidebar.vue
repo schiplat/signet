@@ -159,7 +159,7 @@ function onLogoClick(e: MouseEvent) {
     >
       <a
         href="/"
-        class="group flex min-w-0 items-center gap-2.5 rounded-xl px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+        class="group flex min-w-0 items-center gap-2.5 rounded-xl px-1 py-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
         :title="ui.isCollapsed ? branding.name : undefined"
         @click="onLogoClick"
       >
@@ -203,7 +203,7 @@ function onLogoClick(e: MouseEvent) {
           :title="ui.isCollapsed ? entry.label : undefined"
           :class="
             cn(
-              'group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors',
+              'group flex items-center gap-3 rounded-xl px-2.5 py-2 text-sm font-medium text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30',
               'hover:bg-sidebar-accent hover:text-foreground',
               ui.isCollapsed && 'justify-center px-0',
               isActive(entry.name) && 'bg-sidebar-accent text-foreground',
@@ -228,35 +228,34 @@ function onLogoClick(e: MouseEvent) {
     </nav>
 
     <div v-if="!ui.isCollapsed" class="px-4 pb-4">
-      <div class="border-t border-sidebar-border/80 pt-3">
-        <p
-          class="flex flex-wrap items-center px-1 text-left text-[11px] tabular-nums text-muted-foreground"
-          :title="`Powered by Signet v${appVersion}`"
-        >
-          <span>
-            Powered by
-            <a
-              href="https://github.com/schiplat/signet"
-              target="_blank"
-              rel="noreferrer"
-              class="rounded transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/30"
-              title="Source code on GitHub"
-            >
-              Signet<span aria-hidden="true"> ↗</span>
-            </a>
-          </span>
-          <span class="px-1.5 text-muted-foreground/45">·</span>
-          <span>v{{ appVersion }}</span>
-          <span class="px-1.5 text-muted-foreground/45">·</span>
+      <div
+        class="border-t border-sidebar-border pt-3 text-[11px] tabular-nums text-muted-foreground"
+        :title="`Powered by Signet v${appVersion}`"
+      >
+        <p class="px-1">
+          Powered by
+          <a
+            href="https://github.com/schiplat/signet"
+            target="_blank"
+            rel="noreferrer"
+            class="rounded-lg transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
+            title="Source code on GitHub"
+          >
+            Signet<span aria-hidden="true"> ↗</span>
+          </a>
+        </p>
+        <p class="mt-1 flex items-center gap-x-2 px-1">
           <a
             href="https://github.com/schiplat/signet/blob/master/docs/README.md"
             target="_blank"
             rel="noreferrer"
-            class="rounded transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring/30"
+            class="rounded-lg transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30"
             title="Documentation on GitHub"
           >
             Docs<span aria-hidden="true"> ↗</span>
           </a>
+          <span class="text-muted-foreground/45" aria-hidden="true">·</span>
+          <span class="text-muted-foreground/70">v{{ appVersion }}</span>
         </p>
       </div>
     </div>

@@ -14,7 +14,7 @@ defineProps<{
 <template>
   <div
     v-if="total > 0"
-    class="flex flex-col gap-2.5 border-t border-border/50 px-5 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
+    class="flex flex-col gap-2.5 border-t border-border/40 px-5 py-2.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3"
   >
     <p class="shrink-0 text-[11px] text-muted-foreground">{{ rangeLabel }}</p>
     <div
@@ -25,18 +25,18 @@ defineProps<{
         <span class="sm:hidden">Rows</span>
         <select
           v-model.number="pageSize"
-          class="h-8 w-auto min-w-[3.75rem] rounded-lg border border-border/60 bg-background px-2 py-1 text-xs outline-none focus:border-primary/50"
+          class="field-input h-8 w-auto min-w-[3.75rem] py-1 pl-2 pr-8 text-xs"
         >
           <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }}</option>
         </select>
       </label>
       <div class="flex shrink-0 items-center gap-0.5 sm:gap-1">
         <button
-          class="inline-flex items-center justify-center rounded-md px-2 py-1 text-[11px] font-medium transition-colors sm:px-2.5"
+          class="inline-flex items-center justify-center rounded-xl px-2 py-1 text-[11px] font-medium transition-colors sm:px-2.5"
           :class="
             page <= 1
               ? 'cursor-default text-muted-foreground/40'
-              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
           "
           :disabled="page <= 1"
           @click="page = page - 1"
@@ -49,11 +49,11 @@ defineProps<{
           {{ page }} / {{ pageCount }}
         </span>
         <button
-          class="inline-flex items-center justify-center rounded-md px-2 py-1 text-[11px] font-medium transition-colors sm:px-2.5"
+          class="inline-flex items-center justify-center rounded-xl px-2 py-1 text-[11px] font-medium transition-colors sm:px-2.5"
           :class="
             page >= pageCount
               ? 'cursor-default text-muted-foreground/40'
-              : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+              : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
           "
           :disabled="page >= pageCount"
           @click="page = page + 1"

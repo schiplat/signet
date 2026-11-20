@@ -785,13 +785,13 @@ async function onBatchDisable() {
       :class="loading ? 'opacity-60' : ''"
     >
       <div
-        class="flex flex-wrap items-center justify-between gap-2 border-b border-border/30 px-5 py-3"
+        class="flex flex-wrap items-center justify-between gap-2 border-b border-border/40 px-5 py-3"
       >
         <input
           v-model="searchQuery"
           type="search"
           placeholder="Search users…"
-          class="w-full max-w-xs rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/50 focus:ring-1 focus:ring-primary/10"
+          class="field-input h-8 w-full max-w-xs px-3 text-xs"
         />
         <UsersToolbar
           v-if="embedded"
@@ -821,7 +821,7 @@ async function onBatchDisable() {
           <div class="overflow-x-auto">
             <table class="w-full text-[13px]">
               <thead>
-                <tr class="border-b border-border/50">
+                <tr class="border-b border-border/40">
                   <th class="w-10 px-5 py-2.5 text-left">
                     <input
                       type="checkbox"
@@ -872,8 +872,8 @@ async function onBatchDisable() {
                   :key="u.id"
                   :class="
                     u.status === 'disabled'
-                      ? 'border-b border-border/40 bg-destructive/[0.04] text-muted-foreground last:border-0 hover:bg-destructive/[0.07]'
-                      : 'border-b border-border/40 last:border-0 hover:bg-muted/5'
+                      ? 'border-b border-border/40 text-muted-foreground last:border-0 hover:bg-destructive/10'
+                      : 'border-b border-border/40 last:border-0 hover:bg-muted/40'
                   "
                 >
                   <td class="px-5 py-3">
@@ -900,7 +900,7 @@ async function onBatchDisable() {
                       >✓</span>
                       <button
                         type="button"
-                        class="rounded p-1 text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground"
+                        class="rounded-lg p-1 text-muted-foreground/60 transition-colors hover:bg-muted/40 hover:text-foreground"
                         :title="copiedId === u.id ? 'Copied' : 'Copy email'"
                         :aria-label="copiedId === u.id ? 'Copied' : 'Copy email'"
                         @click="copyEmail(u)"
@@ -944,14 +944,14 @@ async function onBatchDisable() {
                   <td class="px-5 py-3 text-xs">
                     <span
                       v-if="u.totp_enabled"
-                      class="inline-flex items-center rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-primary"
+                      class="chip chip-info"
                       title="TOTP authenticator bound"
                     >
                       Enabled
                     </span>
                     <span
                       v-else-if="u.mfa_required"
-                      class="inline-flex items-center rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-amber-700"
+                      class="chip chip-warning"
                       title="MFA required by policy"
                     >
                       Required
@@ -965,7 +965,7 @@ async function onBatchDisable() {
                     >
                       <span
                         v-if="u.provisioned_via === 'sso_jit'"
-                        class="inline-flex items-center rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700"
+                        class="chip chip-info"
                         title="Account was created by SSO JIT provisioning"
                       >
                         SSO origin
@@ -973,7 +973,7 @@ async function onBatchDisable() {
                       <span
                         v-for="i in u.sso_identities"
                         :key="i.provider_code"
-                        class="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-foreground"
+                        class="inline-flex items-center rounded-lg bg-muted/40 px-1.5 py-0.5 text-[11px] font-medium text-foreground"
                         :title="`Linked ${i.provider_type}: ${i.provider_code}`"
                       >
                         {{ i.display_name }}
@@ -993,7 +993,7 @@ async function onBatchDisable() {
                       <span
                         v-for="by in u.disabled_by"
                         :key="by"
-                        class="inline-flex items-center rounded-md bg-destructive/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-destructive"
+                        class="chip chip-danger"
                         :title="heldBy(u, by).title"
                       >
                         {{ heldBy(u, by).label }}
@@ -1064,7 +1064,7 @@ async function onBatchDisable() {
           aria-modal="true"
           aria-label="New User"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yCreate.onKeydown"
           @keydown.esc="showCreate = false"
         >
@@ -1138,7 +1138,7 @@ async function onBatchDisable() {
                 class="field-input"
               />
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">Cancel</UiButton>
               <UiButton
                 type="submit"
@@ -1165,7 +1165,7 @@ async function onBatchDisable() {
           aria-modal="true"
           aria-label="Import users from JSON"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yImport.onKeydown"
           @keydown.esc="closeImport"
         >
@@ -1176,13 +1176,13 @@ async function onBatchDisable() {
               <p class="mb-1 block text-[12px] font-medium">1. Get the template</p>
               <p class="type-meta mb-2">
                 Only <span class="font-medium text-foreground">email</span> is
-                required; <code class="rounded bg-muted px-1 py-0.5 text-[11px]">username</code>,
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">display_name</code>,
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">role</code>
+                required; <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">username</code>,
+                <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">display_name</code>,
+                <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">role</code>
                 (member/manager/admin),
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">groups</code>,
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">phone</code> and
-                <code class="rounded bg-muted px-1 py-0.5 text-[11px]">password</code>
+                <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">groups</code>,
+                <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">phone</code> and
+                <code class="rounded-lg bg-muted/40 px-1 py-0.5 text-[11px]">password</code>
                 are optional. Omit password for a passwordless (SSO/reset) account.
               </p>
               <a
@@ -1224,7 +1224,7 @@ async function onBatchDisable() {
 
           <div
             v-if="importPreview"
-            class="mt-4 rounded-xl border border-border/50 bg-muted/40 p-3 text-[12px]"
+            class="mt-4 surface-inset p-3 text-[12px]"
           >
             Preview OK — would create
             {{ importPreview.created.length }}<template v-if="importPreview.updated.length">,
@@ -1233,7 +1233,7 @@ async function onBatchDisable() {
             Nothing is written until you confirm.
           </div>
 
-          <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+          <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
             <UiButton type="button" variant="ghost" size="sm" @click="closeImport">
               Cancel
             </UiButton>
@@ -1262,7 +1262,7 @@ async function onBatchDisable() {
           aria-modal="true"
           aria-label="Edit User"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yEdit.onKeydown"
           @keydown.esc="editing = null"
         >
@@ -1354,7 +1354,7 @@ async function onBatchDisable() {
                 class="field-input"
               />
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="editing = null">Cancel</UiButton>
               <UiButton type="submit" size="sm" :disabled="saving || editPhoneCheckState === 'exists' || editUsernameCheckState === 'exists'">
                 {{ saving ? "Saving…" : "Save" }}

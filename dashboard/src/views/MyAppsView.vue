@@ -244,7 +244,7 @@ async function onDelete(c: SelfClient) {
       <div class="overflow-x-auto">
         <table class="w-full text-[13px]">
           <thead>
-            <tr class="border-b border-border/50">
+            <tr class="border-b border-border/40">
               <th class="px-5 py-2.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground/80">
                 Application
               </th>
@@ -266,7 +266,7 @@ async function onDelete(c: SelfClient) {
             <tr
               v-for="c in apps"
               :key="c.id"
-              class="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/5"
+              class="border-b border-border/40 transition-colors last:border-0 hover:bg-muted/40"
             >
               <td class="px-5 py-3">
                 <p class="font-medium">{{ displayName(c) }}</p>
@@ -275,7 +275,7 @@ async function onDelete(c: SelfClient) {
                 </p>
                 <p
                   v-if="!c.enabled"
-                  class="mt-1 inline-flex items-center rounded-md bg-destructive/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-destructive"
+                  class="mt-1 chip chip-danger"
                 >
                   disabled
                 </p>
@@ -324,7 +324,7 @@ async function onDelete(c: SelfClient) {
           aria-modal="true"
           aria-label="Register an application"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yCreate.onKeydown"
           @keydown.esc="showCreate = false"
         >
@@ -372,7 +372,7 @@ async function onDelete(c: SelfClient) {
               />
               <p class="type-meta mt-1">Optional — leave empty for the defaults.</p>
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">
                 Cancel
               </UiButton>
@@ -397,7 +397,7 @@ async function onDelete(c: SelfClient) {
           aria-modal="true"
           aria-label="Edit application"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yEdit.onKeydown"
           @keydown.esc="editing = null"
         >
@@ -417,7 +417,7 @@ async function onDelete(c: SelfClient) {
                 class="field-input font-mono text-xs"
               />
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="editing = null">
                 Cancel
               </UiButton>

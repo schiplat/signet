@@ -109,7 +109,7 @@ function copyBoth() {
         aria-modal="true"
         :aria-label="dialog?.title"
         tabindex="-1"
-        class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
         @keydown="a11y.onKeydown"
       >
         <h3 class="mb-2 text-[15px] font-semibold">{{ dialog.title }}</h3>
@@ -119,7 +119,7 @@ function copyBoth() {
         <div class="space-y-3">
           <div>
             <p class="type-label mb-1">Client ID</p>
-            <div class="flex items-start gap-2 rounded-lg bg-muted px-3 py-2">
+            <div class="flex items-start gap-2 surface-inset px-3 py-2">
               <p class="min-w-0 flex-1 break-all font-mono text-xs">
                 {{ dialog.clientId }}
               </p>
@@ -138,7 +138,7 @@ function copyBoth() {
           </div>
           <div>
             <p class="type-label mb-1">Client Secret</p>
-            <div class="flex items-start gap-2 rounded-lg bg-muted px-3 py-2">
+            <div class="flex items-start gap-2 surface-inset px-3 py-2">
               <p class="min-w-0 flex-1 break-all font-mono text-xs">
                 {{ dialog.secret }}
               </p>
@@ -156,12 +156,12 @@ function copyBoth() {
             </div>
           </div>
 
-          <div class="rounded-lg border border-border/50">
-            <div class="flex items-center justify-between border-b border-border/30 px-3 py-2">
+          <div class="surface-inset">
+            <div class="flex items-center justify-between border-b border-border/40 px-3 py-2">
               <div class="flex gap-1 text-xs">
                 <button
                   type="button"
-                  class="rounded-md px-2 py-1"
+                  class="rounded-xl px-2 py-1"
                   :class="configTab === 'env' ? 'bg-muted font-medium' : 'text-muted-foreground'"
                   @click="configTab = 'env'"
                 >
@@ -169,7 +169,7 @@ function copyBoth() {
                 </button>
                 <button
                   type="button"
-                  class="rounded-md px-2 py-1"
+                  class="rounded-xl px-2 py-1"
                   :class="configTab === 'toml' ? 'bg-muted font-medium' : 'text-muted-foreground'"
                   @click="configTab = 'toml'"
                 >
@@ -191,14 +191,14 @@ function copyBoth() {
             <pre class="max-h-56 overflow-auto px-3 py-2.5 font-mono text-[11px] leading-5">{{
               configTab === "env" ? envSnippet : tomlSnippet
             }}</pre>
-            <p class="border-t border-border/30 px-3 py-2 text-[11px] text-muted-foreground">
+            <p class="border-t border-border/40 px-3 py-2 text-[11px] text-muted-foreground">
               Hand this whole snippet to the subsystem — it already matches this client's
               registered redirect URIs, scopes and logout address. The secret appears only
               here and only once.
             </p>
           </div>
         </div>
-        <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+        <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
           <UiButton type="button" variant="ghost" size="sm" @click="copyBoth">
             <Check v-if="copiedField === 'both'" class="h-3.5 w-3.5" />
             <Copy v-else class="h-3.5 w-3.5" />

@@ -389,7 +389,7 @@ function ssoStartUrl(code: string): string {
         <div v-if="error" class="field-error">{{ error }}</div>
         <p
           v-if="notice"
-          class="rounded-lg border border-emerald-600/20 bg-emerald-50 px-3 py-2 text-xs leading-relaxed text-emerald-800"
+          class="notice notice-success text-xs leading-relaxed"
         >
           {{ notice }}
         </p>
@@ -448,7 +448,7 @@ function ssoStartUrl(code: string): string {
         <div class="flex gap-2 text-xs">
           <button
             type="button"
-            class="rounded-md px-2 py-1"
+            class="rounded-xl px-2 py-1"
             :class="mfaMethod === 'totp' ? 'bg-muted font-medium' : 'text-muted-foreground'"
             @click="mfaMethod = 'totp'"
           >
@@ -456,7 +456,7 @@ function ssoStartUrl(code: string): string {
           </button>
           <button
             type="button"
-            class="rounded-md px-2 py-1"
+            class="rounded-xl px-2 py-1"
             :class="mfaMethod === 'recovery' ? 'bg-muted font-medium' : 'text-muted-foreground'"
             @click="mfaMethod = 'recovery'"
           >
@@ -491,11 +491,11 @@ function ssoStartUrl(code: string): string {
           the 6-digit code.
         </p>
         <div v-if="qrUrl" class="flex justify-center">
-          <img :src="qrUrl" alt="TOTP QR code" class="rounded-lg border border-border/50" />
+          <img :src="qrUrl" alt="TOTP QR code" class="rounded-lg border border-border" />
         </div>
         <div class="space-y-1">
           <p class="type-label">Manual secret</p>
-          <p class="break-all rounded-lg bg-muted px-3 py-2 font-mono text-[11px]">{{ enrollSecret }}</p>
+          <p class="break-all surface-inset px-3 py-2 font-mono text-[11px]">{{ enrollSecret }}</p>
         </div>
         <div class="space-y-1.5">
           <label class="type-label">Authentication code</label>
@@ -565,7 +565,7 @@ function ssoStartUrl(code: string): string {
           authenticator.
         </p>
         <pre
-          class="max-h-48 overflow-auto rounded-lg border border-border/50 bg-muted/40 p-3 font-mono text-xs leading-6"
+          class="max-h-48 overflow-auto surface-inset p-3 font-mono text-xs leading-6"
           >{{ recoveryText }}</pre
         >
         <UiButton type="button" variant="ghost" size="sm" class="w-full" @click="copyRecovery">

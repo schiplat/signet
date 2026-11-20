@@ -1042,7 +1042,7 @@ function scrollSettingsTop() {
               :class="
                 section === item.key
                   ? 'bg-sidebar-accent font-medium text-foreground'
-                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
               "
               @click="selectSection(item.key)"
             >
@@ -1078,7 +1078,7 @@ function scrollSettingsTop() {
             placeholder="https://sso.example.com"
           />
           <p class="type-meta mt-1.5 text-[11px] leading-relaxed">
-            <span class="mr-2 inline-flex rounded-md bg-muted px-1.5 py-0.5 font-medium">
+            <span class="mr-2 inline-flex rounded-lg bg-muted/40 px-1.5 py-0.5 font-medium">
               {{
                 server.source === "environment"
                   ? "from environment"
@@ -1147,7 +1147,7 @@ function scrollSettingsTop() {
           <span v-if="serverSaved" class="text-xs text-muted-foreground">Saved</span>
         </div>
 
-        <p class="rounded-lg bg-destructive/5 px-3 py-2 text-[11px] leading-relaxed text-destructive/90">
+        <p class="notice notice-danger text-[11px] leading-relaxed">
           Impact: outstanding access / ID / refresh tokens stop validating; clients configured
           with a different issuer lose discovery and sign-in; third-party SSO callback URLs
           registered against this issuer must be updated.
@@ -1163,7 +1163,7 @@ function scrollSettingsTop() {
           </p>
         </div>
 
-        <label class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3">
+        <label class="flex items-start gap-3 rounded-xl border border-border px-4 py-3">
           <input v-model="requiredGlobally" type="checkbox" class="mt-0.5 rounded" />
           <span>
             <span class="block text-sm font-medium">Require MFA for all users</span>
@@ -1252,7 +1252,7 @@ function scrollSettingsTop() {
           <label
             v-for="row in runtimeRows"
             :key="row.key"
-            class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3"
+            class="flex items-start gap-3 rounded-xl border border-border px-4 py-3"
           >
             <span class="flex-1">
               <span class="block text-sm font-medium">{{ row.label }}</span>
@@ -1293,12 +1293,9 @@ function scrollSettingsTop() {
 
         <!-- One place for every check, blocking and advisory, each with a single
              link to the section that fixes it. -->
-        <div
-          class="overflow-hidden rounded-lg border"
-          :class="signupBlockingCount ? 'border-amber-600/20' : 'border-border/40'"
-        >
+        <div class="surface-inset overflow-hidden">
           <div
-            class="flex items-center justify-between gap-3 border-b border-border/40 bg-muted/20 px-4 py-2.5"
+            class="flex items-center justify-between gap-3 border-b border-border/40 px-4 py-2.5"
           >
             <span class="type-label">Preflight</span>
             <span
@@ -1349,7 +1346,7 @@ function scrollSettingsTop() {
           </ul>
         </div>
 
-        <label class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3">
+        <label class="flex items-start gap-3 rounded-xl border border-border px-4 py-3">
           <input v-model="signupEnabled" type="checkbox" class="mt-0.5 rounded" />
           <span>
             <span class="block text-sm font-medium">Allow public sign-up</span>
@@ -1392,7 +1389,7 @@ function scrollSettingsTop() {
           </p>
         </div>
 
-        <label class="flex items-start gap-3 rounded-lg border border-border/40 px-4 py-3">
+        <label class="flex items-start gap-3 rounded-xl border border-border px-4 py-3">
           <input v-model="jitProvision" type="checkbox" class="mt-0.5 rounded" />
           <span>
             <span class="block text-sm font-medium">JIT provision on SSO</span>
@@ -1424,7 +1421,7 @@ function scrollSettingsTop() {
         </div>
 
         <!-- Shown once, then gone: the server stores only the digest. -->
-        <div v-if="freshToken" class="space-y-2 rounded-lg border border-border/40 px-4 py-3">
+        <div v-if="freshToken" class="surface-inset space-y-2 px-4 py-3">
           <p class="text-xs text-muted-foreground">
             Copy this token now — it is never shown again.
           </p>
@@ -1468,18 +1465,18 @@ function scrollSettingsTop() {
           <div
             v-for="t in apiTokens"
             :key="t.id"
-            class="flex items-center gap-3 rounded-lg border border-border/40 px-4 py-3"
+            class="flex items-center gap-3 rounded-xl border border-border px-4 py-3"
           >
             <span class="flex-1">
               <span class="block text-sm font-medium">
                 {{ t.name }}
                 <span
                   v-if="t.revoked_at"
-                  class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                  class="ml-1 rounded-lg bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
                 >revoked</span>
                 <span
                   v-else-if="t.expires_at && new Date(t.expires_at) < new Date()"
-                  class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
+                  class="ml-1 rounded-lg bg-muted/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground"
                 >expired</span>
               </span>
               <span class="mt-0.5 block text-xs text-muted-foreground">

@@ -224,7 +224,7 @@ const xLabels = computed(() => {
           v-for="key in (Object.keys(RANGE_META) as RangeKey[])"
           :key="key"
           type="button"
-          class="rounded-full px-2.5 py-0.5 text-xs font-semibold transition-colors"
+          class="rounded-lg px-2.5 py-0.5 text-xs font-semibold transition-colors"
           :class="range === key ? 'text-white' : ''"
           :style="tagStyle(key)"
           :aria-pressed="range === key"
@@ -324,7 +324,7 @@ const xLabels = computed(() => {
 
       <div
         v-if="hover && hoverIdx != null"
-        class="pointer-events-none absolute top-2 z-10 min-w-[8rem] rounded-lg border border-border/50 bg-card px-3 py-2 shadow-sm"
+        class="surface-overlay pointer-events-none absolute top-2 z-10 min-w-[8rem] px-3 py-2"
         :style="{
           left: `clamp(0.5rem, ${(pts[hoverIdx].x / W) * 100}% , calc(100% - 9rem))`,
         }"

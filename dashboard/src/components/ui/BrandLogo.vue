@@ -36,7 +36,7 @@ const initials = computed(() => {
   <span
     v-else
     class="flex shrink-0 items-center justify-center rounded-xl text-sm font-semibold tracking-wide"
-    :class="[props.sizeClass, props.muted ? 'bg-muted text-muted-foreground' : 'bg-primary text-primary-foreground']"
+    :class="[props.sizeClass, props.muted ? 'bg-muted/40 text-muted-foreground' : 'bg-primary text-primary-foreground']"
   >
     {{ initials }}
   </span>

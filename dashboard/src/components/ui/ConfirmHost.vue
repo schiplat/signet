@@ -106,10 +106,10 @@ onUnmounted(() => {
         <div
           ref="panelEl"
           tabindex="-1"
-          class="relative z-10 w-full max-w-sm rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 w-full max-w-sm surface-card p-6 focus:outline-none"
         >
           <button
-            class="absolute right-4 top-4 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+            class="absolute right-4 top-4 rounded-xl p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
             aria-label="Close"
             @click="answerConfirm(false)"
           >

@@ -150,7 +150,7 @@ function onFocusOut(event: FocusEvent) {
 <template>
   <div
     ref="root"
-    class="mt-1.5 rounded-xl border border-border bg-muted/40 p-2"
+    class="surface-overlay mt-1.5 p-2"
     @focusout="onFocusOut"
     @keydown.esc.stop.prevent="emit('close')"
   >
@@ -160,7 +160,7 @@ function onFocusOut(event: FocusEvent) {
     </p>
 
     <!-- Filter on top: past a dozen fields, scanning is slower than typing. -->
-    <div class="mb-1.5 flex items-center gap-1.5 rounded-lg border border-border bg-card px-2">
+    <div class="mb-1.5 flex items-center gap-1.5 rounded-xl border border-border bg-card px-2">
       <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
       <input
         ref="filter"
@@ -192,12 +192,12 @@ function onFocusOut(event: FocusEvent) {
         spellcheck="false"
         autocomplete="off"
         placeholder="Type a value…"
-        class="h-7 min-w-0 flex-1 rounded-lg border border-border bg-card px-2 font-mono text-xs outline-none"
+        class="h-7 min-w-0 flex-1 rounded-xl border border-border bg-card px-2 font-mono text-xs outline-none"
         @keydown.enter.prevent="submitCustom"
       />
       <button
         type="button"
-        class="rounded-lg border border-border bg-card px-2 py-1 text-[11px] hover:bg-muted"
+        class="rounded-xl border border-border bg-card px-2 py-1 text-[11px] hover:bg-muted/40"
         @click="submitCustom"
       >
         Use
@@ -226,8 +226,8 @@ function onFocusOut(event: FocusEvent) {
             class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left"
             :class="
               candidate.index === active
-                ? 'bg-card ring-1 ring-border'
-                : 'hover:bg-card/70'
+                ? 'bg-muted text-foreground'
+                : 'hover:bg-muted/40'
             "
             @mousemove="active = candidate.index"
             @click="emit('pick', candidate.option.value)"
@@ -237,11 +237,11 @@ function onFocusOut(event: FocusEvent) {
             </span>
             <span
               v-if="candidate.option.shape"
-              class="shrink-0 rounded px-1 text-[10px]"
+              class="shrink-0 rounded-lg px-1 text-[10px]"
               :class="
                 candidate.likely
                   ? 'bg-emerald-500/10 text-emerald-600'
-                  : 'bg-muted text-muted-foreground'
+                  : 'bg-muted/40 text-muted-foreground'
               "
             >
               {{ SHAPE_LABEL[candidate.option.shape] }}
@@ -257,11 +257,11 @@ function onFocusOut(event: FocusEvent) {
             </span>
             <span
               v-if="candidate.option.note"
-              class="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold"
+              class="shrink-0 rounded-lg px-1.5 py-0.5 text-[10px] font-semibold"
               :class="
                 candidate.option.partial
                   ? 'bg-amber-500/10 text-amber-700'
-                  : 'bg-muted text-muted-foreground'
+                  : 'bg-muted/40 text-muted-foreground'
               "
             >
               {{ candidate.option.note }}
@@ -272,7 +272,7 @@ function onFocusOut(event: FocusEvent) {
 
       <button
         type="button"
-        class="mt-1 w-full rounded-lg px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-card"
+        class="mt-1 w-full rounded-lg px-2 py-1 text-left text-[11px] text-muted-foreground hover:bg-muted/40"
         @click="custom = ''"
       >
         Use a custom value…

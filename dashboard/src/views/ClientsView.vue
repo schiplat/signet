@@ -394,12 +394,12 @@ async function onTestDrive(c: AdminClient) {
         <p class="text-sm">No clients yet</p>
       </div>
       <template v-else>
-        <div class="border-b border-border/30 px-5 py-3">
+        <div class="border-b border-border/40 px-5 py-3">
           <input
             v-model="searchQuery"
             type="search"
             placeholder="Search clients…"
-            class="w-full max-w-xs rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/50 focus:ring-1 focus:ring-primary/10"
+            class="field-input h-8 w-full max-w-xs px-3 text-xs"
           />
         </div>
 
@@ -413,7 +413,7 @@ async function onTestDrive(c: AdminClient) {
           <div class="overflow-x-auto">
             <table class="w-full text-[13px]">
               <thead>
-                <tr class="border-b border-border/50">
+                <tr class="border-b border-border/40">
                   <SortableTh
                     label="Client ID"
                     column="client_id"
@@ -464,8 +464,8 @@ async function onTestDrive(c: AdminClient) {
                   :key="c.id"
                   :class="
                     c.enabled
-                      ? 'border-b border-border/40 last:border-0 hover:bg-muted/5'
-                      : 'border-b border-border/40 bg-destructive/[0.04] text-muted-foreground last:border-0 hover:bg-destructive/[0.07]'
+                      ? 'border-b border-border/40 last:border-0 hover:bg-muted/40'
+                      : 'border-b border-border/40 text-muted-foreground last:border-0 hover:bg-destructive/10'
                   "
                 >
                   <td
@@ -516,8 +516,8 @@ async function onTestDrive(c: AdminClient) {
                     <span
                       :class="
                         c.enabled
-                          ? 'text-foreground'
-                          : 'inline-flex items-center rounded-md bg-destructive/10 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-destructive'
+                          ? 'chip chip-success'
+                          : 'chip chip-danger'
                       "
                     >
                       {{ c.enabled ? "enabled" : "disabled" }}
@@ -581,7 +581,7 @@ async function onTestDrive(c: AdminClient) {
           aria-modal="true"
           aria-label="Register Client"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yCreate.onKeydown"
           @keydown.esc="showCreate = false"
         >
@@ -620,7 +620,7 @@ async function onTestDrive(c: AdminClient) {
             </div>
             <button
               type="button"
-              class="flex w-full items-center justify-between rounded-lg border border-border/40 px-3 py-2 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+              class="flex w-full items-center justify-between rounded-xl border border-border px-3 py-2 text-left text-[12px] font-medium text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
               @click="formAdvancedOpen = !formAdvancedOpen"
             >
               <span>Advanced options</span>
@@ -673,7 +673,7 @@ async function onTestDrive(c: AdminClient) {
               />
             </div>
 </template>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">
                 Cancel
               </UiButton>
@@ -698,14 +698,14 @@ async function onTestDrive(c: AdminClient) {
           aria-modal="true"
           :aria-label="editing ? `Edit ${editing.client_id}` : 'Edit client'"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yEdit.onKeydown"
           @keydown.esc="editing = null"
         >
           <h3 class="mb-5 text-[15px] font-semibold">Edit {{ editing.client_id }}</h3>
           <p
             v-if="editing.owner_email"
-            class="type-meta mb-4 rounded-lg bg-muted/50 px-3 py-2"
+            class="type-meta mb-4 surface-inset px-3 py-2"
           >
             Owned by <span class="font-medium text-foreground">{{ editing.owner_email }}</span> —
             they can edit and delete this app from My apps.
@@ -745,7 +745,7 @@ async function onTestDrive(c: AdminClient) {
               />
               <p class="type-meta mt-1">One per line. Must include openid.</p>
             </div>
-            <div class="rounded-lg bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+            <div class="surface-inset px-3 py-2 text-xs text-muted-foreground">
               <span class="font-medium text-foreground">Grant types:</span>
               <span class="font-mono">{{ (editing.grant_types || []).join(", ") }}</span>
             </div>
@@ -767,7 +767,7 @@ async function onTestDrive(c: AdminClient) {
                 class="field-input min-h-[5rem] resize-y py-2 font-mono text-xs"
               />
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="editing = null">Cancel</UiButton>
               <UiButton type="submit" size="sm" :disabled="saving">
                 {{ saving ? "Saving…" : "Save" }}

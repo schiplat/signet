@@ -80,7 +80,7 @@ function pctOf(item: NameCount): string {
   </div>
   <div v-else class="space-y-2.5">
     <div class="flex items-center gap-2">
-      <span class="flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground">
+      <span class="flex h-5 w-5 items-center justify-center rounded-lg text-muted-foreground">
         <component :is="icon" class="h-3.5 w-3.5" />
       </span>
       <h3 class="text-[13px] font-semibold tracking-tight">{{ title }}</h3>
@@ -139,7 +139,7 @@ function pctOf(item: NameCount): string {
           v-for="(item, i) in items"
           :key="item.name"
           class="flex cursor-default items-center gap-2 rounded-lg px-1.5 py-0.5 text-xs transition-colors"
-          :class="hoverIdx === i ? 'bg-muted/60' : ''"
+          :class="hoverIdx === i ? 'bg-muted/40' : ''"
           @mouseenter="hoverIdx = i"
           @mouseleave="hoverIdx = null"
         >
