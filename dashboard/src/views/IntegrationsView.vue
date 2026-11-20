@@ -700,7 +700,10 @@ async function copyText(text: string): Promise<boolean> {
 
     <!-- Create webhook modal -->
     <Teleport to="body">
-      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="showCreate"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!creating && (showCreate = false)" />
         <div
           ref="webhookPanel"
@@ -708,7 +711,7 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           aria-label="New webhook"
           tabindex="-1"
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
           @keydown="a11yWebhook.onKeydown"
           @keydown.esc="!creating && (showCreate = false)"
         >
@@ -751,7 +754,10 @@ async function copyText(text: string): Promise<boolean> {
 
     <!-- SCIM token reveal modal -->
     <Teleport to="body">
-      <div v-if="showScimToken" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="showScimToken"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showScimToken = false" />
         <div
           ref="scimPanel"
@@ -759,7 +765,7 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           aria-label="SCIM bearer token"
           tabindex="-1"
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
           @keydown="a11yScim.onKeydown"
           @keydown.esc="showScimToken = false"
         >
@@ -793,7 +799,10 @@ async function copyText(text: string): Promise<boolean> {
 
     <!-- SSO provider create/edit modal -->
     <Teleport to="body">
-      <div v-if="ssoShowModal" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="ssoShowModal"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="!ssoSaving && (ssoShowModal = false)" />
         <div
           ref="ssoPanel"
@@ -801,7 +810,7 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           :aria-label="ssoEditing ? 'Edit sign-in provider' : 'New sign-in provider'"
           tabindex="-1"
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
           @keydown="a11ySso.onKeydown"
           @keydown.esc="!ssoSaving && (ssoShowModal = false)"
         >

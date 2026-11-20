@@ -570,7 +570,10 @@ async function onTestDrive(c: AdminClient) {
     </div>
 
     <Teleport to="body">
-      <div v-if="showCreate" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="showCreate"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="showCreate = false" />
         <div
           ref="createPanel"
@@ -578,7 +581,7 @@ async function onTestDrive(c: AdminClient) {
           aria-modal="true"
           aria-label="Register Client"
           tabindex="-1"
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
           @keydown="a11yCreate.onKeydown"
           @keydown.esc="showCreate = false"
         >
@@ -684,7 +687,10 @@ async function onTestDrive(c: AdminClient) {
     </Teleport>
 
     <Teleport to="body">
-      <div v-if="editing" class="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        v-if="editing"
+        class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+      >
         <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="editing = null" />
         <div
           ref="editPanel"
@@ -692,7 +698,7 @@ async function onTestDrive(c: AdminClient) {
           aria-modal="true"
           :aria-label="editing ? `Edit ${editing.client_id}` : 'Edit client'"
           tabindex="-1"
-          class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
           @keydown="a11yEdit.onKeydown"
           @keydown.esc="editing = null"
         >

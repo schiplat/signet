@@ -98,7 +98,10 @@ function copyBoth() {
 
 <template>
   <Teleport to="body">
-    <div v-if="dialog" class="fixed inset-0 z-50 flex items-center justify-center">
+    <div
+      v-if="dialog"
+      class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 sm:items-center"
+    >
       <div class="absolute inset-0 bg-black/30 backdrop-blur-sm" @click="emit('close')" />
       <div
         ref="panelEl"
@@ -106,7 +109,7 @@ function copyBoth() {
         aria-modal="true"
         :aria-label="dialog?.title"
         tabindex="-1"
-        class="relative z-10 mx-4 w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+        class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
         @keydown="a11y.onKeydown"
       >
         <h3 class="mb-2 text-[15px] font-semibold">{{ dialog.title }}</h3>
