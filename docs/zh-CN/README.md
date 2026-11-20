@@ -19,7 +19,7 @@ Signet 是面向内部系统的统一身份认证服务（OIDC IdP）。本页�
 
 | 文档 | 内容 |
 |---|---|
-| [管理台](../dashboard.md) | 页面与权限、Settings、My apps、Clients、Directory |
+| [管理台](../dashboard.md) | 页面与权限、Settings、My apps、Clients、Directory、键盘与无障碍 |
 | [MFA](../mfa.md) | TOTP + 恢复码、强制策略、会话模型、API 与审计动作 |
 | [目录同步](../directory-sync.md) | LDAP / HTTP JSON 拉取、bind 直通登录、定时调度、`signet sync` CLI、SCIM push 加固 |
 | [目录映射交互](../directory-mapping-ux.md) | 两种 pull 源共用的字段映射交互规范（英文） |

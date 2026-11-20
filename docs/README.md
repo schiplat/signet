@@ -21,7 +21,7 @@ These English documents are the source of truth. Chinese translations live in
 
 | Document | What it covers |
 |---|---|
-| [Dashboard](./dashboard.md) | Pages, roles and permissions, Settings, My apps, Clients, Directory |
+| [Dashboard](./dashboard.md) | Pages, roles and permissions, Settings, My apps, Clients, Directory, keyboard and accessibility |
 | [MFA](./mfa.md) | TOTP + recovery codes, enforcement policy, session model, API and audit actions |
 | [Directory sync](./directory-sync.md) | LDAP / HTTP JSON pull, bind-through sign-in, scheduling, `signet sync` CLI, SCIM push hardening |
 | [Directory mapping UX](./directory-mapping-ux.md) | The field-mapping interaction spec shared by both pull kinds (English only) |

@@ -233,7 +233,27 @@ same pane:
 
 ---
 
-## 4. API prefix
+## 4. Keyboard and accessibility
+
+The dashboard is usable by keyboard and by screen reader; these behaviours are
+stable and can be relied on:
+
+- **Dialogs** (Clients, Users, My apps, Directory, Integrations, the account menu):
+  `Esc` closes them unless a request is in flight; focus moves to the first field
+  on open and returns to the control that opened the dialog on close; `Tab` stays
+  inside while it is open, and the page behind does not scroll.
+- **The secret-reveal dialog** is the exception: it has no `Esc` binding because
+  the secret is shown once — **Done** is the only way out.
+- **Confirmations** (delete, freeze, rotate, revoke) open with focus on **Cancel**,
+  so `Enter` never confirms a destructive action by reflex; `Esc` cancels.
+- **Form fields** carry real labels: clicking a label focuses its field, and screen
+  readers announce the field name.
+- **One light theme**: the dashboard does not follow the operating system's dark
+  setting.
+
+---
+
+## 5. API prefix
 
 Every dashboard call is a JSON request under **`/api/v1`**: session cookie auth, no CSRF
 token (the cookie is `SameSite=Lax`), errors as `{ "error": "..." }`. See
