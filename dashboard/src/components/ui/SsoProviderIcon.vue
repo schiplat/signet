@@ -26,7 +26,7 @@ const brandSrc = BRAND_TYPES.has(props.type) ? `/sso-${props.type}.svg` : null;
   <span
     v-else
     :class="[
-      'flex shrink-0 items-center justify-center rounded-xl bg-primary text-[11px] font-bold text-primary-foreground',
+      'flex shrink-0 items-center justify-center rounded-lg bg-primary text-[11px] font-bold text-primary-foreground',
       $props.class ?? 'h-11 w-11',
     ]"
     aria-hidden="true"

@@ -134,13 +134,13 @@ const noun = computed(() => (props.kind === "ldap" ? "attributes" : "fields"));
 </script>
 
 <template>
-  <div class="divide-y divide-border/60 rounded-xl border border-border">
+  <div class="surface-inset divide-y divide-border/40">
     <div
       v-for="row in rows"
       :key="row.row"
       class="px-3 py-2.5 motion-safe:transition-colors motion-safe:duration-500"
       :class="justAssigned && row.fields.some((f) => f.key === justAssigned)
-        ? 'bg-emerald-500/5 ring-1 ring-emerald-500/30'
+        ? 'bg-emerald-500/10'
         : ''"
     >
       <header class="flex items-baseline gap-2">
@@ -150,11 +150,11 @@ const noun = computed(() => (props.kind === "ldap" ? "attributes" : "fields"));
         <span class="flex-1" />
         <span
           v-if="verdictOf(row.row)"
-          class="shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold"
+          class="chip shrink-0"
           :class="
             verdictOf(row.row)!.ok
-              ? 'bg-emerald-500/10 text-emerald-600'
-              : 'bg-destructive/10 text-destructive'
+              ? 'chip-success'
+              : 'chip-danger'
           "
         >
           {{ verdictLabel(verdictOf(row.row)) }}
@@ -205,7 +205,7 @@ const noun = computed(() => (props.kind === "ldap" ? "attributes" : "fields"));
             <!-- Mapped: the choice reads back as a value, with a way to change it. -->
             <div v-if="valueOf(field.key)" class="flex items-center gap-2">
               <div
-                class="flex h-9 min-w-0 flex-1 items-center rounded-lg border border-border bg-card px-2.5"
+                class="flex h-9 min-w-0 flex-1 items-center rounded-xl border border-border bg-card px-2.5"
               >
                 <span class="min-w-0 truncate font-mono text-xs text-foreground">
                   {{ valueOf(field.key) }}
@@ -213,7 +213,7 @@ const noun = computed(() => (props.kind === "ldap" ? "attributes" : "fields"));
               </div>
               <button
                 type="button"
-                class="shrink-0 rounded-lg border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground"
+                class="shrink-0 rounded-xl border border-border px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
                 :disabled="busy"
                 @click="open(field.key)"
               >
@@ -235,7 +235,7 @@ const noun = computed(() => (props.kind === "ldap" ? "attributes" : "fields"));
             <button
               v-else
               type="button"
-              class="flex h-9 w-full items-center rounded-lg border border-dashed border-border bg-card/50 px-2.5 text-left text-xs text-muted-foreground hover:border-foreground/30 hover:bg-card"
+              class="flex h-9 w-full items-center rounded-xl border border-dashed border-border bg-card px-2.5 text-left text-xs text-muted-foreground hover:border-foreground/30 hover:bg-muted/40"
               :disabled="busy"
               :aria-expanded="openField === field.key"
               @click="open(field.key)"

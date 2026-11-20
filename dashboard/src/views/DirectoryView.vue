@@ -390,7 +390,7 @@ function sourceLabel(source: AdminGroup["source"]) {
             :class="
               selectedKey === 'all'
                 ? 'bg-muted font-medium text-foreground'
-                : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
             "
             @click="select('all')"
           >
@@ -403,7 +403,7 @@ function sourceLabel(source: AdminGroup["source"]) {
             :class="
               selectedKey === 'ungrouped'
                 ? 'bg-muted font-medium text-foreground'
-                : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
             "
             @click="select('ungrouped')"
           >
@@ -431,7 +431,7 @@ function sourceLabel(source: AdminGroup["source"]) {
               :class="
                 selectedKey === row.group.id
                   ? 'bg-muted font-medium text-foreground'
-                  : 'text-muted-foreground hover:bg-muted/50 hover:text-foreground'
+                  : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground'
               "
               :style="{ paddingLeft: `${8 + row.depth * 14}px` }"
               @click="select(row.group.id)"
@@ -439,7 +439,7 @@ function sourceLabel(source: AdminGroup["source"]) {
               <button
                 v-if="row.hasChildren"
                 type="button"
-                class="rounded p-0.5 text-muted-foreground/70 hover:bg-background hover:text-foreground"
+                class="rounded-lg p-0.5 text-muted-foreground/70 hover:bg-muted/40 hover:text-foreground"
                 :aria-expanded="expanded.has(row.group.id)"
                 :title="expanded.has(row.group.id) ? 'Collapse' : 'Expand'"
                 @click.stop="toggle(row.group.id)"
@@ -463,7 +463,7 @@ function sourceLabel(source: AdminGroup["source"]) {
               <span class="min-w-0 flex-1 truncate">{{ row.group.display_name }}</span>
               <span
                 v-if="row.group.source !== 'local'"
-                class="rounded bg-muted px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.04em] text-muted-foreground"
+                class="rounded-lg bg-muted/40 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-[0.04em] text-muted-foreground"
               >
                 {{ sourceLabel(row.group.source) }}
               </span>
@@ -496,13 +496,13 @@ function sourceLabel(source: AdminGroup["source"]) {
                   {{ selectedGroup.display_name }}
                 </h2>
                 <span
-                  class="rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-muted-foreground"
+                  class="chip bg-muted/40 text-muted-foreground"
                 >
                   {{ selectedGroup.kind }}
                 </span>
                 <span
                   v-if="selectedGroup.source !== 'local'"
-                  class="rounded-md bg-primary/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em] text-primary"
+                  class="chip chip-info"
                 >
                   {{ sourceLabel(selectedGroup.source) }}-managed
                 </span>
@@ -588,7 +588,7 @@ function sourceLabel(source: AdminGroup["source"]) {
           aria-modal="true"
           :aria-label="editorMode === 'create' ? 'New group or department' : 'Edit group'"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md surface-card p-6 focus:outline-none"
           @keydown="a11yEditor.onKeydown"
           @keydown.esc="showEditor = false"
         >
@@ -619,7 +619,7 @@ function sourceLabel(source: AdminGroup["source"]) {
                 Moving a node keeps its members and children. Cycles are refused.
               </p>
             </div>
-            <div class="mt-6 flex justify-end gap-3 border-t border-border/30 pt-5">
+            <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showEditor = false">
                 Cancel
               </UiButton>
@@ -648,7 +648,7 @@ function sourceLabel(source: AdminGroup["source"]) {
           aria-modal="true"
           :aria-label="selectedGroup ? `Add members to ${selectedGroup.display_name}` : 'Add members'"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md surface-card p-6 focus:outline-none"
           @keydown="a11yAddMembers.onKeydown"
           @keydown.esc="showAddMembers = false"
         >
@@ -667,7 +667,7 @@ function sourceLabel(source: AdminGroup["source"]) {
               @input="onUserQuery"
             />
           </label>
-          <div class="mt-3 max-h-64 overflow-y-auto rounded-xl border border-border/50">
+          <div class="surface-inset mt-3 max-h-64 overflow-y-auto">
             <div v-if="userSearching" class="py-8 text-center text-xs text-muted-foreground">
               Searching…
             </div>

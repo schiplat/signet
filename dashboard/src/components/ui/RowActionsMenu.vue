@@ -131,7 +131,7 @@ onUnmounted(detach);
       v-if="open"
       ref="menuRoot"
       role="menu"
-      class="fixed z-[55] overflow-hidden rounded-xl border border-border bg-background py-1 shadow-lg"
+      class="surface-overlay fixed z-[55] overflow-hidden py-1"
       :style="{ top: `${pos.top}px`, left: `${pos.left}px`, width: `${MENU_WIDTH}px` }"
     >
       <button
@@ -139,7 +139,7 @@ onUnmounted(detach);
         :key="item.key"
         type="button"
         role="menuitem"
-        class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-muted disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+        class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] hover:bg-muted/40 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
         :class="[
           item.danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground',
           item.separator && 'border-t border-border/40',

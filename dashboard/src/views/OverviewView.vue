@@ -274,16 +274,6 @@ function statusColor(status: GuideStatus) {
       : "hsl(215 14% 82%)";
 }
 
-/// A tint of [`statusColor`] for the icon chip; `color-mix` is avoided to keep
-/// the value legible in older browser engines.
-function statusTint(status: GuideStatus) {
-  return status === "done"
-    ? "hsl(152 42% 42% / 0.12)"
-    : status === "warning"
-      ? "hsl(38 92% 45% / 0.14)"
-      : "transparent";
-}
-
 function statusLabel(status: GuideStatus) {
   return status === "done" ? "Done" : status === "warning" ? "Needs attention" : "To do";
 }
@@ -567,7 +557,7 @@ function formatShortTime(iso: string) {
           <span class="sr-only">Filter by app</span>
           <select
             v-model="clientFilter"
-            class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+            class="field-input h-8 w-auto pl-2 pr-8 text-xs"
           >
             <option v-for="opt in clientOptions" :key="opt.value || 'all'" :value="opt.value">
               {{ opt.label }}
@@ -609,7 +599,7 @@ function formatShortTime(iso: string) {
           </div>
           <button
             type="button"
-            class="-mr-1 rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+            class="-mr-1 rounded-xl p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
             :disabled="!guideCanDismiss"
             :title="
               guideCanDismiss
@@ -659,15 +649,16 @@ function formatShortTime(iso: string) {
           v-for="(step, i) in guideSteps"
           :key="step.key"
           class="flex items-start gap-3 rounded-xl px-3 py-2.5 transition-colors"
-          :class="step.status === 'warning' ? 'bg-amber-500/[0.07]' : 'hover:bg-card/70'"
+          :class="step.status === 'warning' ? 'bg-amber-500/10' : 'hover:bg-muted/40'"
         >
           <span
-            class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold"
-            :class="step.status === 'todo' ? 'bg-muted text-muted-foreground' : ''"
-            :style="
-              step.status === 'todo'
-                ? undefined
-                : { background: statusTint(step.status), color: statusColor(step.status) }
+            class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold"
+            :class="
+              step.status === 'done'
+                ? 'bg-emerald-500/10 text-emerald-700'
+                : step.status === 'warning'
+                  ? 'bg-amber-500/10 text-amber-700'
+                  : 'bg-muted/40 text-muted-foreground'
             "
           >
             <Check v-if="step.status === 'done'" class="h-3.5 w-3.5" />
@@ -679,13 +670,13 @@ function formatShortTime(iso: string) {
             <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
               <p class="text-[13px] font-medium">{{ step.title }}</p>
               <span
-                class="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.06em]"
+                class="chip"
                 :class="
                   step.status === 'done'
-                    ? 'text-emerald-700/80'
+                    ? 'chip-success'
                     : step.status === 'warning'
-                      ? 'bg-amber-500/12 text-amber-700'
-                      : 'bg-muted text-muted-foreground'
+                      ? 'chip-warning'
+                      : 'bg-muted/40 text-muted-foreground'
                 "
               >
                 {{ statusLabel(step.status) }}
@@ -743,7 +734,7 @@ function formatShortTime(iso: string) {
         v-for="card in statCards"
         :key="card.key"
         :to="card.to"
-        class="surface-card group relative block py-6 px-5 transition-shadow hover:shadow-sm"
+        class="surface-card group relative block py-6 px-5"
       >
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
@@ -752,7 +743,7 @@ function formatShortTime(iso: string) {
             <p class="type-meta mt-1.5 truncate">{{ card.meta }}</p>
           </div>
           <span
-            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl transition-colors"
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg transition-colors"
             :style="{ background: `hsl(${card.hue} / 0.12)`, color: `hsl(${card.hue})` }"
           >
             <component :is="card.icon" class="h-5 w-5" />
@@ -828,7 +819,7 @@ function formatShortTime(iso: string) {
       </div>
 
       <div class="surface-card flex flex-col overflow-hidden lg:col-span-2">
-        <div class="flex shrink-0 items-center justify-between border-b border-border/30 px-5 py-4">
+        <div class="flex shrink-0 items-center justify-between border-b border-border/40 px-5 py-4">
           <p class="text-xs font-semibold uppercase tracking-[0.06em] text-muted-foreground">
             Recent logins
           </p>
@@ -846,11 +837,11 @@ function formatShortTime(iso: string) {
         >
           No login events in the last 7 days
         </div>
-        <ul v-else class="max-h-[300px] divide-y divide-border/20 overflow-y-auto">
+        <ul v-else class="max-h-[300px] divide-y divide-border/40 overflow-y-auto">
           <li v-for="(row, idx) in stats.recent_logins" :key="idx" class="px-5 py-3">
             <div class="flex items-center justify-between gap-3">
               <p class="flex min-w-0 items-center gap-2">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground">
                   <AppWindow v-if="row.client_id && row.client_id !== '(direct)'" class="h-3 w-3" />
                   <DoorOpen v-else class="h-3 w-3" />
                 </span>
@@ -864,14 +855,14 @@ function formatShortTime(iso: string) {
               <span>{{ [row.ip, row.browser, row.os].filter(Boolean).join(" · ") || "—" }}</span>
               <span
                 v-if="clientLabel(row.client_id)"
-                class="rounded-full border border-[hsl(219_85%_62%/0.35)] bg-[hsl(219_85%_62%/0.12)] px-2 py-px font-sans text-[10px] font-medium not-italic text-[hsl(219_60%_45%)]"
+                class="rounded-lg bg-primary/10 px-2 py-px font-sans text-[10px] font-medium not-italic text-primary"
               >
                 {{ clientLabel(row.client_id) }}
               </span>
             </p>
           </li>
         </ul>
-        <div class="shrink-0 border-t border-border/30 px-5 py-3.5 text-center">
+        <div class="shrink-0 border-t border-border/40 px-5 py-3.5 text-center">
           <RouterLink
             to="/audit-logs"
             class="text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"

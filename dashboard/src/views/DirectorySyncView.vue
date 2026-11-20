@@ -677,10 +677,10 @@ async function reloadRuns() {
 }
 
 const STATUS_CLASS: Record<string, string> = {
-  succeeded: "bg-emerald-500/10 text-emerald-600",
-  partial: "bg-amber-500/10 text-amber-700",
-  failed: "bg-destructive/10 text-destructive",
-  running: "bg-blue-500/10 text-blue-600",
+  succeeded: "chip-success",
+  partial: "chip-warning",
+  failed: "chip-danger",
+  running: "chip-info",
 };
 
 function duration(r: DirectoryRun): string {
@@ -727,7 +727,7 @@ function duration(r: DirectoryRun): string {
         No directory sources yet.
       </div>
 
-      <ul v-else class="divide-y divide-border/50">
+      <ul v-else class="divide-y divide-border/40">
         <li
           v-for="s in sources"
           :key="s.id"
@@ -738,14 +738,14 @@ function duration(r: DirectoryRun): string {
               <span class="text-sm font-medium">{{ s.name }}</span>
               <span class="type-meta font-mono text-[10px]">{{ s.code }}</span>
               <span
-                class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                :class="s.enabled ? 'bg-emerald-500/10 text-emerald-600' : 'bg-muted text-muted-foreground'"
+                class="chip"
+                :class="s.enabled ? 'chip-success' : 'bg-muted/40 text-muted-foreground'"
               >
                 {{ s.enabled ? "Enabled" : "Disabled" }}
               </span>
               <span
                 v-if="!s.credential_set"
-                class="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive"
+                class="chip chip-danger"
               >
                 No credential
               </span>
@@ -783,7 +783,7 @@ function duration(r: DirectoryRun): string {
       <!-- Run history -->
       <div
         v-if="historyFor"
-        class="mt-4 rounded-xl border border-border/50 bg-muted/30 p-4"
+        class="mt-4 surface-inset p-4"
       >
         <div class="mb-3 flex items-center justify-between gap-2">
           <p class="text-xs font-medium">Run history · {{ historyFor.name }}</p>
@@ -822,8 +822,8 @@ function duration(r: DirectoryRun): string {
               <tr v-for="r in runs" :key="r.id" class="border-t border-border/40">
                 <td class="py-1.5 pr-3">
                   <span
-                    class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                    :class="STATUS_CLASS[r.status] ?? 'bg-muted text-muted-foreground'"
+                    class="chip gap-1"
+                    :class="STATUS_CLASS[r.status] ?? 'bg-muted/40 text-muted-foreground'"
                   >
                     <CheckCircle2 v-if="r.status === 'succeeded'" class="h-3 w-3" />
                     <AlertTriangle v-else-if="r.status === 'partial'" class="h-3 w-3" />
@@ -883,7 +883,7 @@ function duration(r: DirectoryRun): string {
           aria-modal="true"
           :aria-label="editing ? 'Edit directory source' : 'New directory source'"
           tabindex="-1"
-          class="relative z-10 mx-4 max-h-[90vh] w-full max-w-6xl overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 mx-4 max-h-[90vh] w-full max-w-6xl overflow-y-auto surface-card p-6 focus:outline-none"
           @keydown="a11y.onKeydown"
           @keydown.esc="!saving && (showModal = false)"
         >
@@ -893,7 +893,7 @@ function duration(r: DirectoryRun): string {
               {{ editing ? "Edit directory source" : "New directory source" }}
             </h2>
             <button
-              class="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              class="rounded-xl p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
               type="button"
               aria-label="Close"
               @click="showModal = false"
@@ -1121,7 +1121,7 @@ function duration(r: DirectoryRun): string {
               </div>
             </template>
 
-            <div class="border-t border-border/60 pt-4">
+            <div class="border-t border-border/40 pt-4">
               <div class="mb-3 flex items-baseline gap-2">
                 <h3 class="text-sm font-semibold">Field mapping</h3>
                 <p class="type-meta text-[11px]">

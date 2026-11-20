@@ -59,7 +59,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       <TopNav />
       <div
         v-if="auth.pendingSso"
-        class="mx-4 mt-3 flex flex-wrap items-center gap-3 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm"
+        class="mx-4 mt-3 flex flex-wrap items-center gap-3 notice notice-warning px-4 py-3 text-sm"
         data-testid="pending-sso-banner"
       >
         <span class="flex-1">
@@ -72,7 +72,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
         </span>
         <div class="flex gap-2">
           <button
-            class="rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
+            class="rounded-xl bg-primary px-3 py-1.5 font-medium text-primary-foreground disabled:opacity-50"
             :disabled="pendingBusy"
             data-testid="pending-sso-confirm"
             @click="confirmPending"
@@ -80,7 +80,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
             Link identity
           </button>
           <button
-            class="rounded-md border px-3 py-1.5 disabled:opacity-50"
+            class="rounded-xl border px-3 py-1.5 disabled:opacity-50"
             :disabled="pendingBusy"
             data-testid="pending-sso-discard"
             @click="discardPending"

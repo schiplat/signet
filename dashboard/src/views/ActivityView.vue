@@ -38,10 +38,10 @@ const ACTION_META: Record<string, { label: string; icon: typeof LogIn; tone: "ok
 };
 
 const TONE_CLASS: Record<string, string> = {
-  ok: "bg-emerald-500/10 text-emerald-600",
+  ok: "bg-emerald-500/10 text-emerald-700",
   warn: "bg-amber-500/10 text-amber-700",
   danger: "bg-destructive/10 text-destructive",
-  muted: "bg-muted text-muted-foreground",
+  muted: "bg-muted/40 text-muted-foreground",
 };
 
 function metaFor(action: string) {
@@ -115,7 +115,7 @@ onMounted(load);
               <template v-else-if="!loading">No sign-ins yet</template>
             </p>
           </div>
-          <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground">
             <LogIn class="h-4 w-4" />
           </span>
         </div>
@@ -131,7 +131,7 @@ onMounted(load);
             </p>
             <p class="type-meta mt-1.5">Devices currently signed in</p>
           </div>
-          <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground">
             <Laptop class="h-4 w-4" />
           </span>
         </div>
@@ -149,8 +149,8 @@ onMounted(load);
             <p class="type-meta mt-1.5">{{ summary?.passkey_count ?? 0 }} passkey(s) enrolled</p>
           </div>
           <span
-            class="flex h-9 w-9 items-center justify-center rounded-xl"
-            :class="summary?.totp_enabled ? 'bg-emerald-500/10 text-emerald-600' : 'bg-muted text-muted-foreground'"
+            class="flex h-9 w-9 items-center justify-center rounded-lg"
+            :class="summary?.totp_enabled ? 'bg-emerald-500/10 text-emerald-700' : 'bg-muted/40 text-muted-foreground'"
           >
             <ShieldCheck class="h-4 w-4" />
           </span>
@@ -167,7 +167,7 @@ onMounted(load);
             </p>
             <p class="type-meta mt-1.5">OAuth authorizations granted</p>
           </div>
-          <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-muted text-muted-foreground">
+          <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-muted/40 text-muted-foreground">
             <AppWindow class="h-4 w-4" />
           </span>
         </div>
@@ -188,7 +188,7 @@ onMounted(load);
       </div>
 
       <section v-else class="surface-card overflow-hidden">
-        <ul v-if="items.length" class="divide-y divide-border/50">
+        <ul v-if="items.length" class="divide-y divide-border/40">
           <li
             v-for="it in items"
             :key="it.id"

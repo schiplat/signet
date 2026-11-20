@@ -54,7 +54,7 @@ function display(name: string) {
         v-for="(row, i) in rows"
         :key="row.client_id"
         class="group grid grid-cols-[1.5rem_9rem_1fr_2.5rem_3rem] items-center gap-3 rounded-lg px-1.5 py-1.5 transition-colors"
-        :class="hoverIdx === i ? 'bg-muted/50' : ''"
+        :class="hoverIdx === i ? 'bg-muted/40' : ''"
         @mouseenter="hoverIdx = i"
         @mouseleave="hoverIdx = null"
       >
@@ -71,7 +71,7 @@ function display(name: string) {
         </span>
 
         <!-- Bar: logins only. Top share shown inside when it fits. -->
-        <div class="relative h-5 overflow-hidden rounded-md bg-muted">
+        <div class="relative h-5 overflow-hidden rounded-lg bg-muted/40">
           <div
             class="flex h-full items-center justify-end rounded-md pr-1.5 transition-[width] duration-300"
             :style="{ width: `${row.loginPct}%`, background: 'hsl(217 90% 70%)' }"
@@ -96,7 +96,7 @@ function display(name: string) {
       </div>
     </div>
 
-    <p class="mt-2 flex flex-wrap items-center gap-x-4 border-t border-border/30 pt-2 text-[10px] text-muted-foreground">
+    <p class="mt-2 flex flex-wrap items-center gap-x-4 border-t border-border/40 pt-2 text-[10px] text-muted-foreground">
       <span class="flex items-center gap-1.5">
         <span class="h-2 w-4 rounded-sm bg-[hsl(217_90%_70%)]" />
         bar = 30-day logins

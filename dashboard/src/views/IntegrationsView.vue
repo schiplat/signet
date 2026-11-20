@@ -422,7 +422,7 @@ async function copyText(text: string): Promise<boolean> {
           No webhooks yet.
         </div>
 
-        <ul v-else class="divide-y divide-border/50">
+        <ul v-else class="divide-y divide-border/40">
           <li
             v-for="w in webhooks"
             :key="w.id"
@@ -431,14 +431,14 @@ async function copyText(text: string): Promise<boolean> {
             <div class="min-w-0">
               <div class="flex items-center gap-2">
                 <span
-                  class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
-                  :class="w.kind === 'feishu' ? 'bg-blue-500/10 text-blue-600' : 'bg-muted text-muted-foreground'"
+                  class="chip"
+                  :class="w.kind === 'feishu' ? 'chip-info' : 'bg-muted/40 text-muted-foreground'"
                 >
                   {{ kindLabel(w.kind) }}
                 </span>
                 <span
                   v-if="!w.enabled"
-                  class="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive"
+                  class="chip chip-danger"
                 >
                   Disabled
                 </span>
@@ -468,7 +468,7 @@ async function copyText(text: string): Promise<boolean> {
         <!-- Deliveries panel -->
         <div
           v-if="deliveriesFor"
-          class="mt-4 rounded-xl border border-border/50 bg-muted/30 p-4"
+          class="mt-4 surface-inset p-4"
         >
           <div class="mb-2 flex items-center justify-between">
             <p class="text-xs font-medium">Recent deliveries · {{ deliveriesFor.url }}</p>
@@ -485,8 +485,8 @@ async function copyText(text: string): Promise<boolean> {
             >
               <span class="font-mono text-muted-foreground">{{ d.event_id }}</span>
               <span
-                class="rounded-full px-2 py-0.5 text-[10px] font-semibold"
-                :class="d.success ? 'bg-emerald-500/10 text-emerald-600' : 'bg-destructive/10 text-destructive'"
+                class="chip"
+                :class="d.success ? 'chip-success' : 'chip-danger'"
               >
                 {{ d.status_code ?? "—" }} {{ d.success ? "ok" : "failed" }}
               </span>
@@ -516,7 +516,7 @@ async function copyText(text: string): Promise<boolean> {
           </UiButton>
         </div>
 
-        <div v-if="ssoCallbackUrl" class="mb-4 space-y-1.5 rounded-lg bg-muted/40 px-3 py-2.5">
+        <div v-if="ssoCallbackUrl" class="mb-4 space-y-1.5 surface-inset px-3 py-2.5">
           <div class="flex items-center gap-2">
             <span class="shrink-0 text-[11px] font-medium text-muted-foreground">URL pattern</span>
             <code class="truncate font-mono text-[11px]">{{ ssoCallbackUrl }}</code>
@@ -534,7 +534,7 @@ async function copyText(text: string): Promise<boolean> {
           </div>
           <p class="text-[11px] leading-relaxed text-muted-foreground">
             All providers use the same path:
-            <code class="rounded bg-muted px-1">/api/v1/auth/sso/&#123;code&#125;/callback</code>.
+            <code class="rounded-lg bg-muted/40 px-1">/api/v1/auth/sso/&#123;code&#125;/callback</code>.
             Copy the exact URL under each provider below — do not invent a different format.
           </p>
         </div>
@@ -545,7 +545,7 @@ async function copyText(text: string): Promise<boolean> {
           No sign-in providers configured yet.
         </div>
 
-        <ul v-else class="divide-y divide-border/50">
+        <ul v-else class="divide-y divide-border/40">
           <li
             v-for="p in ssoProviders"
             :key="p.code"
@@ -558,7 +558,7 @@ async function copyText(text: string): Promise<boolean> {
                 <span class="type-meta font-mono text-[10px]">{{ p.code }}</span>
                 <span
                   v-if="!p.enabled"
-                  class="rounded-full bg-destructive/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-destructive"
+                  class="chip chip-danger"
                 >
                   Disabled
                 </span>
@@ -627,11 +627,11 @@ async function copyText(text: string): Promise<boolean> {
             <dt class="w-32 shrink-0 text-xs text-muted-foreground">Status</dt>
             <dd>
               <span
-                class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                class="chip"
                 :class="
                   integrations?.scim.enabled
-                    ? 'bg-emerald-500/10 text-emerald-600'
-                    : 'bg-destructive/10 text-destructive'
+                    ? 'chip-success'
+                    : 'chip-danger'
                 "
               >
                 {{ integrations?.scim.enabled ? "Enabled" : "Not configured" }}
@@ -681,8 +681,8 @@ async function copyText(text: string): Promise<boolean> {
           </h2>
           <p class="mt-1 text-xs text-muted-foreground">
             Relying-party identity used during passkey ceremonies. Set
-            <code class="rounded bg-muted px-1">SIGNET_WEBAUTHN_RP_ID</code> /
-            <code class="rounded bg-muted px-1">SIGNET_WEBAUTHN_RP_ORIGIN</code> for production.
+            <code class="rounded-lg bg-muted/40 px-1">SIGNET_WEBAUTHN_RP_ID</code> /
+            <code class="rounded-lg bg-muted/40 px-1">SIGNET_WEBAUTHN_RP_ORIGIN</code> for production.
           </p>
         </div>
         <dl class="space-y-2 text-sm">
@@ -711,7 +711,7 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           aria-label="New webhook"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yWebhook.onKeydown"
           @keydown.esc="!creating && (showCreate = false)"
         >
@@ -765,14 +765,14 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           aria-label="SCIM bearer token"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11yScim.onKeydown"
           @keydown.esc="showScimToken = false"
         >
           <div class="mb-3 flex items-center justify-between">
             <h2 class="text-base font-semibold">SCIM bearer token</h2>
             <button
-              class="rounded-lg p-1.5 text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground"
+              class="rounded-xl p-1.5 text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
               aria-label="Close"
               @click="showScimToken = false"
             >
@@ -783,7 +783,7 @@ async function copyText(text: string): Promise<boolean> {
             Copy it now — it is shown only once and cannot be retrieved again.
           </p>
           <div class="mb-4 flex items-center gap-2">
-            <code class="flex-1 break-all rounded-lg bg-muted px-3 py-2 font-mono text-xs">{{ scimToken }}</code>
+            <code class="flex-1 break-all surface-inset px-3 py-2 font-mono text-xs">{{ scimToken }}</code>
             <UiButton size="sm" variant="outline" :class="copied ? 'text-emerald-600' : ''" @click="copyToken">
               <Check v-if="copied" class="h-3.5 w-3.5" />
               <Copy v-else class="h-3.5 w-3.5" />
@@ -810,7 +810,7 @@ async function copyText(text: string): Promise<boolean> {
           aria-modal="true"
           :aria-label="ssoEditing ? 'Edit sign-in provider' : 'New sign-in provider'"
           tabindex="-1"
-          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 my-auto w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain surface-card p-6 focus:outline-none"
           @keydown="a11ySso.onKeydown"
           @keydown.esc="!ssoSaving && (ssoShowModal = false)"
         >

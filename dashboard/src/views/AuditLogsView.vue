@@ -168,16 +168,16 @@ function deviceLabel(row: AuditLogItem) {
     <p v-if="error" class="field-error">{{ error }}</p>
 
     <div class="surface-card overflow-hidden">
-      <div class="flex flex-wrap items-center gap-3 border-b border-border/30 px-5 py-3">
+      <div class="flex flex-wrap items-center gap-3 border-b border-border/40 px-5 py-3">
         <input
           v-model="searchQuery"
           type="search"
           placeholder="Search actor / IP / action / resource…"
-          class="w-full max-w-xs rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs outline-none transition-colors focus:border-primary/50 focus:ring-1 focus:ring-primary/10"
+          class="field-input h-8 w-full max-w-xs px-3 text-xs"
         />
         <select
           v-model="actionFilter"
-          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+          class="field-input h-8 w-auto pl-2 pr-8 text-xs"
         >
           <option v-for="a in actionOptions" :key="a || 'all'" :value="a">
             {{ a || "All actions" }}
@@ -185,7 +185,7 @@ function deviceLabel(row: AuditLogItem) {
         </select>
         <select
           v-model="clientFilter"
-          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+          class="field-input h-8 w-auto pl-2 pr-8 text-xs"
         >
           <option value="">All apps</option>
           <option v-for="c in facets?.clients ?? []" :key="c.client_id" :value="c.client_id">
@@ -194,14 +194,14 @@ function deviceLabel(row: AuditLogItem) {
         </select>
         <select
           v-model="browserFilter"
-          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+          class="field-input h-8 w-auto pl-2 pr-8 text-xs"
         >
           <option value="">All browsers</option>
           <option v-for="b in facets?.browsers ?? []" :key="b" :value="b">{{ b }}</option>
         </select>
         <select
           v-model="osFilter"
-          class="h-8 rounded-lg border border-border/60 bg-background px-2 text-xs outline-none"
+          class="field-input h-8 w-auto pl-2 pr-8 text-xs"
         >
           <option value="">All OSes</option>
           <option v-for="o in facets?.oses ?? []" :key="o" :value="o">{{ o }}</option>
@@ -217,7 +217,7 @@ function deviceLabel(row: AuditLogItem) {
             })
           "
           download
-          class="ml-auto inline-flex h-8 items-center gap-1.5 rounded-lg border border-border/60 bg-background px-3 text-xs font-medium transition-colors hover:bg-muted"
+          class="ml-auto inline-flex h-8 items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-xs font-medium transition-colors hover:bg-muted/40"
         >
           <Download class="h-3.5 w-3.5" />
           Export CSV
@@ -236,7 +236,7 @@ function deviceLabel(row: AuditLogItem) {
         <div class="overflow-x-auto">
           <table class="w-full text-[13px]">
             <thead>
-              <tr class="border-b border-border/50">
+              <tr class="border-b border-border/40">
                 <SortableTh
                   label="Time"
                   column="created_at"
@@ -285,7 +285,7 @@ function deviceLabel(row: AuditLogItem) {
               <tr
                 v-for="row in items"
                 :key="row.id"
-                class="cursor-pointer border-b border-border/40 last:border-0 hover:bg-muted/5"
+                class="cursor-pointer border-b border-border/40 last:border-0 hover:bg-muted/40"
                 @click="openDetail(row)"
               >
                 <td class="whitespace-nowrap px-5 py-3 text-xs text-muted-foreground">
@@ -307,7 +307,7 @@ function deviceLabel(row: AuditLogItem) {
                   </span>
                 </td>
                 <td class="px-5 py-3 text-xs">
-                  <span v-if="row.client_id" class="rounded bg-muted/60 px-1.5 py-0.5 font-mono">
+                  <span v-if="row.client_id" class="rounded-lg bg-muted/40/40 px-1.5 py-0.5 font-mono">
                     {{ row.client_id }}
                   </span>
                   <span v-else class="text-muted-foreground">—</span>
@@ -343,7 +343,7 @@ function deviceLabel(row: AuditLogItem) {
           aria-modal="true"
           aria-label="Audit event detail"
           tabindex="-1"
-          class="relative z-10 mx-4 max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border/50 bg-card p-6 shadow-2xl focus:outline-none"
+          class="relative z-10 mx-4 max-h-[85vh] w-full max-w-lg overflow-y-auto surface-card p-6 focus:outline-none"
           @keydown="detailA11y.onKeydown"
           @keydown.esc="detailRow = null"
         >
@@ -385,7 +385,7 @@ function deviceLabel(row: AuditLogItem) {
               <dd class="mt-0.5">
                 <span
                   v-if="detailRow.client_id"
-                  class="rounded bg-muted/60 px-1.5 py-0.5 font-mono text-xs"
+                  class="rounded-lg bg-muted/40/40 px-1.5 py-0.5 font-mono text-xs"
                 >
                   {{ detailRow.client_id }}
                 </span>
@@ -402,14 +402,14 @@ function deviceLabel(row: AuditLogItem) {
               <dt class="type-meta text-[11px] uppercase tracking-wide">Detail</dt>
               <dd class="mt-0.5">
                 <pre
-                  class="max-h-48 overflow-auto rounded-lg border border-border/50 bg-muted/40 p-3 font-mono text-xs leading-5"
+                  class="max-h-48 overflow-auto surface-inset p-3 font-mono text-xs leading-5"
                   >{{ prettyDetail(detailRow.detail) }}</pre
                 >
               </dd>
             </div>
           </dl>
 
-          <div class="mt-5 flex justify-end border-t border-border/30 pt-4">
+          <div class="mt-5 flex justify-end border-t border-border/40 pt-4">
             <UiButton type="button" size="sm" @click="detailRow = null">Close</UiButton>
           </div>
         </div>

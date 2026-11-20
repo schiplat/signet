@@ -104,9 +104,74 @@
 }
 
 @layer components {
+  /*
+   * Surface roles. One recipe per role; pages compose these instead of
+   * hand-building outline/fill/shadow combinations:
+   *
+   *   card / modal  bg-card + hairline ring + the soft shadow
+   *   inset         muted fill, no outline, no shadow (code, secrets, grouped rows)
+   *   overlay       bg-card + hairline ring + shadow-lg (menus, tooltips)
+   *
+   * Semantic tones and chips follow the same idea: the tint carries the state,
+   * never a border, and every tone uses the same alpha (/10).
+   */
   .surface-card {
-    @apply rounded-2xl bg-card ring-1 ring-border/70;
-    box-shadow: 0 1px 2px hsl(220 20% 20% / 0.04), 0 2px 8px hsl(220 20% 20% / 0.03);
+    @apply rounded-2xl bg-card;
+    /* The hairline is part of the same box-shadow list: a separate `ring-1`
+       utility is overridden by this declaration (same property), which left
+       cards with a shadow but no outline. */
+    box-shadow:
+      0 0 0 1px hsl(var(--border) / 0.6),
+      0 1px 2px hsl(220 20% 20% / 0.04),
+      0 2px 8px hsl(220 20% 20% / 0.03);
+  }
+
+  .surface-inset {
+    @apply rounded-xl bg-muted/40;
+  }
+
+  .surface-overlay {
+    @apply rounded-xl bg-card ring-1 ring-border/60 shadow-lg;
+  }
+
+  .notice {
+    @apply rounded-xl px-3 py-2;
+  }
+
+  .notice-info {
+    @apply bg-primary/10 text-primary;
+  }
+
+  .notice-success {
+    @apply bg-emerald-500/10 text-emerald-700;
+  }
+
+  .notice-warning {
+    @apply bg-amber-500/10 text-amber-700;
+  }
+
+  .notice-danger {
+    @apply bg-destructive/10 text-destructive;
+  }
+
+  .chip {
+    @apply inline-flex items-center rounded-lg px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide;
+  }
+
+  .chip-info {
+    @apply bg-primary/10 text-primary;
+  }
+
+  .chip-success {
+    @apply bg-emerald-500/10 text-emerald-700;
+  }
+
+  .chip-warning {
+    @apply bg-amber-500/10 text-amber-700;
+  }
+
+  .chip-danger {
+    @apply bg-destructive/10 text-destructive;
   }
 
   .page-stack {
@@ -135,5 +200,20 @@
 
   .field-input {
     @apply flex h-10 w-full rounded-xl border border-border bg-card px-3 text-sm text-foreground placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-foreground/35 focus-visible:ring-2 focus-visible:ring-ring/30;
+  }
+
+  /*
+   * Native select arrows sit flush against the border in some browser/zoom
+   * combinations, which reads as "cramped" next to our 12px padding. Draw the
+   * chevron ourselves at a fixed inset, with padding reserved for it, so every
+   * select keeps the same right-hand gap regardless of the platform.
+   */
+  select.field-input {
+    appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.75rem center;
+    background-size: 1rem 1rem;
+    padding-right: 2.5rem;
   }
 }

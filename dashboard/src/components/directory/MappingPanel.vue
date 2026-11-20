@@ -333,10 +333,10 @@ watch(
         Without a sample the fields are only syntax-checked, not checked against real data.
       </p>
 
-      <div v-if="reference.length" class="rounded-xl border border-border">
+      <div v-if="reference.length" class="surface-inset">
         <button
           type="button"
-          class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:bg-muted/50"
+          class="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[10px] text-muted-foreground hover:bg-muted/40"
           :aria-expanded="referenceOpen"
           @click="referenceOpen = !referenceOpen"
         >
@@ -350,7 +350,7 @@ watch(
           <template v-else>Fields on the first entry</template>
         </button>
         <template v-if="referenceOpen">
-          <ul class="divide-y divide-border/50 border-t border-border/60">
+          <ul class="divide-y divide-border/40 border-t border-border/40">
             <li
               v-for="item in reference"
               :key="item.key"
@@ -359,7 +359,7 @@ watch(
               <span class="shrink-0 font-mono text-foreground">{{ item.key }}</span>
               <span
                 v-if="item.shape"
-                class="shrink-0 rounded px-1 text-[10px] text-muted-foreground/80"
+                class="shrink-0 rounded-lg px-1 text-[10px] text-muted-foreground/80"
               >
                 {{ SHAPE_LABEL[item.shape] }}
               </span>
@@ -368,7 +368,7 @@ watch(
               </span>
               <span
                 v-if="item.note"
-                class="shrink-0 rounded px-1 text-[10px]"
+                class="shrink-0 rounded-lg px-1 text-[10px]"
                 :class="
                   item.partial ? 'bg-amber-500/10 text-amber-700' : 'text-muted-foreground/70'
                 "
@@ -379,7 +379,7 @@ watch(
           </ul>
           <p
             v-if="kind === 'http_json' && counts.total > 1"
-            class="border-t border-border/60 px-2.5 py-1.5 text-[10px] text-muted-foreground"
+            class="border-t border-border/40 px-2.5 py-1.5 text-[10px] text-muted-foreground"
           >
             Counts are taken across all {{ counts.total }} entries; this list shows the first.
           </p>
@@ -419,7 +419,7 @@ watch(
           <li
             v-for="warning in result.warnings"
             :key="warning"
-            class="rounded-xl bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-700"
+            class="notice notice-warning text-[11px]"
           >
             {{ warning }}
           </li>
@@ -439,7 +439,7 @@ watch(
             <div v-if="canPageBack || canPageForward" class="flex items-center gap-1">
               <button
                 type="button"
-                class="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                class="rounded-xl border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/40 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
                 :disabled="!canPageBack || busy"
                 @click="goToPage(result.offset - pageSize)"
               >
@@ -447,7 +447,7 @@ watch(
               </button>
               <button
                 type="button"
-                class="rounded-md border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
+                class="rounded-xl border border-border px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted/40 hover:text-foreground disabled:opacity-40 disabled:hover:bg-transparent"
                 :disabled="!canPageForward || busy"
                 @click="goToPage(result.offset + pageSize)"
               >
@@ -455,7 +455,7 @@ watch(
               </button>
             </div>
           </div>
-          <div class="max-h-56 overflow-auto rounded-xl border border-border">
+          <div class="surface-inset max-h-56 overflow-auto">
             <table class="w-full text-[11px]">
               <thead class="sticky top-0 bg-muted text-left text-muted-foreground">
                 <tr>
@@ -469,7 +469,7 @@ watch(
                 <tr
                   v-for="row in result.rows"
                   :key="row.external_id"
-                  class="border-t border-border/50"
+                  class="border-t border-border/40"
                 >
                   <td class="px-2.5 py-1.5 text-foreground">{{ row.email || "—" }}</td>
                   <td class="px-2.5 py-1.5 text-foreground">{{ row.username || "—" }}</td>
