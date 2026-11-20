@@ -4,6 +4,49 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [0.6.4] - 2026-11-20
+
+Dashboard accessibility and polish: every dialog becomes a real dialog,
+form fields are announced, and the theme is committed to light.
+
+### Added
+
+- **Dialog accessibility across all 22 dialogs** (Dashboard → Clients,
+  My apps, Users, Directory, Integrations, Directory sync, TopNav account
+  dialogs): `role="dialog"` + `aria-modal` + accessible names, focus moved
+  into the panel on open (first field) and back to the trigger on close,
+  Tab containment, and a counted body-scroll lock. Escape stays each
+  dialog's own policy: form dialogs close as their backdrop click did
+  (busy-guarded), the secret-reveal dialog has no Escape at all — a one-time
+  secret must not be lost to a stray keypress — and the confirm dialog
+  focuses **Cancel**, never Confirm, so Enter cannot confirm a delete by
+  reflex.
+- **Label associations for every form field** in those dialogs (`for`/`id`,
+  namespaced per dialog with `useId`): clicking a label focuses its field and
+  screen readers announce field names. The SCIM-token and directory-source
+  close buttons, previously bare, gained accessible names.
+
+### Changed
+
+- **Light theme is the theme.** The stylesheet defines one token set and no
+  `.dark` layer, but scattered `dark:` utilities followed the OS preference,
+  producing a light dashboard with dark-tinted patches. All removed; the QR
+  code's foreground colour key is untouched.
+- **Every dialog has a scroll path.** Six dialogs (register/edit client,
+  webhook, SCIM token, sign-in provider, secret reveal) kept a
+  centre-no-scroll layout whose overflow was unreachable; all use the
+  top-aligned scrollable overlay pattern now, and the profile/password
+  panels cap at `90vh`.
+- **Directory page**: the Organization tree's member counts and the header
+  plus button share one centred 28px column.
+
+### Security
+
+- **chrono accepted by audit policy** (`RUSTSEC-2026-0543`, unmaintained,
+  informational): recorded in `.cargo/audit.toml` with reason and end
+  condition, matching that file's "every entry is a decision" format. No
+  known vulnerability; no dependency change.
+
 ## [0.6.3] - 2026-11-19
 
 Security dependency bump and public-repo hygiene: the lettre SMTP advisories,
