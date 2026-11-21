@@ -146,19 +146,31 @@ pub async fn revoke_all_sessions_notifying(state: &AppState, user_id: Uuid) -> A
     Ok(revoked)
 }
 
-/// Revokes every session of each user in `user_ids`, in one statement.
-///
-/// The batch sibling of [`revoke_all_sessions`], for the bulk paths: a delete
-/// per user made disabling a page of accounts a round trip each.
-pub async fn revoke_sessions_for(pool: &PgPool, user_ids: &[Uuid]) -> AppResult<u64> {
+/// [`revoke_all_sessions_notifying`] for a set of users, still in one
+/// statement: the delete keeps its batch shape, and `RETURNING` tells exactly
+/// which subjects lost a session — only they get the back-channel logout,
+/// the same condition the single-user funnel applies. Returns the notified
+/// ids, de-duplicated in first-revoked order.
+pub async fn revoke_sessions_for_notifying(
+    state: &AppState,
+    user_ids: &[Uuid],
+) -> AppResult<Vec<Uuid>> {
     if user_ids.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
-    let res = sqlx::query("DELETE FROM sessions WHERE user_id = ANY($1::uuid[])")
-        .bind(user_ids)
-        .execute(pool)
-        .await?;
-    Ok(res.rows_affected())
+    let rows: Vec<(Uuid,)> =
+        sqlx::query_as("DELETE FROM sessions WHERE user_id = ANY($1::uuid[]) RETURNING user_id")
+            .bind(user_ids)
+            .fetch_all(&state.pool)
+            .await?;
+    let mut notified: Vec<Uuid> = Vec::new();
+    for (id,) in rows {
+        if !notified.contains(&id) {
+            notified.push(id);
+            crate::oidc::fire_backchannel_logout(state, id).await;
+        }
+    }
+    Ok(notified)
 }
 
 /// Revokes every session of `user_id` except `keep`.

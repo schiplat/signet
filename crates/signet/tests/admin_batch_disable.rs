@@ -15,8 +15,14 @@
 
 mod common;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::{Form, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use http_body_util::BodyExt;
 use sqlx::PgPool;
 use tower::ServiceExt;
@@ -257,4 +263,134 @@ async fn every_account_in_the_batch_is_audited() {
     .await;
 
     common::delete_user(&state.pool, caller).await;
+}
+
+/// The relying party stub: records every `logout_token` it is sent, so the
+/// assertion can be about the notification, not just the delete.
+type LogoutTokens = Arc<Mutex<Vec<String>>>;
+
+#[tokio::test]
+async fn a_batch_disable_notifies_the_relying_party_of_what_it_revoked() {
+    let Some(state) = common::state_with(|cfg| cfg.outbound_allow_private = true).await else {
+        return;
+    };
+
+    // The stub RP, reachable because this state allows loopback outbound.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the RP stub");
+    let stub_addr = listener.local_addr().expect("stub address");
+    let received: LogoutTokens = Arc::new(Mutex::new(Vec::new()));
+    let stub_calls = Arc::clone(&received);
+    let stub = Router::new().route(
+        "/backchannel",
+        axum::routing::post(move |Form(form): Form<HashMap<String, String>>| {
+            let calls = Arc::clone(&stub_calls);
+            async move {
+                if let Some(token) = form.get("logout_token") {
+                    calls.lock().expect("the stub lock").push(token.clone());
+                }
+                StatusCode::OK
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        axum::serve(listener, stub).await.expect("stub serves");
+    });
+
+    let client_id = format!("bc-{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO client_apps \
+             (id, client_id, client_secret_hash, redirect_uris, \
+              backchannel_logout_uri, ip_allowlist_enabled) \
+         VALUES ($1, $2, 'test', ARRAY['http://localhost/cb'], $3, FALSE)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(&client_id)
+    .bind(format!("http://{stub_addr}/backchannel"))
+    .execute(&state.pool)
+    .await
+    .expect("insert the RP client");
+
+    let (caller, cookie) = common::admin_cookie(&state).await;
+    let granted = common::create_user(&state.pool, "").await;
+    let ungranted = common::create_user(&state.pool, "").await;
+    let client_for_cleanup = client_id.clone();
+
+    common::with_users(
+        state.clone(),
+        vec![granted, ungranted],
+        move |state, users| async move {
+            // The consent is what puts the client in the notification's reach; the
+            // second subject deliberately never granted it. Both lose sessions.
+            sqlx::query(
+                "INSERT INTO oauth_consents (id, user_id, client_id, scopes) \
+             VALUES ($1, $2, $3, 'openid')",
+            )
+            .bind(Uuid::new_v4())
+            .bind(users[0])
+            .bind(&client_id)
+            .execute(&state.pool)
+            .await
+            .expect("grant the client");
+            for user in &users {
+                signet::auth::session::create_session(&state.pool, *user, 1, None, None)
+                    .await
+                    .expect("create a session");
+            }
+            // The token's `sub` is the account's OIDC subject, not its row id.
+            let (subject,): (String,) = sqlx::query_as("SELECT sub FROM users WHERE id = $1")
+                .bind(users[0])
+                .fetch_one(&state.pool)
+                .await
+                .expect("read the granted account's subject");
+
+            let (status, body) = call(
+                &common::admin_router(&state),
+                &cookie,
+                "POST",
+                "/admin/users/batch-disable",
+                Some(serde_json::json!({ "ids": users })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "body: {body}");
+            assert_eq!(body, r#"{"disabled":2}"#);
+
+            let tokens = received.lock().expect("the stub lock").clone();
+            assert_eq!(
+                tokens.len(),
+                1,
+                "only the subject that granted the client is notified"
+            );
+
+            // The notification is a Signet-signed JWT; its payload names the
+            // revoked subject, the notified client and the logout event.
+            let parts: Vec<&str> = tokens[0].split('.').collect();
+            let payload = URL_SAFE_NO_PAD
+                .decode(parts[1])
+                .expect("decode the logout token payload");
+            let claims: serde_json::Value =
+                serde_json::from_slice(&payload).expect("parse the logout token claims");
+            assert_eq!(
+                claims["sub"], subject,
+                "the notified subject is the one that lost a session"
+            );
+            assert_eq!(claims["aud"], client_id, "the token names the RP");
+            assert!(
+                claims["events"]
+                    .get("http://schemas.openid.net/event/backchannel-logout")
+                    .is_some(),
+                "the back-channel-logout event member is present: {:?}",
+                claims["events"]
+            );
+        },
+    )
+    .await;
+
+    common::delete_user(&state.pool, caller).await;
+    sqlx::query("DELETE FROM client_apps WHERE client_id = $1")
+        .bind(client_for_cleanup)
+        .execute(&state.pool)
+        .await
+        .expect("remove the RP client");
 }
