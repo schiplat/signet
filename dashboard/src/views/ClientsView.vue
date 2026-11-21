@@ -180,10 +180,12 @@ function openCreate() {
   formIpAllowlist.value = false;
   formAllowedCidrs.value = "";
   formAdvancedOpen.value = false;
+  error.value = "";
   showCreate.value = true;
 }
 
 function openEdit(c: AdminClient) {
+  error.value = "";
   editing.value = c;
   editRedirects.value = c.redirect_uris.join("\n");
   editPostLogoutRedirects.value = (c.post_logout_redirect_uris || []).join("\n");
@@ -204,6 +206,11 @@ async function onCreate() {
     const redirect_uris = parseLines(formRedirects.value);
     const post_logout_redirect_uris = parseLines(formPostLogoutRedirects.value);
     const scopes = parseLines(formScopes.value);
+    if (scopes.length && !scopes.includes("openid")) {
+      error.value = "Scopes must include openid";
+      creating.value = false;
+      return;
+    }
     const allowed_cidrs = parseLines(formAllowedCidrs.value);
     let extra: Record<string, unknown> | null = null;
     if (formExtraClaims.value.trim()) {
@@ -246,6 +253,12 @@ async function onSaveEdit() {
   error.value = "";
   saving.value = true;
   try {
+    const scopes = parseLines(editScopes.value);
+    if (!scopes.includes("openid")) {
+      error.value = "Scopes must include openid";
+      saving.value = false;
+      return;
+    }
     let extra: Record<string, unknown> | null = null;
     if (editExtraClaims.value.trim()) {
       try {
@@ -262,7 +275,7 @@ async function onSaveEdit() {
       grant_types: editGrants.value,
       extra_claims: extra,
       backchannel_logout_uri: editBackchannel.value.trim() || null,
-      scopes: parseLines(editScopes.value),
+      scopes,
       ip_allowlist_enabled: editIpAllowlist.value,
       allowed_cidrs: parseLines(editAllowedCidrs.value),
     });
@@ -642,6 +655,19 @@ async function onTestDrive(c: AdminClient) {
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
             <div>
+              <label :for="`${cc}-backchannel`" class="mb-1 block text-[12px] font-medium">
+                Back-channel logout URI
+              </label>
+              <textarea
+                :id="`${cc}-backchannel`"
+                v-model="formBackchannel"
+                rows="2"
+                placeholder="https://app.example.com/auth/backchannel-logout"
+                class="field-input min-h-[3.5rem] resize-y py-2 font-mono text-xs"
+              />
+              <p class="type-meta mt-1">Signet POSTs a signed logout token here when the user signs out.</p>
+            </div>
+            <div>
               <label :for="`${cc}-scopes`" class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea
                 :id="`${cc}-scopes`"
@@ -673,6 +699,7 @@ async function onTestDrive(c: AdminClient) {
               />
             </div>
 </template>
+            <p v-if="error" class="field-error">{{ error }}</p>
             <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">
                 Cancel
@@ -735,6 +762,19 @@ async function onTestDrive(c: AdminClient) {
               <p class="type-meta mt-1">One URI per line (RP-initiated logout)</p>
             </div>
             <div>
+              <label :for="`${ce}-backchannel`" class="mb-1 block text-[12px] font-medium">
+                Back-channel logout URI
+              </label>
+              <textarea
+                :id="`${ce}-backchannel`"
+                v-model="editBackchannel"
+                rows="2"
+                placeholder="https://app.example.com/auth/backchannel-logout"
+                class="field-input min-h-[3.5rem] resize-y py-2 font-mono text-xs"
+              />
+              <p class="type-meta mt-1">Signet POSTs a signed logout token here when the user signs out.</p>
+            </div>
+            <div>
               <label :for="`${ce}-scopes`" class="mb-1 block text-[12px] font-medium">Scopes</label>
               <textarea
                 :id="`${ce}-scopes`"
@@ -767,6 +807,7 @@ async function onTestDrive(c: AdminClient) {
                 class="field-input min-h-[5rem] resize-y py-2 font-mono text-xs"
               />
             </div>
+            <p v-if="error" class="field-error">{{ error }}</p>
             <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="editing = null">Cancel</UiButton>
               <UiButton type="submit" size="sm" :disabled="saving">
