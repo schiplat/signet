@@ -1959,7 +1959,10 @@ pub async fn disable_users(state: &AppState, ids: &[Uuid]) -> AppResult<Vec<(Uui
         tx.commit().await?;
     }
     let ids: Vec<Uuid> = disabled.iter().map(|(id, _)| *id).collect();
-    crate::auth::session::revoke_sessions_for(&state.pool, &ids).await?;
+    // The same funnel the single-user disable uses: sessions revoked and the
+    // subjects that lost one told via back-channel logout, so a bulk disable
+    // is not a slower path to an RP session that outlives its account.
+    crate::auth::session::revoke_sessions_for_notifying(state, &ids).await?;
     // Retire delegated refresh tokens along with the sessions, so a batch
     // disable cannot leave OAuth clients minting tokens for frozen accounts.
     for id in &ids {

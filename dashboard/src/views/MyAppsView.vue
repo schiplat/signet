@@ -103,6 +103,7 @@ function openCreate() {
   formName.value = "";
   formRedirects.value = "";
   formScopes.value = "";
+  error.value = "";
   showCreate.value = true;
 }
 
@@ -111,6 +112,11 @@ async function onCreate() {
   creating.value = true;
   try {
     const scopes = parseLines(formScopes.value);
+    if (scopes.length && !scopes.includes("openid")) {
+      error.value = "Scopes must include openid";
+      creating.value = false;
+      return;
+    }
     const res = await createMyClient({
       client_name: formName.value,
       redirect_uris: parseLines(formRedirects.value),
@@ -372,6 +378,7 @@ async function onDelete(c: SelfClient) {
               />
               <p class="type-meta mt-1">Optional — leave empty for the defaults.</p>
             </div>
+            <p v-if="error" class="field-error">{{ error }}</p>
             <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="showCreate = false">
                 Cancel
@@ -417,6 +424,7 @@ async function onDelete(c: SelfClient) {
                 class="field-input font-mono text-xs"
               />
             </div>
+            <p v-if="error" class="field-error">{{ error }}</p>
             <div class="mt-6 flex justify-end gap-3 border-t border-border/40 pt-5">
               <UiButton type="button" variant="ghost" size="sm" @click="editing = null">
                 Cancel

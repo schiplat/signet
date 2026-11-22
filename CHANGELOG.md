@@ -4,6 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 semantic versioning.
 
+## [Unreleased]
+
+### Fixed
+
+- **Batch disable now sends OIDC Back-Channel Logout** like the single-user
+  path: `POST /admin/users/batch-disable` (and the bulk disable helper behind
+  it) revoked sessions silently, leaving a relying party's session alive until
+  its access token expired even though a one-account disable would have
+  notified it. The delete keeps its single-statement shape and `RETURNING`
+  drives the notification, so only subjects that actually lost a session are
+  told.
+
 ## [0.6.4] - 2026-11-20
 
 Dashboard accessibility and polish: every dialog becomes a real dialog,
