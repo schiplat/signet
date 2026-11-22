@@ -169,7 +169,7 @@ Signet exposes four surfaces; the full references live in `docs/`:
 | **Release Signet Binary** | `v*` tag (or manual) | Multi-arch release binaries → GitHub Release |
 | **Build Signet Image** | After binary release succeeds | Multi-arch runtime image (`linux/amd64`, `linux/arm64`) from prebuilt binaries → **ACR** + **Docker Hub** (`${DOCKERHUB_USERNAME}/signet`) |
 
-Tag a release (example): `git tag -a v0.6.4 -m v0.6.4 && git push origin v0.6.4`.
+Tag a release (example): `git tag -a v0.6.5 -m v0.6.5 && git push origin v0.6.5`.
 
 Deploy layout: [`docs/deploy.md`](./docs/deploy.md). Compose files under [`deploy/`](./deploy/) (`docker-compose.yml`) and [`build/docker-compose.yml`](./build/docker-compose.yml)
 (`docker compose -f build/docker-compose.yml --profile dev up -d db`).

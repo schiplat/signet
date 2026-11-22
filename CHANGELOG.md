@@ -6,6 +6,12 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-22
+
+Client form completion: the dashboard can now set the back-channel logout URI
+the API always accepted, and bulk disables no longer leave relying parties
+holding a live session.
+
 ### Fixed
 
 - **Batch disable now sends OIDC Back-Channel Logout** like the single-user
@@ -15,6 +21,30 @@ semantic versioning.
   notified it. The delete keeps its single-statement shape and `RETURNING`
   drives the notification, so only subjects that actually lost a session are
   told.
+- **The Clients page renders the Back-channel logout URI field** (Dashboard →
+  Clients, create and edit): `client_apps.backchannel_logout_uri` was accepted
+  and used by the API, but no input existed, so it could not be set from the
+  dashboard.
+
+### Added
+
+- **Scopes must include `openid`** is validated before submit in the Clients
+  create/edit and My apps create dialogs, matching the backend rule. An empty
+  scopes field on create still takes the default trio; clearing it on edit is
+  rejected rather than surfacing a distant 400.
+
+### Changed
+
+- **Dialog submit errors render inside the dialog.** The page-level banner sat
+  behind the teleported modal, so backend failures (invalid redirect URI,
+  duplicate client_id, …) were invisible while the dialog stayed open.
+
+### Security
+
+- **`url` 2.5.8 → 2.5.9** (RUSTSEC-2026-0592): `Url::origin()` could overflow the
+  stack on nested `blob:` URLs. Signet parses client-supplied redirect and
+  logout URIs, so the dependency is on an input path; the bump is lockfile-only
+  because the manifest already required `2`.
 
 ## [0.6.4] - 2026-11-20
 
